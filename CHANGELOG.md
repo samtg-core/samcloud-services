@@ -1,3 +1,13 @@
+# Connect root preparation to supervisor phase hints — 27 October 2026
+
+Allow explicit trusted scheduler construction through Supervisor/GatewayQueue;
+defaults keep Arbiter. Notify a controller before the capacity dispatch gate and
+when owner end is still retaining its logical slot. Accepted running work drains,
+then the same hook exposes physical ENDING without waiting for logical closure.
+Service-owned preparation tasks retain cleanup across observer disconnects.
+No new poll, deadline, request-controlled selection or bootstrap activation.
+Root controller/capacity/event feeds and host/native qualification remain open.
+
 # Check fresh aggregate device headroom — 27 October 2026
 
 Check current device usage as well as available host RAM and reported model

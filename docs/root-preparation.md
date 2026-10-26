@@ -80,3 +80,34 @@ The [staged whole-root model binding](root-models.md) now connects actual
 ModelManager accounting and explicit drained-end to these control boundaries.
 It remains explicitly attached/uninstalled; source/supervisor/bootstrap and
 operator integration plus real host/process/cache qualification remain open.
+
+
+## Explicit supervisor construction and phase wakeups
+
+Supervisor and GatewayQueue accept an optional trusted internal journal_factory
+with Arbiter's (path, stint_policy=...) constructor contract. Defaults still use
+Arbiter. No HTTP field or current bootstrap selects this alternate scheduler.
+Its existing provider-identity, legacy-drain and journal-reopen guards apply.
+
+The synchronous on_resource_demand(resource) hook runs before the cached capacity
+check in pump, including an unavailable capacity notification. It is a hint for
+a controller to withdraw readiness and register coalesced service-owned work
+through Supervisor.prepare; it is never an admission receipt or a polling loop.
+An exception leaves the accepted call queued and does not dispatch backend work.
+Callbacks must avoid recursively pumping their own demand hint when publishing
+new readiness. This hook is deliberately separate from the old post-logical-end
+on_job_boundary callback, whose default behavior is unchanged.
+
+Owner end while the job is still owned also pumps the demand hook. A running
+child finishes naturally; its completion pumps again, exposing physical ENDING
+while the logical parent still owns its slot. An end between calls reaches that
+same hook immediately. Cleanup registered via prepare stays service-owned after
+an HTTP observer leaves and must drain before Supervisor.close. Neither a demand
+hint nor a task completing stands in for positive backend absence and exact
+physical settlement.
+
+The qualified coalesced root controller/capacity source, registry-change and host
+observation feeds, bootstrap/operator construction and migration are still to be
+connected. These hooks alone do not activate whole-root scheduling or qualify
+physical/native/image generation. Standalone Hermes first-image work remains
+independent.

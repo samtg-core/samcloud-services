@@ -27,13 +27,17 @@ class BackendEnded(Exception):
 
 
 class Supervisor:
-    def __init__(self, path, execute, permitted, on_finished=None, *, stint_policy=None):
+    def __init__(self, path, execute, permitted, on_finished=None, *, stint_policy=None, journal_factory=None):
         """One scheduler per journal; execute/permitted are trusted service code.
 
         execute(grant, request) is async and must include the model's in_flight
         claim for the actual worker lifetime. permitted(resource) is a current
         cached capacity/work-mode check (no blocking I/O); UNKNOWN returns False. Resource mapping
         comes from service configuration, not the caller's request body.
+
+        journal_factory is an explicit trusted internal constructor with the
+        same (path, stint_policy=...) contract as Arbiter. It is never selected
+        by request data. Default construction and legacy behavior are unchanged.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -42,11 +46,13 @@ class Supervisor:
             if os.fstat(self._lock).st_mode & 0o077:
                 raise PermissionError('supervisor lock must be private')
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.journal = Arbiter(path, stint_policy=stint_policy)
+            self.journal = (Arbiter if journal_factory is None else journal_factory)(path, stint_policy=stint_policy)
             # Owning the local scheduler lock establishes the former scheduler
             # is gone, NOT that its remote/backend compute is gone.
             self.journal.quarantine_running()
         except BaseException:
+            if hasattr(self, 'journal'):
+                self.journal.close()
             os.close(self._lock)
             raise
         self.execute = execute
@@ -54,6 +60,10 @@ class Supervisor:
         self.permitted_model = None
         self.on_finished = on_finished
         self.on_job_boundary = None
+        # Synchronous, loop-local hint before the dispatch gate. A qualified
+        # controller may withdraw permission and register coalesced work via
+        # prepare(); the hint itself is never physical admission.
+        self.on_resource_demand = None
         self.workers = {}
         self.preparations = set()
         self.wakeups = {}
@@ -82,6 +92,12 @@ class Supervisor:
         previous = self.wakeups.pop(resource, None)
         if previous is not None:
             previous.cancel()
+        if self.on_resource_demand is not None:
+            try:
+                self.on_resource_demand(resource)
+            except Exception:
+                logging.getLogger(__name__).warning('Resource demand observation incomplete')
+                return None
         if not self.permitted(resource):
             return None
         item = self.journal.dispatch_next(resource,permitted_model=self.permitted_model)
@@ -108,9 +124,10 @@ class Supervisor:
 
     def capacity_available(self, resource):
         """After fresh trusted capacity evidence, wake saved work without a caller."""
-        if not self.permitted(resource):
-            return None
-        self.journal.capacity_available(resource)
+        if self.permitted(resource):
+            self.journal.capacity_available(resource)
+        # Even unavailable capacity can require admission preparation or
+        # cleanup of an ENDING physical root. The pump still gates dispatch.
         return self.pump(resource)
 
     async def _drive(self, item):
@@ -169,6 +186,12 @@ class Supervisor:
             # Registered before returning the logical receipt. HTTP observer
             # cancellation cannot cancel this service-owned reconciliation.
             self.prepare(self._job_boundaries(resources))
+        if self.on_resource_demand is not None:
+            for row in rows:
+                if row['state'] == 'owned':
+                    # Root mode retains this logical slot until physical end
+                    # is acknowledged. Waiting for !owns_job would deadlock.
+                    self.pump(row['resource'])
         return rows
 
     def release(self, grant_id, owner):

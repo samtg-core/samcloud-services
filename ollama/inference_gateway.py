@@ -81,7 +81,7 @@ class StreamCapture:
 
 
 class GatewayQueue:
-    def __init__(self, path, service, models, permitted, *, stint_policy=None):
+    def __init__(self, path, service, models, permitted, *, stint_policy=None, journal_factory=None):
         """models is trusted exact-name -> resource configuration, never a client field."""
         self.service = service
         self.models = dict(models)
@@ -90,7 +90,7 @@ class GatewayQueue:
         self.inputs = InferenceInputs(Path(path).parent/'inputs',
             service.config.WHISPER_MAX_UPLOAD_MB*1024*1024)
         self.supervisor = Supervisor(path, self.execute, permitted,
-            on_finished=self.cleanup_input, stint_policy=stint_policy)
+            on_finished=self.cleanup_input, stint_policy=stint_policy, journal_factory=journal_factory)
 
     def resolve(self, model):
         if model not in self.models:
