@@ -216,8 +216,13 @@ class ResourceHandoff:
                     and getattr(mm,'vlm_process',None) is not None
                     and mm.vlm_process.poll() is not None
                     for model,mm in manager.models.items())
-                if foreign is None and manager.models and not own_debt and not ended_child:
+                if (foreign is None and manager.models and not own_debt and not ended_child
+                        and not saved['recovering']):
                     return self._finish()
+                # A parent can end after a replacement spawned but before its
+                # readiness was proved. Its saved recovery is still teardown
+                # debt: reconcile the exact child/claim below, even without a
+                # foreign waiter. Never clear that intent by declaring idle.
                 rows = await source_call(lambda:manager.sc.list_leases(
                     resource_id=self.resource, service_id=self.initial.service))
                 for model, mm in list(manager.models.items()):

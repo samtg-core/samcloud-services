@@ -182,6 +182,11 @@ This recovery has synthetic tests only. Cold process restart without an owned
 process handle, expired accounting debt and actual registry/MLX behavior remain
 unqualified. Saved teardown/accounting debt must reconcile; it is not undone by
 parent ownership.
+If a parent ends while a replacement has a saved readiness/recovery intent,
+the handoff reconciles that replacement through confirmed unload, fresh absence
+and exact claim settlement even when no foreign waiter exists. It cannot declare
+idle merely because the process is alive. Unknown absence or cleanup retains the
+saved recovery/allocation and keeps dispatch paused; retry uses the same claim.
 
 ## Validation and rollback
 

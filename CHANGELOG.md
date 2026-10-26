@@ -29,6 +29,9 @@ their identity transaction. Stale copied contexts may only read acknowledged
 saved children by exact operation and request digest, without POST/intake. Real
 Relay overlap is verified to refuse unlinked admission, with same-parent recovery
 at a later owning turn; automatic gateway input retry remains unqualified.
+Ending a parent no longer drops a replacement's saved recovery/readiness intent.
+With no waiter, that debt still follows confirmed unload/absence/exact-claim
+settlement; uncertainty remains paused and retries the same saved allocation.
 
 # Changelog & Working Notes
 

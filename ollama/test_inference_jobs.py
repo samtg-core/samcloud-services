@@ -215,6 +215,65 @@ class RequesterJobs(unittest.TestCase):
 
 
 class PhysicalJobOwnership(SharedResourceHandoff):
+    async def end_parent_during_unconfirmed_vision_recovery(self):
+        from .manager import VLM_MODELS
+        from .inference_reservation import InitialReservations
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        vision = next(iter(VLM_MODELS.values()))['default']
+        self.journal.stint_policy = StintPolicy()
+        grant = self.journal.submit('dev', 'main', 'gpu', vision, 'work_session')
+        call = self.journal.enqueue(grant['id'], 'dev', 'main', {}, job_key='turn')
+        self.journal.dispatch_next('gpu'); self.journal.finish(call['id'], {})
+        self.initial = InitialReservations(self.root/'vision-initial.sqlite', self.client,
+            registry_owner='owner', service_id='model-service', models={vision:'gpu'})
+        self.initial.reserve(vision, resource='gpu', service_id='model-service', memory_mb=100, ttl_seconds=3600)
+        self.manager.initial_reservations = self.initial
+        self.runtime.settings = SimpleNamespace(models={vision:'gpu'})
+        self.actor = type(self.actor)(self.runtime)
+        self.client.get_resource = lambda _:dict(id='gpu',expiry_policy='hold',leases=[self.row])
+        child = Mock(); child.poll.return_value = 1
+        self.models.clear(); self.running = []
+        self.models[vision] = SimpleNamespace(name=vision, lease_id='owned', memory_mb=100,
+            managed=True, vlm_process=child)
+        def lose_readiness(mm, *, confirm_admission, resume):
+            confirm_admission()
+            child.poll.return_value = None  # alive replacement, health still unknown
+            raise OSError('lost readiness observation')
+        with patch('ollama.vision_lifecycle.recover_owned_vision', side_effect=lose_readiness):
+            self.assertEqual((await self.actor.begin())['phase'], 'uncertain')
+        self.assertEqual(self.actor.snapshot()['recovering'], [vision])
+        self.journal.end_job('dev', 'turn')
+        self.assertFalse(self.journal.owns_job('gpu'))
+        self.client.request_lease.reset_mock()
+        self.actor = type(self.actor)(self.runtime)  # saved recovery survives actor restart
+        return vision
+
+    async def test_ended_parent_reconciles_saved_replacement_instead_of_declaring_idle(self):
+        vision = await self.end_parent_during_unconfirmed_vision_recovery()
+        with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=True):
+            self.assertEqual((await self.actor.begin())['phase'], 'idle')
+        self.manager.unload.assert_called_once_with(vision, require_confirmed=True)
+        self.client.release_lease.assert_called_once_with('owned')
+        self.client.request_lease.assert_not_called()
+        self.assertEqual(self.initial.snapshot(vision)['state'], 'retired')
+        self.assertEqual(self.actor.snapshot()['recovering'], [])
+        self.assertEqual(self.models, {})
+
+    async def test_ended_parent_retains_recovery_debt_until_cleanup_is_proved(self):
+        vision = await self.end_parent_during_unconfirmed_vision_recovery()
+        with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=False):
+            self.assertEqual((await self.actor.begin())['phase'], 'uncertain')
+        self.assertEqual(self.actor.snapshot()['recovering'], [vision])
+        self.assertEqual(self.actor.snapshot()['allocations'][0]['lease_id'], 'owned')
+        self.client.release_lease.assert_not_called()
+        self.assertFalse(self.capacity.permitted('gpu'))
+        with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=True):
+            self.assertEqual((await self.actor.begin())['phase'], 'idle')
+        self.client.release_lease.assert_called_once_with('owned')
+        self.client.request_lease.assert_not_called()
+        self.assertEqual(self.initial.snapshot(vision)['state'], 'retired')
+
     def own_idle_parent_with_absent_model(self):
         self.journal.stint_policy = StintPolicy()
         grant = self.journal.submit('dev', 'main', 'gpu', 'qwen', 'work_session')
