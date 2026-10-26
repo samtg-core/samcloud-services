@@ -6,8 +6,8 @@ the same. Existing grants, accepted execution receipts and legacy calls retain
 their frozen identities across retries and reconnects.
 
 Source review450/c832 found lifecycle gaps. This candidate must remain disabled
-on every real parent until an explicit operator end path is repaired and qualified, along
-with the remaining review findings. Interrupted/failed work must stay recoverable;
+on every real parent pending qualification of the remaining review findings.
+Interrupted/failed work must stay recoverable;
 neither session reset nor process exit alone is proof that it can be released.
 The first repair addresses offline journal recovery and late-intake finish
 fencing. Subsequent repairs cover native compression lineage and nonresident
@@ -96,14 +96,55 @@ Existing native foreground ownership links main calls, active compaction and
 originating tools. Concurrent tools get distinct call identities under one parent.
 Detached/background work does not borrow that parent. Copied contexts must still
 prove a live owning turn. An incomplete/interrupted/error attempt preserves its
-parent for recovery. Only authoritative successful on_session_end queues the
-durable job finish. The existing per-profile lifecycle outbox retries metadata
+parent for recovery. Authoritative successful on_session_end or the explicit
+operator command below queues the durable job finish. The per-profile outbox retries metadata
 without resubmitting inference. All opted-in queued client types run its relay.
 
 An old sc-queue-wait annotation on linked work refuses rather than silently
 yielding the whole parent. Native explicit yield and qualified child delegation
 still require their final integration; no model-specific prompt workaround is
 part of this candidate.
+
+## Explicit operator finish
+
+In the owning shipping Hermes environment, with this source on Python's import
+path, inspect the exact profile and interrupted session:
+
+```sh
+python -m ollama.requester_job --home /absolute/owning/profile --session SESSION status
+python -m ollama.requester_job --home /absolute/owning/profile --session SESSION finish --revision REVISION
+```
+
+Copy `REVISION` from `parent.revision` in the status receipt. It fences the exact
+parent, attempt and state: if another turn resumed it meanwhile, inspect again.
+The command accepts an original session or a previously persisted compression
+alias. It does not discover an arbitrary latest session or repair missing native
+lineage; use the original owning session in the publication-before-alias window.
+Status is local and submits nothing. An unknown profile is never created.
+
+Finish atomically seals that parent's bound native attempts and saves one exact
+outbox event before network I/O. It does not stop a process, cancel an execution,
+unload a model or release a registry claim. The service seals new intake and
+drains accepted children through its existing reconciliation boundary. Uncertain
+children retain ownership until their own recovery proves an end.
+
+The command uses only the owning provider's `SAMCLOUD_QUEUE_API_KEY` and
+`SAMCLOUD_QUEUE_BASE_URL` environment. No credentials are passed on the command
+line or copied from another seat. No redirects, environment proxy or fallback
+provider is selected. An HTTPS endpoint is required. A bounded HTTP observation
+is not an inference deadline. Only this exact finish event is delivered; other
+conversations' events are untouched by the command.
+
+Keep the JSON finish receipt. `delivery: pending` means the local intent is safe
+but service acknowledgement is unconfirmed (also returned when credentials are
+not available). Re-run the same finish command with the same revision when the
+owning provider is available; it resends the saved event even across process exit
+and cannot finish a later parent. `delivery: accepted` proves service receipt,
+not backend absence or physical cleanup. A zero exit code means durable local
+intent, so automation must inspect `delivery`; a stale revision exits 2 unchanged.
+Use the accepted execution IDs to collect ongoing work; never replace inference
+to make an operator finish appear successful. Reset, interruption, max-iterations,
+process exit and elapsed time still do not automatically finish a parent.
 
 ## Physical ownership and recovery
 

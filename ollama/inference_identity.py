@@ -65,6 +65,10 @@ class IdentityStore:
             CREATE TABLE IF NOT EXISTS native_requester_job (
                 scope TEXT PRIMARY KEY, job_key TEXT NOT NULL, turn_id TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('active','recoverable')));
+            CREATE TABLE IF NOT EXISTS native_operator_finish (
+                scope TEXT NOT NULL, revision TEXT NOT NULL, job_key TEXT NOT NULL,
+                turn_id TEXT NOT NULL, event_id TEXT NOT NULL,
+                PRIMARY KEY(scope,revision));
             CREATE TABLE IF NOT EXISTS tool_aux_intent (
                 scope TEXT NOT NULL, turn_id TEXT NOT NULL, api_request_id TEXT NOT NULL,
                 tool_call_id TEXT NOT NULL, step INTEGER NOT NULL, operation TEXT NOT NULL UNIQUE,
@@ -441,6 +445,60 @@ class IdentityStore:
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
+
+    def native_job_status(self, scope):
+        """Exact owning scope only; revision fences a later resumed attempt."""
+        required(scope)
+        row = self.db.execute('SELECT job_key,turn_id,state FROM native_requester_job WHERE scope=?',
+                              (scope,)).fetchone()
+        if row is None:
+            return None
+        revision = hashlib.sha256(encoded([scope, *row]).encode()).hexdigest()
+        return dict(job_key=row[0], turn_id=row[1], state=row[2], revision=revision)
+
+    def request_native_job_finish(self, scope, revision):
+        """Explicit operator intent, not inferred abandonment or cancellation.
+
+        Seal every attempt bound to this parent before any late intake. The
+        service still drains accepted/uncertain children; the exact finish is
+        durable even when delivery fails or this process exits immediately.
+        """
+        required(scope); required(revision)
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            prior = self.db.execute('SELECT job_key,turn_id,event_id FROM native_operator_finish '
+                                   'WHERE scope=? AND revision=?', (scope, revision)).fetchone()
+            if prior is not None:
+                result = dict(job_key=prior[0], turn_id=prior[1], event_id=prior[2], revision=revision)
+            else:
+                current = self.native_job_status(scope)
+                if current is None or current['revision'] != revision:
+                    raise Conflict('parent changed since status; inspect the exact owning session again')
+                key = current['job_key']
+                self.db.execute('INSERT OR IGNORE INTO native_turn_end SELECT scope,turn_id '
+                    'FROM native_job_binding WHERE scope=? AND job_key=?', (scope,key))
+                boundary = 'operator-finish:' + revision
+                self._queue_job_finishes(scope, boundary, (key,))
+                event = self.db.execute('SELECT id FROM lifecycle_outbox WHERE scope=? AND turn_id=? '
+                                        'AND grant_key=?', (scope,boundary,key)).fetchone()[0]
+                self.db.execute('INSERT INTO native_operator_finish VALUES(?,?,?,?,?)',
+                                (scope,revision,key,current['turn_id'],event))
+                self.db.execute('DELETE FROM native_requester_job WHERE scope=? AND job_key=?', (scope,key))
+                result = dict(job_key=key,turn_id=current['turn_id'],event_id=event,revision=revision)
+            self.db.execute('COMMIT')
+            return {**result, 'state':'finish_requested'}
+        except BaseException:
+            self.db.execute('ROLLBACK')
+            raise
+
+    def operator_finish_delivery(self, event_id):
+        required(event_id)
+        row = self.db.execute('SELECT rowid,id,grant_key,call_key,job_key,state FROM lifecycle_outbox '
+                              "WHERE id=? AND kind='job_finish'", (event_id,)).fetchone()
+        if row is None:
+            raise Conflict('saved operator finish event is missing')
+        return dict(cursor=row[0],id=row[1],grant_key=row[2],expected_call_key=row[3],
+                    job_key=row[4],state=row[5],kind='job_finish')
 
     def pending_events(self, limit=32, *, after=0):
         if type(limit) is not int or not 1 <= limit <= 1000:

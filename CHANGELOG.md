@@ -12,6 +12,15 @@ remain unqualified. See docs/requester-jobs.md for contracts, tests and rollback
 The prior staged durable queue/compaction snapshot is committed separately for
 honest review lineage; this branch does not claim a production activation.
 
+Source review450/c832 repairs: qualified offline recovery, stale late-intake
+fencing, committed native compression lineage across live rotation/process exit,
+and absent initial-reservation reconciliation while retaining parent ownership.
+The explicit owning-profile/session operator CLI now persists a revision-fenced
+finish intent before HTTP observation, replays only that exact end event after
+lost acknowledgement and lets the service drain accepted work. No timer-based
+abandonment, inference resubmission or direct physical release was added.
+Remaining lifecycle/capacity review findings keep this candidate disabled.
+
 # Changelog & Working Notes
 
 Project history and current state. This is a living document.

@@ -36,8 +36,13 @@ Both main queued-provider types and every Hermes role use the same policy. A
 verified native foreground owner links text, originating tools and compaction to
 one parent. Concurrent tools have distinct calls under that parent; detached
 background work stays independent. Error/interruption retains the parent for
-recovery. Only authoritative successful native completion finishes it through
+recovery. Authoritative successful native completion finishes it through
 the durable metadata outbox. A tool finishing does not finish the parent.
+An operator can explicitly seal/drain an interrupted parent with
+`python -m ollama.requester_job --home /absolute/owning/profile --session SESSION
+finish --revision REVISION`, after inspecting that session with `status`.
+The durable receipt survives process exit and failed acknowledgement; it never
+cancels accepted work or finishes a later resumed attempt from stale status.
 
 The queued context engine supplies its owning SessionDB for compaction-lineage
 recovery. Foreground intake without that binding refuses locally. A committed
