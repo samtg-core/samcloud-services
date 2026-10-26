@@ -1,3 +1,14 @@
+# Qualify native parent/tool continuity through root runtime — 27 October 2026
+
+Add ten actual Hermes AIAgent/plugin/SDK -> local authenticated root-runtime HTTP
+round trips for both execution/stint providers. Plain completion, sequential and
+parallel vision tools, interruption/resume and a tool beyond a generic test guard
+retain the same physical root; another requester starts on a different root only
+after native finish. Registry/backends/processes are synthetic; no weights/GPU or
+production identity/queue is used. Compaction remains disabled in these cases,
+so its full inference path and actual deployment stay separate qualifications.
+No production behavior, profile, launcher or root policy is changed.
+
 # Connect explicit root startup and service lifecycle — 27 October 2026
 
 Add trusted RootQueueStartup and RootQueueRuntime; existing launcher/default mode

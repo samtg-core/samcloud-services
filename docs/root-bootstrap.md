@@ -78,6 +78,15 @@ cross-repository cases use actual staged registry authentication/SQL/HTTP to pro
 explicit parent finish and queued-child runtime restart without a new root claim.
 Physical providers, memory sensors and process identity are deterministic fixtures.
 
+The native root round-trip suite additionally drives actual AIAgent, plugins,
+queued SDK and local authenticated HTTP through this runtime for both execution
+and stint providers. Ten cases cover a plain final response, vision tool child,
+parallel tool children, interruption/resume and a child outlasting a deliberately
+short generic test guard with its qualified per-tool override. All native calls
+keep one exact physical root; the competing requester begins on a distinct root
+only after native finish. These cases use synthetic registry/provider processes
+and disable compaction; they are not compaction inference or deployed acceptance.
+
 No production root policy, token, launcher or profile is changed. Before rollout,
 qualify actual host/process/cache sensors, native full turn/compaction/tool and
 operator recovery, inherited legacy claims/accepted work, same-envelope delegated
