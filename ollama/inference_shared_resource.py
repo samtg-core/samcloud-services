@@ -196,6 +196,18 @@ class ResourceHandoff:
                             confirm_admission=lambda:self._confirm_retained_vision(mm),
                             resume=name in saved['recovering']))
                         self._save('draining', recovering=[])
+                # Ownership retains resident work, not a stale allocation for
+                # a backend affirmatively proved absent. The capacity source
+                # cannot admit this parent's next child until that exact saved
+                # initial intent is reconciled. Unknown identity/absence/release
+                # keeps this handoff uncertain and dispatch paused.
+                for name in self.runtime.settings.models:
+                    if name in manager.models:
+                        continue
+                    intent = self.initial.snapshot(name)
+                    if intent is not None and intent['state'] in ('unknown', 'handed_off', 'retiring'):
+                        await source_call(lambda:self.initial.reconcile_absent(
+                            name, confirm_absent=self._absent))
                 return self._finish()
             if not allocations:
                 from .manager import VLM_MODELS

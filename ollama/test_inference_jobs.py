@@ -215,6 +215,55 @@ class RequesterJobs(unittest.TestCase):
 
 
 class PhysicalJobOwnership(SharedResourceHandoff):
+    def own_idle_parent_with_absent_model(self):
+        self.journal.stint_policy = StintPolicy()
+        grant = self.journal.submit('dev', 'main', 'gpu', 'qwen', 'work_session')
+        call = self.journal.enqueue(grant['id'], 'dev', 'main', {}, job_key='turn')
+        self.journal.dispatch_next('gpu')
+        self.journal.finish(call['id'], {})
+        self.models.clear()
+        self.running = []
+
+    async def test_owned_parent_reconciles_absent_handed_off_reservation(self):
+        self.own_idle_parent_with_absent_model()
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'handed_off')
+        self.assertEqual((await self.actor.begin())['phase'], 'idle')
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'retired')
+        self.client.release_lease.assert_called_once_with('owned')
+        self.manager.unload.assert_not_called()
+        self.assertTrue(self.journal.owns_job('gpu'))
+
+    async def test_owned_parent_retains_unknown_allocation_and_blocks_dispatch(self):
+        self.own_idle_parent_with_absent_model()
+        with self.initial._owned() as db:
+            db.execute("UPDATE initial_reservations SET state='unknown',lease_id=NULL")
+        self.assertEqual((await self.actor.begin())['phase'], 'uncertain')
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'unknown')
+        self.client.release_lease.assert_not_called()
+        self.assertFalse(self.capacity.permitted('gpu'))
+        self.assertTrue(self.journal.owns_job('gpu'))
+
+    async def test_owned_parent_does_not_infer_absence_from_missing_inventory(self):
+        self.own_idle_parent_with_absent_model()
+        self.running = [{'name': 'qwen'}]
+        self.assertEqual((await self.actor.begin())['phase'], 'uncertain')
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'handed_off')
+        self.client.release_lease.assert_not_called()
+        self.assertTrue(self.journal.owns_job('gpu'))
+
+    async def test_owned_parent_recovers_lost_release_reply_on_same_reservation(self):
+        self.own_idle_parent_with_absent_model()
+        def lost_reply(lease_id):
+            self.release(lease_id)
+            raise OSError('lost exact DELETE receipt')
+        self.client.release_lease.side_effect = lost_reply
+        self.assertEqual((await self.actor.begin())['phase'], 'uncertain')
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'retiring')
+        self.assertEqual((await self.actor.begin())['phase'], 'idle')
+        self.assertEqual(self.initial.snapshot('qwen')['state'], 'retired')
+        self.client.release_lease.assert_called_once_with('owned')
+        self.assertTrue(self.journal.owns_job('gpu'))
+
     async def test_retained_recovery_requires_fresh_exact_active_registry_charge(self):
         from types import SimpleNamespace
         model = SimpleNamespace(name='qwen', lease_id='owned', memory_mb=100)

@@ -6,12 +6,13 @@ the same. Existing grants, accepted execution receipts and legacy calls retain
 their frozen identities across retries and reconnects.
 
 Source review450/c832 found lifecycle gaps. This candidate must remain disabled
-on every real parent until missing reservation reconciliation under retained
-ownership and an explicit operator end path are repaired and qualified, along
+on every real parent until an explicit operator end path is repaired and qualified, along
 with the remaining review findings. Interrupted/failed work must stay recoverable;
 neither session reset nor process exit alone is proof that it can be released.
 The first repair addresses offline journal recovery and late-intake finish
-fencing; it does not close the other review findings or authorize activation.
+fencing. Subsequent repairs cover native compression lineage and nonresident
+initial-reservation reconciliation; they do not close the other review findings
+or authorize activation.
 
 The native compaction lineage repair uses the context engine's existing
 post-commit on_session_start boundary. A verified SessionDB compression child
@@ -33,6 +34,12 @@ identity transaction using a database-free predicate.
 Deferred native notifications can bind the committed child transcript before a
 live turn exists. That only advances context data; it creates no scheduling
 alias or ownership. Resume/adoption recovers ownership at the next verified turn.
+
+While a parent owns the resource, the handoff still reconciles saved initial
+intents for a backend outside manager inventory. Unknown, handed-off or retiring
+intents use the existing exact-lease and fresh provider-absence checks. A lost
+release receipt retries the same saved ID; unknown identity or absence keeps
+dispatch paused. Resident work and the parent's scheduling identity are retained.
 
 This is the inference service's requester scheduler. The shared Samcloud registry
 remains the only physical allocation authority. Cross-service child delegation is
