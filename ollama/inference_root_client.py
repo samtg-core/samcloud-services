@@ -1,4 +1,4 @@
-"""Staged registry-root control client; not wired into native/model admission.
+"""Staged registry-root control client; explicitly wired by trusted root startup.
 
 The journal saves identity/intent, never capacity or dispatch permission. A
 receipt is historical after disconnect. No background polling, allocation retry,
@@ -160,9 +160,10 @@ class RegistryRootClient:
     def close(self):
         self._http.close()
 
-    def negotiate(self):
-        if self._verified:
+    def negotiate(self,*,refresh=False):
+        if self._verified and not refresh:
             return
+        self._verified=False
         response=self._http.get('capabilities/lease-roots')
         response.raise_for_status()
         cap=response.json()

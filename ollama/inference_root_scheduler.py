@@ -23,7 +23,7 @@ def _unexpired(lease):
 
 
 class RootPreparingArbiter(Arbiter):
-    """Explicit alternate scheduler. No existing bootstrap selects this class.
+    """Explicit alternate scheduler. Only trusted root startup selects this class.
 
     The preparation ID, NOT the reusable logical job/session, identifies one
     physical root intent in RootIntentStore. Explicit yield can later create a

@@ -1,3 +1,19 @@
+# Connect explicit root startup and service lifecycle — 27 October 2026
+
+Add trusted RootQueueStartup and RootQueueRuntime; existing launcher/default mode
+is unchanged. Verify own provider identity, fresh registry capability, exact
+shared/hold resource and cold backend before mounting one root-aware dispatcher.
+Begin host-UNKNOWN; intake alone cannot allocate. Refuse legacy unfinished queue
+migration and active accounting/maintenance. Restore routes/manager on failed
+mount, with no legacy fallback. Runtime quiescence is an owned unbounded drain
+and qualified cold suspension retaining parent/claim/accepted IDs, followed by
+the actual manager maintenance drain before client/journal close. Unknown work
+or absence refuses. Status exposes bounded root intent/source diagnostics.
+A failed capability refresh clears the prior positive. Actual server/API tests
+and staged-registry runtime restart prove same accepted child/claim; physical
+providers/sensors are fixtures. No deployed policy, launcher, profile or root
+activation. Native/operator/migration/delegated qualification remains open.
+
 # Include pool watcher in manager shutdown drain — 27 October 2026
 
 The manager starts seven maintenance tasks when exo is enabled; the old stop

@@ -3,7 +3,8 @@
 RootController explicitly connects one RootPreparingArbiter, Supervisor and
 RootModelBinding for one physical resource. It is a capacity source and a
 coalesced preparation driver, not an allocator. Only the shared registry admits
-physical roots. No current service bootstrap, profile or capability selects it.
+physical roots. Only explicit staged RootQueueStartup selects it; deployed
+launchers/profiles and cross-service capability remain unchanged.
 Explicit construction now attaches it to the manager's existing source protocol.
 Standalone first native image/endpoint work stays independent.
 
@@ -14,7 +15,8 @@ factory. Attach RootModelBinding to its exact journal and a qualified cold
 ModelManager, then construct RootController(supervisor, binding,
 work_permitted=True/False). Unknown work permission is rejected. A mismatched or
 already active supervisor/source is rejected rather than silently replaced.
-Default bootstrap continues to use the existing journal/source.
+Default bootstrap continues to use the existing journal/source. The explicit
+root startup and lifecycle contract is documented in root-bootstrap.md.
 
 The controller installs only the loop-local dispatch guards and synchronous
 resource-demand hook. An enqueue, owner end, release or completed child already
@@ -107,8 +109,9 @@ settlement.
 Qualify any direct registry push-change mapping; the current host-sample path
 already causes a fresh root/resource read, using the existing observation loop.
 Keep finite registry health maintenance under its accepted root contract while
-waiting/loading; those heartbeats are distinct from job deadlines. Integrate explicit bootstrap/operator
-construction and graceful drain, and qualify migration of legacy accepted calls,
+waiting/loading; those heartbeats are distinct from job deadlines. Explicit
+startup/lifespan construction and drain are staged in root-bootstrap.md. Qualify
+the deployed launcher/operator path and migration of legacy accepted calls,
 initial reservations and residency before enabling any live root policy.
 
 Qualify actual host memory/process/cache sensors, cold restart/recovery, delegated

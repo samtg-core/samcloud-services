@@ -351,8 +351,9 @@ async def lifespan(app: FastAPI):
 
     if inference_startup is not None:
         from .inference_bootstrap import QueueStartup
-        if not isinstance(inference_startup,QueueStartup):
-            raise TypeError('Trusted QueueStartup binding required')
+        from .inference_root_bootstrap import RootQueueStartup
+        if not isinstance(inference_startup,(QueueStartup,RootQueueStartup)):
+            raise TypeError('Trusted QueueStartup or RootQueueStartup binding required')
         # Must precede adoption and background maintenance. A failed durable
         # startup propagates; it cannot fall through to unjournaled legacy work.
         await inference_startup.start(sys.modules[__name__])
@@ -785,6 +786,9 @@ async def status():
             'queued_behind':state['contender'] if state['phase'] != 'idle' else None,
             'allocations':state['allocations'],
             'capacity':runtime.capacity_source.last.get(state['resource'],{})}
+    root_snapshot=getattr(runtime,'root_snapshot',None)
+    if root_snapshot is not None:
+        out['requester_root']=root_snapshot()
     return out
 
 

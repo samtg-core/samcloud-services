@@ -1,4 +1,4 @@
-"""Explicit event-driven root/model preparation. Not installed by bootstrap.
+"""Explicit event-driven root/model preparation. Default startup is unchanged.
 
 The service owns the task; queue/host/registry events are hints, never grants.
 Only the shared registry allocates. No idle retry loop, job timer or inferred
