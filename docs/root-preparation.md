@@ -106,8 +106,8 @@ an HTTP observer leaves and must drain before Supervisor.close. Neither a demand
 hint nor a task completing stands in for positive backend absence and exact
 physical settlement.
 
-The qualified coalesced root controller/capacity source, registry-change and host
-observation feeds, bootstrap/operator construction and migration are still to be
-connected. These hooks alone do not activate whole-root scheduling or qualify
+The staged RootController now consumes these hooks (see root-controller.md).
+Actual registry-change and host observation feeds, bootstrap/operator construction
+and migration still need shipping integration. These hooks alone do not activate whole-root scheduling or qualify
 physical/native/image generation. Standalone Hermes first-image work remains
 independent.

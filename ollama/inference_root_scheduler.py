@@ -1,4 +1,4 @@
-"""Staged requester/physical-root boundary, not installed in the supervisor.
+"""Staged requester/physical-root boundary, not selected by shipping bootstrap.
 
 Logical preparation precedes physical admission; it never starts an execution.
 Only the registry owns capacity. A qualified controller supplies fresh exact
@@ -95,6 +95,23 @@ class RootPreparingArbiter(Arbiter):
             # or execution is marked running; dispatch stays blocked below.
             self.db.execute("UPDATE requester_jobs SET state='owned',updated=? WHERE id=?",(time.time(),job['id']))
             return self.preparation(identifier)
+
+    def next_child(self,preparation_id):
+        """Loop-local preparation target, never a dispatch or admission receipt.
+
+        Match the owned-job candidate order. Running/uncertain work anywhere on
+        the resource prevents a model switch; an observer cannot override it.
+        """
+        prep=self.preparation(preparation_id)
+        if prep['state'] not in ('prepared','admitted') or self.db.execute(
+                "SELECT 1 FROM executions e JOIN grants g ON g.id=e.grant_id WHERE g.resource=? AND e.state IN ('running','uncertain')",
+                (prep['resource'],)).fetchone():
+            return None
+        row=self.db.execute("""SELECT e.id AS execution_id,g.model FROM executions e
+            JOIN grants g ON g.id=e.grant_id WHERE e.job_id=? AND e.state='queued'
+            AND g.state IN ('queued','granted') AND g.release_requested=0
+            ORDER BY e.created,e.id LIMIT 1""",(prep['job_id'],)).fetchone()
+        return dict(row) if row is not None else None
 
     def withdraw_root(self,preparation_id):
         """Synchronous admission withdrawal before any handoff/failed observation."""

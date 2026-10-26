@@ -1,3 +1,16 @@
+# Drive root/model preparation from service events — 27 October 2026
+
+Add an explicitly constructed RootController connecting qualified scheduler,
+supervisor and actual manager binding. Coalesce demand/change hints into one
+service-owned task; fresh registry/model/aggregate host evidence gates dispatch.
+An owning parent retains its place through text/vision/text, then explicit end
+strictly reconciles/settles before the next requester. Unknown startup/control
+replies retain exact intent, with no idle retry loop, job deadline or duplicate
+provider launch. Newer events fence stale preparation; own publish cannot recurse.
+Actual event feeds/bootstrap/operator/migration and physical/native/delegated
+qualification remain open. No current runtime/capability/profile is activated.
+See docs/root-controller.md for integration contracts and remaining limits.
+
 # Connect root preparation to supervisor phase hints — 27 October 2026
 
 Allow explicit trusted scheduler construction through Supervisor/GatewayQueue;

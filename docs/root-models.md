@@ -1,7 +1,8 @@
 # Whole-root model binding — staged, not installed
 
 `RootModelBinding` explicitly attaches the actual `ModelManager` to one existing
-registry root. No supervisor, launcher, source or bootstrap selects it. The
+registry root. No shipping bootstrap selects it; the staged RootController can
+explicitly bind it to a qualified supervisor. The
 registry root, service scheduler preparation and provider model intents are
 separate records: only the registry allocates physical capacity.
 
@@ -101,7 +102,8 @@ cold recovery, service-worker ownership and operator fencing on the shipping hos
 
 ## Remaining integration
 
-Source/supervisor/bootstrap/operator wiring, legacy accepted-work/claim migration,
+The staged RootController connects supervisor/model readiness and cleanup.
+Actual event-feed/bootstrap/operator wiring, legacy accepted-work/claim migration,
 same-envelope delegated child client, real native recovery/yield and rollout/
 rollback are still required. Existing capabilities continue to advertise no
 cross-service delegation. First native standalone image/endpoint qualification
