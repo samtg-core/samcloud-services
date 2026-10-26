@@ -13,6 +13,19 @@ neither session reset nor process exit alone is proof that it can be released.
 The first repair addresses offline journal recovery and late-intake finish
 fencing; it does not close the other review findings or authorize activation.
 
+The native compaction lineage repair uses the context engine's existing
+post-commit on_session_start boundary. A verified SessionDB compression child
+and live owning Relay turn record a profile-local alias to the logical owner.
+New calls under the child session then retain the original job, even while the
+Relay lease still names the old transcript session. Tools, compaction, API
+completion and later recovery use the same explicit lineage. Existing accepted
+call records are not rewritten. An unknown/uncommitted or closed copied context
+cannot create an alias; a live foreground with missing lineage refuses intake
+rather than sending an unlinked call behind itself. No Hermes core hook was added.
+This qualifies the live committed-notification path. Recovery after process exit
+between SessionDB publication and alias persistence remains unqualified; the
+candidate must not be activated with that reconnect window unresolved.
+
 This is the inference service's requester scheduler. The shared Samcloud registry
 remains the only physical allocation authority. Cross-service child delegation is
 not implemented; the capabilities response explicitly advertises it as false.

@@ -66,8 +66,15 @@ def register_hooks(ctx):
         call = key(host, provider, session_id, api_request_id)
         with lock:
             pending.pop(call, None)
+        if host.job_continuity:
+            from agent.relay_runtime import active_turn
+            turn = active_turn()
+            if (turn is not None and turn.turn_id == turn_id
+                    and turn.lease.profile_key == host.scope
+                    and not live_owner(host, session_id, turn_id)):
+                raise LocalSourceRefused('foreground session changed without committed compaction lineage')
         try:
-            source = HeldSource.capture(host.scope, session_id, 'main', conversation_history,
+            source = HeldSource.capture(host.scope, host.owner_session(session_id), 'main', conversation_history,
                                         turn_id=turn_id, api_request_id=api_request_id)
         except UnpersistedSource:
             source = host.detached_source(session_id,turn_id,conversation_history)
@@ -103,9 +110,10 @@ def register_hooks(ctx):
 
     def live_owner(host, session_id, turn_id):
         from agent.relay_runtime import active_turn
-        turn = active_turn(session_id)
+        turn = active_turn()
         return (turn is not None and not turn.closed and not turn.lease.released
-                and turn.turn_id == turn_id and turn.lease.profile_key == host.scope)
+                and turn.turn_id == turn_id and turn.lease.profile_key == host.scope
+                and host.owner_session(turn.lease.session_id) == host.owner_session(session_id))
     ctx.register_hook('pre_llm_call', began)
     ctx.register_hook('pre_api_request', before)
     def completed(*, provider='', session_id='', turn_id='', api_request_id='', response=None, **kwargs):

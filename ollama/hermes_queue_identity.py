@@ -118,9 +118,59 @@ class HostBindings:
         self.compaction_owner = ContextVar('queue_compaction_owner', default=None)
         self.tool = ContextVar('queue_tool_source',default=None)
         self.tool_api = ContextVar('queue_tool_api',default=None)
+        if job_continuity:
+            store = IdentityStore(self.path)
+            try:
+                store.db.execute('''CREATE TABLE IF NOT EXISTS native_session_alias (
+                    profile TEXT NOT NULL, session_id TEXT NOT NULL, owner_session TEXT NOT NULL,
+                    parent_session TEXT NOT NULL, PRIMARY KEY(profile,session_id))''')
+            finally:
+                store.close()
+
+    def owner_session(self, session_id):
+        """Only explicit, committed native compaction lineage shares ownership."""
+        if not self.job_continuity:
+            return session_id
+        store = IdentityStore(self.path)
+        try:
+            row = store.db.execute('SELECT owner_session FROM native_session_alias '
+                'WHERE profile=? AND session_id=?', (self.scope, session_id)).fetchone()
+            return row[0] if row is not None else session_id
+        finally:
+            store.close()
+
+    def link_compaction_session(self, parent_session, child_session, turn_id):
+        """The context engine calls this only after durable native publication."""
+        required(parent_session); required(child_session); required(turn_id)
+        if not self.job_continuity or parent_session == child_session:
+            return
+        store = IdentityStore(self.path)
+        try:
+            store.db.execute('BEGIN IMMEDIATE')
+            parent = store.db.execute('SELECT owner_session FROM native_session_alias '
+                'WHERE profile=? AND session_id=?', (self.scope, parent_session)).fetchone()
+            owner = parent[0] if parent is not None else parent_session
+            scope = owner_scope(self.scope, owner)
+            active = store.db.execute('SELECT turn_id FROM native_requester_job WHERE scope=?',
+                                      (scope,)).fetchone()
+            if active is None or active[0] != turn_id or not store.foreground_turn(scope, turn_id):
+                raise LocalSourceRefused('compaction has no matching live native parent')
+            old = store.db.execute('SELECT owner_session,parent_session FROM native_session_alias '
+                'WHERE profile=? AND session_id=?', (self.scope, child_session)).fetchone()
+            if old is not None and old != (owner, parent_session):
+                raise LocalSourceRefused('compaction child already has another owner')
+            store.db.execute('INSERT OR IGNORE INTO native_session_alias VALUES(?,?,?,?)',
+                             (self.scope, child_session, owner, parent_session))
+            store.db.execute('COMMIT')
+        except BaseException:
+            store.db.execute('ROLLBACK')
+            raise
+        finally:
+            store.close()
 
     @contextmanager
     def tool_scope(self,session_id,turn_id,api_request_id,tool_call_id):
+        session_id = self.owner_session(session_id)
         ids=(owner_scope(self.scope,session_id),turn_id,api_request_id,tool_call_id)
         store=IdentityStore(self.path)
         try:
@@ -208,13 +258,14 @@ class HostBindings:
         # Native observer hooks are fail-open. A rejected new snapshot must not
         # leave the previous request's keys usable by the custom provider.
         self.main.set(None)
-        self.main.set(HeldSource.capture(self.scope, session_id, 'main', conversation_history,
+        self.main.set(HeldSource.capture(self.scope, self.owner_session(session_id), 'main', conversation_history,
                                         turn_id=turn_id, api_request_id=api_request_id))
 
     def post_api_request(self, **unused):
         self.main.set(None)
 
     def begin_foreground(self,session_id,turn_id):
+        session_id = self.owner_session(session_id)
         store=IdentityStore(self.path)
         try:
             scope = owner_scope(self.scope,session_id)
@@ -232,6 +283,7 @@ class HostBindings:
         An ordinary foreground persistence failure must still refuse, never
         silently switch to detached execution. Payload is private and durable.
         """
+        session_id = self.owner_session(session_id)
         store=IdentityStore(self.path)
         try:
             scope=owner_scope(self.scope,session_id)
@@ -243,6 +295,7 @@ class HostBindings:
             self.scope,session_id,messages,purpose='detached_fork')
 
     def finish_turn(self, session_id, turn_id):
+        session_id = self.owner_session(session_id)
         store = IdentityStore(self.path)
         try:
             return store.finish_turn(owner_scope(self.scope, session_id), turn_id)
@@ -250,6 +303,7 @@ class HostBindings:
             store.close()
 
     def observe_native_outcome(self, session_id, turn_id, *, completed, failed, interrupted):
+        session_id = self.owner_session(session_id)
         store = IdentityStore(self.path)
         try:
             scope = owner_scope(self.scope, session_id)
@@ -268,6 +322,7 @@ class HostBindings:
             store.close()
 
     def dependency_wait(self, session_id, turn_id, api_request_id, tool_call_id):
+        session_id = self.owner_session(session_id)
         store = IdentityStore(self.path)
         try:
             return store.dependency_wait(owner_scope(self.scope,session_id),
@@ -276,6 +331,7 @@ class HostBindings:
             store.close()
 
     def complete_api(self, session_id, turn_id, api_request_id, tool_call_ids):
+        session_id = self.owner_session(session_id)
         store = IdentityStore(self.path)
         try:
             store.complete_api(owner_scope(self.scope,session_id),turn_id,api_request_id,tool_call_ids)
@@ -291,6 +347,7 @@ class HostBindings:
 
     @contextmanager
     def compression_scope(self, session_id, messages, *, purpose='compression', persist_unstored=False, owner_provider=None):
+        session_id = self.owner_session(session_id)
         source = self.compaction_resume.get()
         if source is not None:
             source = CompactionSource.load(Path(self.path).parent / 'compaction-sources',
@@ -314,6 +371,7 @@ class HostBindings:
 
     @contextmanager
     def resume_compression(self, session_id, operation):
+        session_id = self.owner_session(session_id)
         source = CompactionSource.load(Path(self.path).parent / 'compaction-sources',
             self.scope, session_id, operation)
         token = self.compaction_resume.set(source)

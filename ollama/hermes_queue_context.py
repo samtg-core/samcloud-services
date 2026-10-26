@@ -48,6 +48,23 @@ class QueuedContextCompressor(ContextCompressor):
         # Never deepcopy a bound native SessionDB or any mutable session state.
         return type(self)(**deepcopy(self._queue_constructor_options))
 
+    def on_session_start(self, session_id, **kwargs):
+        host = host_for_home(self._queue_home)
+        parent = kwargs.get('old_session_id')
+        if (host.job_continuity and kwargs.get('boundary_reason') == 'compression'
+                and parent and parent != session_id):
+            from agent.relay_runtime import active_turn
+            from .inference_identity import LocalSourceRefused
+            turn = active_turn()
+            db = kwargs.get('session_db', getattr(self, '_session_db', None))
+            child = db.get_session(session_id) if db is not None else None
+            if (turn is None or turn.lease.profile_key != host.scope
+                    or host.owner_session(turn.lease.session_id) != host.owner_session(parent)
+                    or not isinstance(child, dict) or child.get('parent_session_id') != parent):
+                raise LocalSourceRefused('native compaction lineage is not committed under this owner')
+            host.link_compaction_session(parent, session_id, turn.turn_id)
+        super().on_session_start(session_id, **kwargs)
+
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         host = host_for_home(self._queue_home)
         # Relay is bound by the native turn facade, not an observer hook worker.
@@ -55,11 +72,12 @@ class QueuedContextCompressor(ContextCompressor):
         owner_provider = None
         if self.provider == 'samcloud-queue-stint' or (host.job_continuity and self.provider in MAIN_PROFILES):
             from agent.relay_runtime import active_turn
-            turn = active_turn(self._session_id)
-            if turn is not None and turn.lease.profile_key == host.scope:
+            turn = active_turn() if host.job_continuity else active_turn(self._session_id)
+            if (turn is not None and turn.lease.profile_key == host.scope
+                    and host.owner_session(turn.lease.session_id) == host.owner_session(self._session_id)):
                 turn_id, session_id, provider = turn.turn_id, self._session_id, self.provider
                 def owner_provider():
-                    current = active_turn(session_id)
+                    current = active_turn() if host.job_continuity else active_turn(session_id)
                     if (current is turn and not current.closed and not current.lease.released
                             and self._session_id == session_id and self.provider == provider):
                         return turn_id, self.model
