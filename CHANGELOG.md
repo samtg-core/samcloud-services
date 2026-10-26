@@ -1,3 +1,14 @@
+# Reconcile root integration docs and child-service boundary — 27 October 2026
+
+Correct stale client/preparation text that still said source/supervisor/startup
+and model loading were unwired. Link the implemented local runtime/native proof
+without implying deployment. Record the still-unimplemented service handoff:
+requester owns the logical parent; providers attest only their own backends and
+use their own credentials; child binds consent to its durable accepted job;
+unknown cleanup retains debt. Registry offer/accept/return is not a child SDK or
+native bridge. Delegation stays false, nested-frame support is unqualified, and
+first standalone image/endpoint stays independent. Documentation only.
+
 # Qualify real native compaction inference on the retained root — 27 October 2026
 
 Four actual automatic-compaction round trips (both main providers, in-place and

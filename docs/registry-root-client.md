@@ -1,10 +1,13 @@
-# Registry root client — staged, not connected to admission
+# Registry root client — explicitly connected, not deployed
 
 `ollama.inference_root_client` supplies durable control operations for the staged
-registry explicit-end root protocol. Nothing constructs it in the manager,
-bootstrap, native adapter or image service. It does not enable cross-service
-inference capabilities. Do not activate requester jobs from these client tests.
-First standalone image generation remains independent of compound-root support.
+registry explicit-end root protocol. Explicit RootQueueStartup now connects it
+through the model binding/controller to actual service startup and shutdown;
+no deployed launcher, profile or registry policy selects it. Actual native
+parent/tool/compaction HTTP flows are tested with synthetic providers, alongside
+separate real staged-registry contract tests. This does not enable cross-service
+inference capabilities or qualify deployed physical behavior. First standalone
+image generation remains independent of compound-root support.
 
 Create `RootIntentStore` at an owned private file, explicitly bound to the HTTPS
 registry `/api/v1` origin, the provider's verified actor and registered service.
@@ -59,13 +62,16 @@ registry router, real bearer verifier and SQLite allocator, including lost
 post-commit replies and one-time promotion. They are control-plane evidence,
 not Metal/GPU or deployed endpoint acceptance.
 
-Next integrate the controller with fresh physical admission before load, native
-job completion/drain, exact backend cleanup, same-envelope child transfer and
-operator reconciliation. Do not independently request an image claim while a
-text root holds capacity and waits. That remains the unqualified self-deadlock
-this component will help repair; this client alone does not fix or enable it.
+The [preparation scheduler](root-preparation.md), [model binding](root-models.md)
+and [explicit startup/runtime](root-bootstrap.md) now connect fresh root admission,
+model loading, parent completion, strict cleanup and retained-ownership restart.
+Native pipeline and temporary registry evidence are separate from actual host/
+process/cache, long health, credential/operator recovery and deployed acceptance.
+No default startup is changed and legacy accepted work is not silently migrated.
 
-The [staged preparation scheduler](root-preparation.md) now implements the local
-pre-dispatch/end boundaries. It is not constructed by the service supervisor or
-bootstrap. The actual model loader/capacity source and delegated child path still
-need coherent integration and physical qualification.
+[Cross-service child handoff](root-child-handoff.md) remains unimplemented at the
+service boundary. Do not independently request an image claim while a text root
+holds capacity and waits: the child would queue behind its own parent. This
+client's begin operation creates its own root; it is not child acceptance and
+must not be used to consume a delegated claim. Cross-service capability stays
+false until the complete parent/child path is qualified.

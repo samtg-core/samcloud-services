@@ -1,7 +1,8 @@
 # Root preparation scheduler — staged, not installed
 
 `RootPreparingArbiter` is an explicit alternate requester scheduler. Production
-bootstrap and `Supervisor` still construct `Arbiter`, not this class. It stores
+bootstrap and Supervisor defaults still construct Arbiter. The explicit local
+RootQueueStartup constructs this class via the trusted journal factory. It stores
 logical preparation/recovery identity in the existing inference journal; the
 shared registry remains the only physical admission authority.
 
@@ -41,7 +42,8 @@ No caller may manufacture a registry receipt or treat this as host permission.
 4. `dispatch_next` still requires the normal per-model/headroom permission. It
    rechecks the saved preparation inside the ordinary dispatch transaction and
    uses the existing accepted call state machine. Root bytes do not prove the
-   model fits, owns its process or is safe to load. No model loader is wired yet.
+   model fits, owns its process or is safe to load. RootModelBinding now wires
+   the actual loader to these checks; physical host qualification remains separate.
 5. Logical finish/yield drains all accepted children. Once drained, the
    preparation becomes `ending`, blocks dispatch and retains the logical slot.
    A running/uncertain child prevents this transition; no clock ends it.
@@ -57,7 +59,8 @@ Withdrawal persists before a child transfer or failed observation. Restart has
 no cached permission and requires a fresh exact root confirmation. An ordinary
 `Arbiter` refuses a journal with unfinished preparations or an unfinished logical
 job that already used this root protocol. Operator recovery must use the matching
-qualified scheduler/identity; current bootstrap/recovery CLI is not wired for it.
+qualified scheduler/identity. Explicit root startup is wired locally; the
+operator CLI and deployed selection/recovery still need qualification.
 
 ## Limits before installation
 
@@ -67,26 +70,29 @@ Separate pinned cross-repository cases connect preparation to the real staged
 registry router/client and ledger with temporary tokens. Backend/model work in
 those tests is synthetic, not Metal qualification.
 
-Still required: source/supervisor/bootstrap and operator CLI integration; legacy
-residency migration; actual loader/unload/renew accounting through one root;
-physical absence/process identity/headroom; same-envelope delegated child/client
-handoff; reconnect and explicit yield across the full native path; rollout and
-rollback. No production capability, profile, queue, model or claim is changed.
+Source/supervisor/manager accounting and explicit startup/lifespan integration
+are now staged (root-bootstrap.md). Native main/tool/automatic-compaction flows
+also have synthetic-provider HTTP evidence; separate staged-registry cases cover
+physical control and runtime restart. Still required: deployed operator/native
+qualification, legacy residency/accepted-work migration, actual physical absence/
+process identity/headroom/health, same-envelope delegated child/client handoff,
+real reconnect/yield and rollout/rollback. No production capability, profile, queue, model or claim is changed.
 The first standalone image and service endpoint remain Hermes-owned stages;
 this protocol is not an additional first-image prerequisite.
 
 
 The [staged whole-root model binding](root-models.md) now connects actual
 ModelManager accounting and explicit drained-end to these control boundaries.
-It remains explicitly attached/uninstalled; source/supervisor/bootstrap and
-operator integration plus real host/process/cache qualification remain open.
+It remains uninstalled. Explicit source/supervisor/startup integration is staged;
+operator and deployed native/host/process/cache qualification remain open.
 
 
 ## Explicit supervisor construction and phase wakeups
 
 Supervisor and GatewayQueue accept an optional trusted internal journal_factory
 with Arbiter's (path, stint_policy=...) constructor contract. Defaults still use
-Arbiter. No HTTP field or current bootstrap selects this alternate scheduler.
+Arbiter. No HTTP field or default bootstrap selects this alternate scheduler; only
+trusted RootQueueStartup does.
 Its existing provider-identity, legacy-drain and journal-reopen guards apply.
 
 The synchronous on_resource_demand(resource) hook runs before the cached capacity
@@ -107,8 +113,9 @@ hint nor a task completing stands in for positive backend absence and exact
 physical settlement.
 
 The staged RootController now consumes these hooks (see root-controller.md).
-Actual registry-change and host observation feeds, bootstrap/operator construction
-and migration still need shipping integration. These hooks alone do not activate whole-root scheduling or qualify
+The actual manager observation/source protocol and explicit startup/lifespan now
+connect them. Direct registry push mapping, deployed operator selection and
+legacy migration still need qualification. These hooks alone do not activate whole-root scheduling or qualify
 physical/native/image generation. Standalone Hermes first-image work remains
 independent.
 

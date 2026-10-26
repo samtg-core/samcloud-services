@@ -99,6 +99,10 @@ It also verifies that compaction need not be the turn's first inference request.
 Actual hardware/provider responses, long real health maintenance and deployed
 profile behavior remain unqualified.
 
+The later cross-service boundary and credential/job authorization requirements
+are recorded in [root-child-handoff.md](root-child-handoff.md). Same-service vision
+tool coverage must not be represented as image-service delegation acceptance.
+
 No production root policy, token, launcher or profile is changed. Before rollout,
 qualify actual host/process/cache sensors, native full turn/compaction/tool and
 operator recovery, inherited legacy claims/accepted work, same-envelope delegated
