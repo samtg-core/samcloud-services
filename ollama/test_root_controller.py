@@ -304,3 +304,61 @@ def test_root_shutdown_requires_pause_then_fences_late_health_and_host_events(co
         with pytest.raises(asyncio.CancelledError):await x.e.binding.wait_for_renewal()
         with pytest.raises(Conflict):x.e.m.load_ollama_model('text')
     asyncio.run(scenario())
+
+
+def test_explicit_restart_suspension_keeps_parent_and_exact_charged_root(controlled):
+    from .test_root_models import shutdown_fixture
+    async def scenario():
+        x=controlled;shutdown_fixture(x.e);x.s.pump('host/gpu');await drain(x)
+        before=x.e.a._current_preparation('host/gpu')['id']
+        x.c.pause();await x.c.drain()
+        proof=await x.e.binding.suspend_for_restart(observation='fixture-fresh-owned-backend-absence')
+        assert proof['ownership_retained'] and proof['state']=='suspended'
+        assert x.e.m.models=={} and x.e.binding._rows()==[]
+        assert x.e.body['lease']['status']=='active' and x.e.body['state']=='open'
+        assert x.e.a.owns_job('host/gpu') and x.e.a._current_preparation('host/gpu')['id']==before
+        assert x.e.m.shutdown()==[]
+        assert not [p for method,p in x.e.control if p.endswith('/settle') or p.endswith('/roots/end')]
+        x.e.sc.release_lease.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_restart_suspension_false_absence_keeps_control_alive_until_proven(controlled):
+    from .test_root_models import shutdown_fixture
+    async def scenario():
+        x=controlled;tasks=shutdown_fixture(x.e);x.s.pump('host/gpu');await drain(x);x.c.pause()
+        x.e.cold['confirmed']=False
+        with pytest.raises(Conflict):await x.e.binding.suspend_for_restart(observation='fixture-unconfirmed')
+        with pytest.raises(Conflict):x.e.m.shutdown()
+        assert all(not t.cancelled for t in tasks) and x.e.body['lease']['status']=='active'
+        x.e.cold['confirmed']=True
+        await x.e.binding.suspend_for_restart(observation='fixture-current-absence')
+        assert x.e.m.shutdown()==[]
+    asyncio.run(scenario())
+
+
+def test_restart_suspension_does_not_erase_unknown_execution(controlled):
+    async def scenario():
+        x=controlled
+        async def unknown(*_):raise RuntimeError('fixture unconfirmed execution')
+        x.s.execute=unknown;x.s.pump('host/gpu');await drain(x);x.c.pause()
+        with pytest.raises(Conflict):await x.e.binding.suspend_for_restart(observation='fixture-do-not-guess')
+        assert x.e.a.execution(x.e.call['id'],'one')['state']=='uncertain'
+        assert x.e.m.ollama.unloads==[] and x.e.body['lease']['status']=='active'
+    asyncio.run(scenario())
+
+
+def test_suspension_witness_cannot_cover_a_later_backend_load(controlled):
+    from .test_root_models import shutdown_fixture
+    async def scenario():
+        x=controlled;shutdown_fixture(x.e);x.s.pump('host/gpu');await drain(x);x.c.pause()
+        await x.e.binding.suspend_for_restart(observation='fixture-first-absence')
+        x.c.resume()
+        await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0});await drain(x)
+        enqueue(x,'later');await drain(x);x.c.pause()
+        x.e.m.unload('text',force=True,require_confirmed=True)
+        with pytest.raises(Conflict):x.e.m.shutdown()
+        assert x.e.m.ollama.loads==['text','text'] and x.e.body['lease']['status']=='active'
+        await x.e.binding.suspend_for_restart(observation='fixture-later-fresh-absence')
+        assert x.e.m.shutdown()==[]
+    asyncio.run(scenario())

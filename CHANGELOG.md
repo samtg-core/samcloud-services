@@ -1,3 +1,15 @@
+# Suspend root control for restart without losing ownership — 27 October 2026
+
+Add explicit qualified restart suspension alongside strict ordinary shutdown.
+Pause/drain, strictly unload owned backends and freshly prove cold absence before
+stopping control. Keep exact active/queued/lost-ack root intents, logical parent
+and accepted calls durable; send no end/release or fabricated completion.
+Unknown execution/absence refuses. Current-boot scoped evidence expires on new
+backend work; reconstructed control resumes the same preparation and claim.
+Late readiness cannot start a load while paused. Tests cover saved-child resume,
+queued promotion and lost-ack restart against staged registry HTTP, with fake
+physical providers. No live bootstrap, native/GPU qualification or activation.
+
 # Refuse shutdown while root ownership is unresolved — 27 October 2026
 
 Audit root/model/execution/control debt before ANY manager pool release, unload

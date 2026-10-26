@@ -108,14 +108,15 @@ ModelManager.shutdown invokes a root audit BEFORE pool release, model unload or
 cancelling health tasks. An idle backend or empty manager inventory is not proof
 that an admitted, queued, unknown or lost-ACK physical root ended. Unknown model
 intent, unresolved execution, changed bound source, unmatched logical owner or non-terminal client
-receipt refuses shutdown without changing claims or maintenance.
+receipt refuses ordinary shutdown without changing claims or maintenance.
 
 If a controller is attached, its source must first be paused and all supervisor
 backend/input/control preparations drained. Queued accepted work may survive.
 A preparation with no SDK intent row is known never submitted because the SDK
 persists its intent before any HTTP attempt; shutdown suspends that durable
 logical identity without closing it. Once an SDK intent exists, even a missing
-reply requires an exact terminal receipt rather than an empty-inventory guess.
+reply requires an exact terminal receipt rather than an empty-inventory guess,
+unless the explicit qualified suspension below has completed.
 
 A positive physical terminal receipt may precede a failed local logical close.
 With no model/execution/task debt, physical shutdown can proceed while preserving
@@ -131,6 +132,31 @@ cleared, and stopped/preparation entry points refuse before any new root submit.
 The shutdown path creates/ends/releases no root itself. Native/service bootstrap,
 operator orchestration and awaiting manager maintenance workers before closing
 clients/journals still need qualification.
+
+## Explicit restart suspension
+
+`suspend_for_restart(observation=...)` is separate from parent finish and the
+ordinary shutdown audit. A bound paused source, drained tracked work and no
+running/uncertain execution are required. It strictly unloads only known owned
+backends, refuses unresolved model-start debt, and requires a fresh positive
+backend/cache absence observation. It then persists a current-process witness
+bound to provider identity, model-intent history and unfinished preparations.
+New backend work invalidates that witness. A source paused for drain cannot
+admit a new load even if a late observation republishes readiness.
+
+This permits control shutdown while keeping active, queued or lost-ack root
+intents charged and durable. No registry end/release, parent completion, queued
+call cancellation or replacement claim is sent. A fresh controller resumes the
+same saved preparation/call using the existing root client recovery contract.
+The old process witness cannot authorize another stop after restart. Unknown
+execution or false/unknown absence keeps control alive. If health expires during
+the outage, held capacity still needs the existing explicit qualified same-ID
+recovery; elapsed time never proves absence or releases it.
+
+Tests rebuild the manager, scheduler and controller over the same journals and
+exercise actual staged registry admission/promotion/HTTP, with fake physical
+providers. They do not qualify live bootstrap, credential recovery, host sensors,
+maintenance-worker shutdown orchestration or a real process restart.
 
 ## Remaining integration
 

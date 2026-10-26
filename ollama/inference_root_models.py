@@ -8,6 +8,7 @@ from copy import deepcopy
 import asyncio
 from datetime import datetime
 import json
+import hashlib
 import sqlite3
 import threading
 import time
@@ -70,7 +71,7 @@ class RootModelBinding:
         self._health_changed=asyncio.Event()
         self._health_marker=None;self._health_due=None;self._health_ttl=None
         self.on_health_observed=None
-        self._health_stopped=False
+        self._health_stopped=False;self._boot_id=uuid4().hex
         with store._transaction() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS root_model_intents (
                 id TEXT PRIMARY KEY,preparation_id TEXT NOT NULL,resource TEXT NOT NULL,
@@ -78,6 +79,9 @@ class RootModelBinding:
                 state TEXT NOT NULL CHECK(state IN ('loading','resident','unknown','gone')),
                 expected_mb INTEGER NOT NULL,reported_mb INTEGER,observation TEXT)''')
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_root_model ON root_model_intents(resource,model) WHERE state!='gone'")
+            conn.execute('''CREATE TABLE IF NOT EXISTS root_control_suspensions (
+                resource TEXT PRIMARY KEY,boot_id TEXT NOT NULL,observation TEXT NOT NULL,
+                scope_digest TEXT NOT NULL)''')
         self._proxy=_RootOnlyClient(manager.sc)
         manager.sc=self._proxy
         manager.root_binding=self
@@ -146,6 +150,8 @@ class RootModelBinding:
 
     def _admission(self):
         self._mode()
+        if self._source_owner is not None and self._source_owner.paused:
+            raise RootAdmissionDeferred('root_source_paused')
         with self._lock:current=deepcopy(self._permission)
         if current is None:raise RootAdmissionDeferred('root_admission_unknown')
         ident,receipt=current;lease=receipt['lease']
@@ -316,13 +322,76 @@ class RootModelBinding:
         with self.store._transaction() as conn:
             conn.execute("UPDATE root_model_intents SET state='gone',observation=? WHERE id=?",(observation,intent_id))
 
+    def _suspension_digest(self):
+        # Only stable identity/model history, not a lease's changing health,
+        # current holder or a caller prompt. New work/model intent invalidates
+        # the witness; ordinary heartbeat cannot do so accidentally.
+        with self.store._transaction() as conn:
+            intents=[tuple(row) for row in conn.execute(
+                'SELECT job_id,submit_key,root_id,initial_lease_id FROM root_client_intents WHERE resource=? ORDER BY job_id',(self.resource,))]
+            models=[tuple(row) for row in conn.execute(
+                'SELECT id,preparation_id,lease_id,state FROM root_model_intents WHERE resource=? ORDER BY id',(self.resource,))]
+        conn=sqlite3.connect('file:'+str(self.scheduler.path)+'?mode=ro',uri=True)
+        try:preps=conn.execute("SELECT id,job_id FROM requester_root_preparations WHERE resource=? AND state!='complete' ORDER BY id",(self.resource,)).fetchall()
+        finally:conn.close()
+        scope=[self.resource,self.store.registry,self.store.actor,self.store.service,
+               sorted((name,kind.value) for name,kind in self.models.items()),intents,models,preps]
+        return hashlib.sha256(json.dumps(scope,separators=(',',':')).encode()).hexdigest()
+
+    def _has_suspension(self):
+        with self.store._transaction() as conn:
+            row=conn.execute('SELECT * FROM root_control_suspensions WHERE resource=?',(self.resource,)).fetchone()
+        return bool(row and row['boot_id']==self._boot_id and row['scope_digest']==self._suspension_digest())
+
+    async def suspend_for_restart(self,*,observation):
+        """Explicit qualified backend drain while retaining job/root ownership.
+
+        Unlike end, this never sends a registry mutation or fabricates logical
+        completion. Caller pauses/drains the service first. A fresh cold sensor
+        plus no unknown compute permits stopping control while exact charged /
+        queued / unacknowledged physical intents remain durable for reconnect.
+        """
+        self._mode()
+        if not isinstance(observation,str) or not observation.strip() or len(observation)>512:
+            raise ValueError('Fresh suspension observation required')
+        source=self.manager.inference_capacity_source
+        if source is None or source is not self._source_owner or not source.paused:
+            raise Conflict('Paused bound root source required for suspension')
+        def drained():
+            current=asyncio.current_task()
+            if any(not task.done() and task is not current for task in
+                    (*source.supervisor.workers.values(),*source.supervisor.preparations)):
+                raise Conflict('Known service work must drain before suspension')
+            if self.scheduler.db.execute("SELECT 1 FROM executions e JOIN grants g ON g.id=e.grant_id WHERE g.resource=? AND e.state IN ('running','uncertain')",(self.resource,)).fetchone():
+                raise Conflict('Running or uncertain execution requires reconciliation before suspension')
+        drained()
+        self.withdraw()
+        for name,mm in list(self.manager.models.items()):
+            self._owned(mm)
+            result=await source_call(lambda:self.manager.unload(name,force=True,require_confirmed=True))
+            if result.get('status')!='unloaded':raise Conflict('Owned backend cleanup remains unconfirmed')
+        if self._rows():
+            raise Conflict('Unknown model startup requires explicit reconciliation before suspension')
+        if await source_call(self.confirm_cold) is not True:
+            raise Conflict('Fresh backend/cache absence required for suspension')
+        drained()
+        if not source.paused or self.manager.models or self._rows():
+            raise Conflict('Suspension source/backend ownership changed')
+        digest=self._suspension_digest()
+        with self.store._transaction() as conn:
+            conn.execute('INSERT INTO root_control_suspensions VALUES(?,?,?,?) ON CONFLICT(resource) DO UPDATE SET boot_id=excluded.boot_id,observation=excluded.observation,scope_digest=excluded.scope_digest',
+                         (self.resource,self._boot_id,observation,digest))
+        return {'state':'suspended','resource':self.resource,'ownership_retained':True,
+                'backend_absence_observation':observation,'scope_digest':digest}
+
     def assert_shutdown_ready(self):
-        """No mutation or HTTP: prove this manager has no physical root debt.
+        """No mutation or HTTP: audit terminal or explicitly suspended ownership.
 
         Stop new source work and drain tracked tasks before this check. Queued
         calls may remain durable. A preparation with no client intent is known
         never submitted (SDK persists before HTTP); it is suspended, not ended.
-        Unknown/lost-ACK client intent requires an exact terminal receipt.
+        Unknown/lost-ACK intent requires a terminal receipt or a current-boot
+        suspension witness; neither invents completion or releases ownership.
         """
         self._mode(allow_stopped=True)
         source=self.manager.inference_capacity_source
@@ -337,13 +406,13 @@ class RootModelBinding:
         with self.store._transaction() as conn:
             intents={row['job_id']:dict(row) for row in conn.execute(
                 'SELECT * FROM root_client_intents WHERE resource=?',(self.resource,))}
-        receipts={}
+        receipts={};suspended=self._has_suspension()
         for key,row in intents.items():
             try:receipt=json.loads(row['receipt']) if row['receipt'] else None
             except (TypeError,ValueError):receipt=None
             if not isinstance(receipt,dict) or receipt.get('state')!='complete':
-                raise Conflict('Root intent lacks exact terminal acknowledgement; shutdown refused')
-            receipts[key]=receipt
+                if not suspended:raise Conflict('Root intent lacks exact terminal acknowledgement or qualified suspension; shutdown refused')
+            else:receipts[key]=receipt
         conn=sqlite3.connect('file:'+str(self.scheduler.path)+'?mode=ro',uri=True)
         conn.row_factory=sqlite3.Row
         try:
@@ -359,9 +428,9 @@ class RootModelBinding:
         for prep in preps:
             receipt=receipts.get(prep['id'])
             if receipt is None:
-                if any(prep[key] is not None for key in ('root_id','initial_lease_id','current_lease_id')):
+                if not suspended and any(prep[key] is not None for key in ('root_id','initial_lease_id','current_lease_id')):
                     raise Conflict('Root preparation lost its physical receipt; shutdown refused')
-                continue  # No SDK intent: no submit ever started; keep queued identity.
+                continue  # Unsubmitted or explicitly suspended: keep queued identity.
             if prep['root_id'] is not None and any(prep[key]!=receipt.get(key) for key in ('root_id','initial_lease_id')):
                 raise Conflict('Terminal root acknowledgement differs from preparation')
         # A terminal physical receipt may precede logical settlement. Preserve

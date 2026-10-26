@@ -117,3 +117,10 @@ Current tests use deterministic providers/sensors. Registry authentication, SQL,
 lease promotion and control HTTP paths in cross-repo tests are real staged code,
 but they are not GPU/Metal or deployed endpoint acceptance. Cross-service
 capability advertisement remains false.
+
+Explicit restart suspension (root-models.md) drains known owned backends with a
+fresh cold proof while retaining the parent and exact root intent. It is not
+finish/yield and sends no registry release. A paused source refuses new model
+admission even after a late readiness hint. A reconstructed controller must
+observe/recover the same saved root before dispatching the original accepted
+child; no new claim is substituted for a lost acknowledgement.
