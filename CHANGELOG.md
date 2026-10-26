@@ -1,3 +1,17 @@
+# Staged whole-root model accounting — 27 October 2026
+
+Add an explicitly attached RootModelBinding for the actual ModelManager's
+Ollama/VLM load, sizing, owned-handle, unload and renewal paths. Model switches
+reuse one admitted full root; ordinary per-model lease mutation is refused.
+Startup/post-load uncertainty retains durable model debt and owned process
+handles. Strict unload records model absence without releasing the parent.
+Explicit drained-end waits for positive process/cache absence and exact root
+settlement before logical finish. Root health uses its own finite contract,
+not the legacy900-second maintenance sleep or an elapsed-work deadline.
+No bootstrap/source/profile/claim activation. Deterministic providers and real
+registry control tests are not Metal/process/cache qualification. See
+docs/root-models.md for control contracts and remaining integration/recovery.
+
 # Staged physical-root preparation boundary — 27 October 2026
 
 Add an uninstalled RootPreparingArbiter that selects/persists the next logical

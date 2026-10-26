@@ -361,6 +361,7 @@ class ManagedModel:
     llama_instance: Optional[LlamaInstance] = field(default=None, repr=False)
     vlm_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     whisper_process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    root_model_intent: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass
@@ -372,6 +373,7 @@ class ModelManager:
     residency_renewal: object = field(default=None, repr=False, kw_only=True)
     initial_reservations: object = field(default=None, repr=False, kw_only=True)
     inference_capacity_source: object = field(default=None, repr=False, kw_only=True)
+    root_binding: object = field(default=None, repr=False, kw_only=True)
     _background_started: bool = field(default=False, init=False, repr=False)
     ollama: OllamaClient = field(default_factory=OllamaClient)
     llama: LlamaServerClient = field(default_factory=LlamaServerClient)
@@ -1256,6 +1258,8 @@ class ModelManager:
         """Load an Ollama model with lease management."""
         if model_name in self.models:
             mm = self.models[model_name]
+            if self.root_binding is not None:
+                self.root_binding.validate_resident(mm)
             mm.last_used = time.time()
             mm.request_count += 1
             return mm
@@ -1263,6 +1267,10 @@ class ModelManager:
         # Work wins (#861): a resident model keeps serving, a NEW one does not
         # start while somebody else is using this device.
         self.refuse_if_device_in_use(model_name)
+
+        if self.root_binding is not None:
+            self.root_binding.prepare_space(model_name,Backend.OLLAMA,
+                                            self.ollama.memory_estimate_mb(model_name))
 
         # Fit against what this box can hand over WITHOUT swapping, instead of
         # evicting whatever is resident to force-fit the ask. The contract is
@@ -1315,6 +1323,9 @@ class ModelManager:
                 current = capacity.collect().get('memory_available_mb', 0)
                 if not capacity.fits(memory_mb, current):
                     self._refuse_for_capacity(model_name, memory_mb, current)
+
+        if self.root_binding is not None:
+            self.root_binding.prepare_space(model_name,Backend.OLLAMA,memory_mb)
 
         # Request lease
         lease_id = self._request_lease(model_name, memory_mb, before_load=True)
@@ -1381,6 +1392,8 @@ class ModelManager:
         self, model_file: str, port: int = 8000, **kwargs
     ) -> ManagedModel:
         """Start a llama-server instance with lease management."""
+        if self.root_binding is not None:
+            raise RuntimeError('Backend is not qualified for root accounting')
         from pathlib import Path
         name = Path(model_file).stem
 
@@ -1552,6 +1565,8 @@ class ModelManager:
 
         if resolved in self.models:
             mm = self.models[resolved]
+            if self.root_binding is not None:
+                self.root_binding.validate_resident(mm)
             mm.last_used = time.time()
             mm.request_count += 1
             return mm
@@ -1559,6 +1574,9 @@ class ModelManager:
         # Work wins (#861): a resident model keeps serving, a NEW one does not
         # start while somebody else is using this device.
         self.refuse_if_device_in_use(resolved)
+
+        if self.root_binding is not None:
+            self.root_binding.prepare_space(resolved,Backend.VLM,memory_mb)
 
         # Single VLM per port — evict any other VLM first.
         for existing, mm in list(self.models.items()):
@@ -1589,6 +1607,14 @@ class ModelManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+        root_child=None
+        if self.root_binding is not None:
+            now=time.time()
+            root_child=ManagedModel(name=resolved,backend=Backend.VLM,memory_mb=memory_mb,
+                lease_id=lease_id,port=VLM_PORT,loaded_at=now,last_used=now,managed=True,vlm_process=proc)
+            self.models[resolved]=root_child  # Keep the owned handle even if metadata linking fails.
+            self.root_binding.bind_handle(root_child)
 
         base = f"http://{VLM_HOST}:{VLM_PORT}"
         ready = False
@@ -1627,7 +1653,7 @@ class ModelManager:
             )
 
         now = time.time()
-        mm = ManagedModel(
+        mm = root_child or ManagedModel(
             name=resolved,
             backend=Backend.VLM,
             memory_mb=memory_mb,
@@ -1640,6 +1666,8 @@ class ModelManager:
             vlm_process=proc,
         )
         self.models[resolved] = mm
+        if self.root_binding is not None:
+            self.root_binding.loaded(mm)
         return mm
 
     # -- speech to text (Backend.WHISPER) --
@@ -1763,6 +1791,8 @@ class ModelManager:
 
         Blocking, like `load_vlm_model`. Its caller awaits it in a thread.
         """
+        if self.root_binding is not None:
+            raise RuntimeError('Backend is not qualified for root accounting')
         match = match_whisper_model(model_name)
         if match is None:
             raise RuntimeError(f"{model_name} is not a transcription model on this box")
@@ -1900,6 +1930,8 @@ class ModelManager:
         double-count pages the box already sees, and a lease written from a
         pre-load estimate was measured 4.7x wrong.
         """
+        if self.root_binding is not None:
+            raise RuntimeError('Backend is not qualified for root accounting')
         if not config.EXO_ENABLED:
             raise ExoUnavailable("exo backend is disabled (EXO_ENABLED=0)")
 
@@ -1998,6 +2030,9 @@ class ModelManager:
         and one-shot state transitions orphan. This is a one-shot.
         """
         if not lease_id:
+            return
+        if self.root_binding is not None:
+            self.root_binding.retain_claim(lease_id)
             return
         if self._release_lease_once(lease_id):
             return
@@ -2181,6 +2216,11 @@ class ModelManager:
 
         Residency is untouched on every path — see `_renew_leases`.
         """
+        if self.root_binding is not None:
+            model=self.models.get(model_name)
+            if model is None or model.lease_id!=lease_id:
+                raise RuntimeError('Loaded root model link is unknown')
+            return self.root_binding.loaded(model)
         if self.durable_inference:
             initial = getattr(self, 'initial_reservations', None)
             if initial is not None and model_name not in initial.budgets:
@@ -2277,6 +2317,8 @@ class ModelManager:
         declares an uncertain inference execution ended. Those boundaries must
         be reconciled by the owning service before dispatch can resume.
         """
+        if self.root_binding is not None:
+            raise RuntimeError('Root mode has no per-model initial reservation')
         initial = getattr(self, 'initial_reservations', None)
         if not self.durable_inference or initial is None:
             raise RuntimeError('durable initial reservation controller required')
@@ -2314,6 +2356,8 @@ class ModelManager:
         proceeds honestly unleased instead of recording a lease it does not
         hold.
         """
+        if self.root_binding is not None:
+            return self.root_binding.start_load(model_name,memory_mb,before_load=before_load)
         initial = getattr(self, 'initial_reservations', None)
         if self.durable_inference and before_load and initial is not None:
             memory_mb = initial.required_memory(model_name, memory_mb)
@@ -2813,6 +2857,8 @@ class ModelManager:
             return {"status": "not_found"}
 
         mm = self.models[model_name]
+        if self.root_binding is not None:
+            self.root_binding._owned(mm)
 
         strict = require_confirmed or self.durable_inference
         if strict and mm.in_flight:
@@ -2896,7 +2942,9 @@ class ModelManager:
         # Release lease. Through `_release_lease_quietly` so a failure is
         # REMEMBERED rather than logged and dropped (#938) — `del self.models[...]`
         # below is unconditional, so this is the last moment the id exists.
-        if mm.lease_id:
+        if self.root_binding is not None:
+            self.root_binding.model_gone(mm)
+        elif mm.lease_id:
             self._release_lease_quietly(mm.lease_id)
 
         del self.models[model_name]
@@ -2936,6 +2984,7 @@ class ModelManager:
             for name, mm in self.models.items()
             if mm.managed
             and not mm.in_flight
+            and self.root_binding is None
             and not (source is not None and source.retains_model(name))
             and (now - mm.last_used) > cooldown
         ]
@@ -3316,7 +3365,10 @@ class ModelManager:
         """Renew leases before they expire. Runs every LEASE_TTL * LEASE_RENEW_AT seconds."""
         interval = int(LEASE_TTL * LEASE_RENEW_AT)
         while True:
-            await asyncio.sleep(interval)
+            if self.root_binding is not None:
+                await self.root_binding.wait_for_renewal()
+            else:
+                await asyncio.sleep(interval)
             try:
                 await self.renew_model_leases()
             except Exception as e:
@@ -3330,6 +3382,8 @@ class ModelManager:
 
     async def renew_model_leases(self):
         """One maintenance pass; an enabled queue never falls back to swaps."""
+        if self.root_binding is not None:
+            return await self.root_binding.renew_models()
         if self.durable_inference:
             if self.residency_renewal is None:
                 raise RuntimeError('Durable residency renewal has not been bound')

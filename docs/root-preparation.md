@@ -74,3 +74,9 @@ handoff; reconnect and explicit yield across the full native path; rollout and
 rollback. No production capability, profile, queue, model or claim is changed.
 The first standalone image and service endpoint remain Hermes-owned stages;
 this protocol is not an additional first-image prerequisite.
+
+
+The [staged whole-root model binding](root-models.md) now connects actual
+ModelManager accounting and explicit drained-end to these control boundaries.
+It remains explicitly attached/uninstalled; source/supervisor/bootstrap and
+operator integration plus real host/process/cache qualification remain open.
