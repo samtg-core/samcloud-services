@@ -47,6 +47,10 @@ not implemented; the capabilities response explicitly advertises it as false.
 Do not let an image service independently request an exclusive claim while its
 text parent holds capacity and waits for it: that is a deadlock, not delegation.
 
+The separate [staged registry-root client](registry-root-client.md) persists
+physical-root control intent. It is not wired into this scheduler/capacity source
+and does not change the false cross-service capability or authorize activation.
+
 ## API
 
 Check GET /v1/inference/capabilities before new linked intake. jobs.version=1,

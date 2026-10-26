@@ -1,3 +1,13 @@
+# Staged registry-root control client — 27 October 2026
+
+Add an uninstalled durable root client: save identity before submit, recover the
+same root after lost replies, and persist explicit end before acknowledged intake.
+Refuse incompatible/other-actor capability contracts without ordinary admission
+fallback. Sticky end survives restart/late ACK; exact absence-operation keys
+survive failed observation. Transport close never ends or releases work.
+No manager/native/bootstrap wiring, schema activation or live claims change.
+See docs/registry-root-client.md for usage, tests and remaining controller work.
+
 # Staged requester-job candidate — 26 October 2026
 
 Not activated. Durable parent jobs preserve requester and residency ownership
