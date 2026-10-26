@@ -78,6 +78,8 @@ def test_auto_compaction_request_tool_and_rotating_owner_keep_root(
         assert result['completed'] and result['final_response']=='done'
         assert state.get('summary_executions'),'No real compaction inference was submitted'
         assert not engine._last_summary_fallback_used,engine._last_summary_error
+        assert engine.compression_count>0
+        assert any(row.get('_compressed_summary') is True for row in database.get_messages(agent.session_id)), 'No committed native summary carrier'
         summary_positions=[i for i,row in enumerate(observed) if row['purpose']=='summary']
         assert max(i for i,row in enumerate(observed) if row['owner']=='native')>min(summary_positions),observed
         native=[row for row in observed if row['owner']=='native']
