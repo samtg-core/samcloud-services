@@ -94,8 +94,22 @@ the named policy. No live profile is configured by this test.
 
 Existing native foreground ownership links main calls, active compaction and
 originating tools. Concurrent tools get distinct call identities under one parent.
-Detached/background work does not borrow that parent. Copied contexts must still
-prove a live owning turn. An incomplete/interrupted/error attempt preserves its
+Detached/background work does not borrow that parent. New originating-tool
+intent requires its captured live native turn, matching current parent attempt
+and no native end marker. Those checks and the child identity commit share the
+same identity transaction. A closed/copied context can only read an exact
+acknowledged pending child or its explicitly named completed operation, with
+matching request digest. It cannot choose a latest result, allocate another
+child, repeat intake, or revive a parent. An unacknowledged old intention stays
+saved and refuses new intake without a live owner; uncertainty is not permission
+to replace it. Legacy profiles retain their frozen identities.
+
+An overlapping native Relay turn with instrumentation disabled refuses before
+new intake rather than queuing an unlinked request behind its own parent. A
+proper later native turn can resume the original parent after the old owner
+ends. This admission test is not proof that a gateway automatically retries the
+same queued input; gateway orchestration/receipt qualification remains separate.
+An incomplete/interrupted/error attempt preserves its
 parent for recovery. Authoritative successful on_session_end or the explicit
 operator command below queues the durable job finish. The per-profile outbox retries metadata
 without resubmitting inference. All opted-in queued client types run its relay.

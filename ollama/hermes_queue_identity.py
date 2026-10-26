@@ -275,7 +275,14 @@ class HostBindings:
                 'SELECT 1 FROM native_tool_call WHERE scope=? AND turn_id=? AND api_request_id=? AND tool_call_id=?',
                 ids).fetchone() is not None
         finally:store.close()
-        token=self.tool.set((session_id,ids) if known else None)
+        owner = None
+        if known and self.job_continuity:
+            from agent.relay_runtime import active_turn
+            turn = active_turn()
+            if (turn is not None and turn.turn_id == turn_id and turn.lease.profile_key == self.scope
+                    and self.owner_session(turn.lease.session_id) == session_id):
+                owner = turn
+        token=self.tool.set((session_id,ids,owner) if known else None)
         try:yield
         finally:self.tool.reset(token)
 
@@ -302,7 +309,7 @@ class HostBindings:
     def tool_keys(self,request):
         bound,call=self.tool.get(),self.tool_api.get()
         if bound is None or call is None:raise ValueError('no owning auxiliary API intention')
-        session,ids=bound
+        session,ids,owner=bound
         directory=Path(self.path).parent/'tool-sources'
         store=IdentityStore(self.path)
         try:
@@ -327,27 +334,59 @@ class HostBindings:
                     job_turn = ids[1]
             store.db.execute('BEGIN IMMEDIATE')
             try:
-                row=store.db.execute("SELECT operation FROM tool_aux_intent WHERE scope=? AND turn_id=? "
-                    "AND api_request_id=? AND tool_call_id=? AND state='pending'",ids).fetchone()
+                live = True
+                if self.job_continuity:
+                    from agent.relay_runtime import active_turn
+                    live = owner is not None and active_turn() is owner
+                    if store.db.execute('SELECT 1 FROM native_turn_end WHERE scope=? AND turn_id=?', ids[:2]).fetchone():
+                        live = False
+                    if job_turn:
+                        active = store.db.execute('SELECT job_key,turn_id FROM native_requester_job WHERE scope=?',
+                                                  (ids[0],)).fetchone()
+                        live = live and active == (parents[0][0], ids[1])
+                if not live and call.get('operation'):
+                    # An inherited API intention names its exact completed step;
+                    # never recover by choosing the latest similar tool result.
+                    row=store.db.execute('SELECT operation FROM tool_aux_intent WHERE scope=? AND turn_id=? '
+                        'AND api_request_id=? AND tool_call_id=? AND operation=?',
+                        (*ids,call['operation'])).fetchone()
+                    if row is None:
+                        raise LocalSourceRefused('saved tool intention no longer has its exact operation')
+                else:
+                    row=store.db.execute("SELECT operation FROM tool_aux_intent WHERE scope=? AND turn_id=? "
+                        "AND api_request_id=? AND tool_call_id=? AND state='pending'",ids).fetchone()
                 if row:
                     source=CompactionSource.load(directory,self.scope,session,row[0])
                     source.validate(request.get('messages'))
                 else:
+                    if not live:
+                        raise LocalSourceRefused('new tool inference requires its live originating native turn')
                     source=CompactionSource.capture(directory,self.scope,session,request.get('messages'),
                                                     purpose='tool_auxiliary')
                     step=store.db.execute('SELECT COALESCE(MAX(step),0)+1 FROM tool_aux_intent WHERE '
                         'scope=? AND turn_id=? AND api_request_id=? AND tool_call_id=?',ids).fetchone()[0]
                     store.db.execute("INSERT INTO tool_aux_intent VALUES(?,?,?,?,?,?,'pending')",
                                      (*ids,step,source.operation))
+                call_boundary = 'operation:' + source.operation
+                source.messages()
+                observation_only = not live
+                if observation_only:
+                    keys = store.saved_execution(source.scope,source.purpose,call_boundary,request)
+                else:
+                    if self.job_continuity and active_turn() is not owner:
+                        raise LocalSourceRefused('native tool owner ended before identity commit')
+                    keys = store.bind_execution_in_transaction(source.scope,source.purpose,call_boundary,
+                                                               request,job_turn=job_turn)
                 store.db.execute('COMMIT')
             except BaseException:
                 store.db.execute('ROLLBACK');raise
-            keys=source.bind(self.path,request,job_turn=job_turn)
+            call['operation']=source.operation
+            if observation_only:
+                return keys
             keys=store.bind_handoff(keys,store.conversation_stints(source.scope)
                                     if handoff_parents is None else handoff_parents)
             if keys.job_key is not None:
                 keys=replace(keys,on_accepted=intake_callback(self.path,source.scope,ids[1],keys))
-            call['operation']=source.operation
             return keys
         finally:store.close()
 

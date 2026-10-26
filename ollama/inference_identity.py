@@ -565,8 +565,31 @@ class IdentityStore:
         never hashes prompt equality to decide whether two intentions are one.
         A retry/restart of the same call recovers its released result too.
         """
-        required(work_boundary)
-        required(call_boundary)
-        boundary = 'execution:' + hashlib.sha256(
-            encoded([work_boundary, call_boundary]).encode()).hexdigest()
-        return self.bind(scope, boundary, call_boundary, request, job_turn=job_turn)
+        return self.bind(scope, self.execution_work_boundary(work_boundary,call_boundary),
+                         call_boundary, request, job_turn=job_turn)
+
+    @staticmethod
+    def execution_work_boundary(purpose, call_boundary):
+        required(purpose); required(call_boundary)
+        return 'execution:' + hashlib.sha256(encoded([purpose,call_boundary]).encode()).hexdigest()
+
+    def bind_execution_in_transaction(self, scope, purpose, call_boundary, request, *, job_turn=''):
+        """Owning tool intent/identity commit together under its native check."""
+        if not self.db.in_transaction:
+            raise RuntimeError('execution binding requires an owned identity transaction')
+        return self._bind_in_transaction(scope,self.execution_work_boundary(purpose,call_boundary),
+                                         call_boundary,request,job_turn=job_turn)
+
+    def saved_execution(self, scope, purpose, call_boundary, request):
+        """Read-only reattachment; never invent identity or repeat intake."""
+        rows = self.db.execute('SELECT DISTINCT w.key,c.key,c.digest,c.job_key,a.grant_id,a.execution_id '
+            'FROM work_identity w JOIN call_identity c ON c.work_key=w.key '
+            'JOIN accepted_native_call a ON a.scope=w.scope AND a.grant_key=w.key AND a.call_key=c.key '
+            'WHERE w.scope=? AND w.boundary=? AND c.boundary=?',
+            (scope,self.execution_work_boundary(purpose,call_boundary),call_boundary)).fetchall()
+        if len(rows) != 1:
+            raise LocalSourceRefused('stale tool has no exact acknowledged child to observe')
+        grant,call,digest,job_key,grant_id,execution_id = rows[0]
+        if digest != hashlib.sha256(encoded(request).encode()).hexdigest():
+            raise Conflict('saved child request differs; no replacement intake permitted')
+        return CallKeys(grant,call,execution_only=True,resume_job=(grant_id,execution_id),job_key=job_key)

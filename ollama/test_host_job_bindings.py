@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from .hermes_queue_identity import HostBindings
 from .hermes_queue_provider import _host_for_home, host_for_home
@@ -34,6 +35,13 @@ class HostJobBindings(unittest.TestCase):
         host.complete_api('session', turn, api, ('tool',))
         return keys
 
+    def synthetic_tool_owner(self, host):
+        # Metadata unit seam only. Real Relay/context/middleware ownership is
+        # covered independently by test_native_tool_authority and native loops.
+        turn = SimpleNamespace(turn_id='turn', lease=SimpleNamespace(
+            profile_key=host.scope, session_id='session'))
+        return patch('agent.relay_runtime.active_turn', return_value=turn)
+
     def test_same_foreground_job_covers_main_compression_and_tool_for_every_role(self):
         for role in ('creative', 'producer', 'assistant', 'samcloud'):
             host = HostBindings(self.root / (role + '.sqlite'), role, job_continuity=True)
@@ -41,7 +49,7 @@ class HostJobBindings(unittest.TestCase):
             with host.compression_scope('session', self.messages,
                                         owner_provider=lambda: ('turn', 'text')):
                 summary = host.auxiliary_keys(self.request | {'model': 'other-summary-model'})
-            with host.tool_scope('session', 'turn', 'api', 'tool'), host.tool_api_scope():
+            with self.synthetic_tool_owner(host), host.tool_scope('session', 'turn', 'api', 'tool'), host.tool_api_scope():
                 tool = host.tool_keys(self.request | {'model': 'vision'})
             self.assertEqual((summary.job_key, tool.job_key), (main.job_key, main.job_key))
             self.assertEqual(summary.yield_grant_keys, ())
@@ -95,7 +103,7 @@ class HostJobBindings(unittest.TestCase):
         old = HostBindings(self.path, 'profile')
         main = self.main(old)
         self.assertIsNone(main.job_key)
-        with self.host.tool_scope('session', 'turn', 'api', 'tool'), self.host.tool_api_scope():
+        with self.synthetic_tool_owner(self.host), self.host.tool_scope('session', 'turn', 'api', 'tool'), self.host.tool_api_scope():
             child = self.host.tool_keys(self.request | {'model': 'vision'})
         self.assertIsNone(child.job_key)
         self.assertEqual(child.yield_grant_keys, (main.grant_key,))

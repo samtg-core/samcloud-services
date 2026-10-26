@@ -24,6 +24,11 @@ The SDK now makes a final finite outbox pass before HTTP shutdown, delivering
 already-persisted completion even between relay polls. Failed earlier pages do
 not hide later finishes; unacknowledged events remain durable. Client close
 itself never ends a parent or resubmits inference.
+New tool intentions now require the exact live originating native owner through
+their identity transaction. Stale copied contexts may only read acknowledged
+saved children by exact operation and request digest, without POST/intake. Real
+Relay overlap is verified to refuse unlinked admission, with same-parent recovery
+at a later owning turn; automatic gateway input retry remains unqualified.
 
 # Changelog & Working Notes
 
