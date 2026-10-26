@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from .inference_arbiter import Arbiter, Conflict
+from .inference_arbiter import Arbiter, Conflict, StintPolicy
 from .inference_recovery import DeadLocalBackend, OfflineRecovery
 from .inference_supervisor import Supervisor
 
@@ -108,6 +108,33 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(BlockingIOError):OfflineRecovery(self.path)
         finally:
             s.close();self.r=OfflineRecovery(self.path)
+
+
+class LinkedJobRecovery(unittest.TestCase):
+    def test_dead_child_recovery_opens_qualified_journal_and_keeps_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'queue.sqlite'
+            journal = Arbiter(path, stint_policy=StintPolicy())
+            grant = journal.submit('dev', 'main', 'gpu', 'qwen', 'work_session')
+            execution = journal.enqueue(grant['id'], 'dev', 'same-call', {'prompt': 'fixture'}, job_key='parent')
+            journal.dispatch_next('gpu')
+            other = journal.submit('other', 'other', 'gpu', 'qwen')
+            journal.enqueue(other['id'], 'other', 'other-call', {'prompt': 'other'})
+            journal.uncertain(execution['id'])
+            journal.close()
+            recovery = OfflineRecovery(path)
+            try:
+                proof = DeadLocalBackend(execution['id'], 'gpu', 'fixture-host',
+                    'd34b663c-db45-44a7-8950-8300c67b31bb',
+                    '3c17741b-ea8f-4430-b3b3-39b4964574d1', 'a' * 64)
+                recovery.retry_dead_attempt(recovery.inspect(execution['id']), proof=proof,
+                                            operator='codex:fixture')
+                self.assertTrue(recovery.journal.owns_job('gpu'))
+                selected = recovery.journal.dispatch_next('gpu')
+                self.assertEqual(selected['execution']['id'], execution['id'])
+                self.assertEqual(selected['execution']['job_id'], execution['job_id'])
+            finally:
+                recovery.close()
 
 
 class WaitingConsumerRecovery(unittest.IsolatedAsyncioTestCase):

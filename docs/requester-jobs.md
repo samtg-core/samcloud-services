@@ -5,6 +5,14 @@ An independent request does not inherit that place just because its username is
 the same. Existing grants, accepted execution receipts and legacy calls retain
 their frozen identities across retries and reconnects.
 
+Source review450/c832 found lifecycle gaps. This candidate must remain disabled
+on every real parent until session-ID rotation during native compaction, missing
+reservation reconciliation under retained ownership, and an explicit operator
+end path are repaired and qualified. Interrupted/failed work must stay recoverable;
+neither session reset nor process exit alone is proof that it can be released.
+The first repair addresses offline journal recovery and late-intake finish
+fencing; it does not close the other review findings or authorize activation.
+
 This is the inference service's requester scheduler. The shared Samcloud registry
 remains the only physical allocation authority. Cross-service child delegation is
 not implemented; the capabilities response explicitly advertises it as false.

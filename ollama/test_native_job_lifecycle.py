@@ -83,6 +83,19 @@ class NativeParentRecovery(unittest.TestCase):
         self.assertTrue(all(e['kind'] == 'job_finish' and e['job_key'] == key
                             for e in self.store.pending_events()))
 
+    def test_late_old_intake_cannot_finish_resumed_parent(self):
+        key = self.store.begin_native_job('scope', 'original')
+        keys = self.store.bind('scope', 'main', 'one', self.body, job_turn='original')
+        self.store.observe_native_outcome('scope', 'original', completed=False, failed=True, interrupted=False)
+        self.assertEqual(self.store.begin_native_job('scope', 'retry'), key)
+        self.store.observe_native_outcome('scope', 'original', completed=True, failed=False, interrupted=False)
+        self.store.record_turn_call('scope', 'original', keys,
+            job=SimpleNamespace(grant_id='grant', execution_id='execution'))
+        self.assertEqual(self.store.pending_events(), [])
+        self.assertEqual(self.store.db.execute(
+            'SELECT job_key,turn_id,state FROM native_requester_job').fetchone(),
+            (key, 'retry', 'active'))
+
     def test_legacy_tool_annotation_cannot_silently_yield_linked_parent(self):
         self.store.begin_native_job('scope', 'turn')
         keys = self.store.bind('scope', 'main', 'call', self.body, job_turn='turn')

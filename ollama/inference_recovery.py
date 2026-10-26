@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 import uuid
 
-from .inference_arbiter import Arbiter, Conflict, NotFound, encoded, required
+from .inference_arbiter import Arbiter, Conflict, NotFound, StintPolicy, encoded, required
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,9 @@ class OfflineRecovery:
             if os.fstat(self._lock).st_mode & 0o077:
                 raise PermissionError('supervisor lock must be private')
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.journal = Arbiter(path)
+            # This operator uses the job-aware journal implementation, never an
+            # older/non-atomic scheduler. It does not pump or run providers.
+            self.journal = Arbiter(path, stint_policy=StintPolicy())
             self.journal.db.execute('''CREATE TABLE IF NOT EXISTS backend_attempt_recoveries (
                 id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions(id),
                 previous_lifecycle_seq INTEGER NOT NULL, at REAL NOT NULL,

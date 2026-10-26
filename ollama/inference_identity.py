@@ -326,7 +326,11 @@ class IdentityStore:
                 # a new fenced event; a subsequent real call makes it stale safely.
                 boundary = 'late-intake:'+turn_id+':'+keys.call_key
                 if keys.job_key is not None:
-                    self._queue_job_finishes(scope, boundary, (keys.job_key,))
+                    active = self.db.execute(
+                        'SELECT job_key,turn_id FROM native_requester_job WHERE scope=?',
+                        (scope,)).fetchone()
+                    if not (active and active[0] == keys.job_key and active[1] != turn_id):
+                        self._queue_job_finishes(scope, boundary, (keys.job_key,))
                 else:
                     self._queue_yields(scope,boundary,[(keys.grant_key,keys.call_key)])
             self.db.execute('COMMIT')
