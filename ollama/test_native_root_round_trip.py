@@ -91,8 +91,27 @@ def root_queue(tmp_path,monkeypatch):
     async def execute(grant,call):
         nonlocal main_calls
         body=call.get('body',call);ident=grant['active_execution'];supervisor=state['supervisor']
+        is_summary=state.get('allow_compaction',False) and any(
+            isinstance(message.get('content'),str) and 'TURNS TO SUMMARIZE:' in message['content']
+            for message in body.get('messages',[]))
         observed.append({'owner':grant['owner'],'model':grant['model'],'execution':ident,
-                         'lease_id':m.models[grant['model']].lease_id})
+                         'lease_id':m.models[grant['model']].lease_id,
+                         'job_id':supervisor.journal.execution(ident,grant['owner'])['job_id'],
+                         'purpose':'summary' if is_summary else 'ordinary'})
+        if is_summary:
+            state.setdefault('summary_executions',[]).append(ident)
+            other=supervisor.journal.submit('other','other',resource,'qwen','execution')
+            waiting=supervisor.journal.enqueue(other['id'],'other','other-call',{'model':'qwen','messages':[]})
+            state['other_execution']=waiting['id']
+            content='## Goal\nComplete the synthetic tool request.\n## State\nEarlier synthetic history was reviewed. No external work happened.'
+            if body.get('stream'):
+                frame={'id':ident,'object':'chat.completion.chunk','created':1,'model':grant['model'],
+                    'choices':[{'index':0,'delta':{'role':'assistant','content':content},'finish_reason':'stop'}]}
+                supervisor.journal.append_event(ident,'data: '+json.dumps(frame)+'\n\n',terminal=True)
+                supervisor.journal.append_event(ident,'data: [DONE]\n\n',terminal=True)
+                return {'kind':'stream','event_count':2,'media_type':'text/event-stream'}
+            return {'kind':'json','body':{'id':ident,'object':'chat.completion','created':1,'model':grant['model'],
+                'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant','content':content}}]}}
         if body.get('stream'):
             main_calls+=1
             if main_calls==1 and state.get('tool_first',True):

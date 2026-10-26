@@ -1,3 +1,16 @@
+# Qualify real native compaction inference on the retained root — 27 October 2026
+
+Four actual automatic-compaction round trips (both main providers, in-place and
+rotating session) run stock summary inference/commit through queued SDK and root
+runtime HTTP. A competitor queued during the summary cannot take the parent;
+summary, subsequent main/tool calls and completion retain one job/exact root.
+Rotating cases prove committed native session lineage/owner alias; one native
+finish admits the competitor on a different root. Existing ten native-root cases
+also pass (14/14, no retries). Synthetic registry/provider/host, external HTTP
+blocked. The scaled test threshold is not a live trigger claim. No production
+behavior, profile, launcher or policy changes; actual native/hardware deployment,
+operator/migration and cross-service delegated children remain unqualified.
+
 # Qualify native parent/tool continuity through root runtime — 27 October 2026
 
 Add ten actual Hermes AIAgent/plugin/SDK -> local authenticated root-runtime HTTP

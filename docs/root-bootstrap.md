@@ -87,6 +87,18 @@ keep one exact physical root; the competing requester begins on a distinct root
 only after native finish. These cases use synthetic registry/provider processes
 and disable compaction; they are not compaction inference or deployed acceptance.
 
+Four additional native cases enable automatic compaction using the actual
+QueuedContextCompressor and stock summary dispatch/commit, not a patched compress
+method. Both providers are tested with in-place compression and session rotation.
+A competitor is queued during the real summary request; summary, later main/tool
+calls and native finish keep one logical parent and exact physical root. Rotating
+cases verify the committed native session end and owner alias. Only native finish
+lets the competitor run, on its own different root. The fixture scales history
+and threshold (1000 tokens) for testing; it says nothing about live trigger sizes.
+It also verifies that compaction need not be the turn's first inference request.
+Actual hardware/provider responses, long real health maintenance and deployed
+profile behavior remain unqualified.
+
 No production root policy, token, launcher or profile is changed. Before rollout,
 qualify actual host/process/cache sensors, native full turn/compaction/tool and
 operator recovery, inherited legacy claims/accepted work, same-envelope delegated
