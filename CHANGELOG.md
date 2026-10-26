@@ -1,3 +1,15 @@
+# Give root-mode single calls a durable completion boundary — 27 October 2026
+
+Ordinary calls without job_key now get one sealed internal parent bound to their
+exact grant/call identity, atomically with intake. Backend completion plus strict
+physical cleanup closes it; no extra client finish, timer or observer lifetime.
+Exact restart/terminal retries return the same call without re-admission. Unknown
+work retains the claim; cancellation before admission needs no physical claim.
+Explicit multi-call parents and default Arbiter behavior stay unchanged. Genuine
+legacy unlinked rows are not rewritten/adopted. Root-only capabilities report the
+single-call contract; no runtime is activated. Qualify all native parent bindings,
+bootstrap/operator/shutdown/migration and physical/delegated paths before rollout.
+
 # Reuse manager observations for root readiness — 27 October 2026
 
 The explicitly constructed RootController now implements the existing manager

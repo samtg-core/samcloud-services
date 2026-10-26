@@ -6,6 +6,7 @@ registry observations and performs backend cleanup outside this journal.
 """
 from datetime import datetime
 import json
+import hashlib
 import time
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ class RootPreparingArbiter(Arbiter):
     new preparation while retaining the same logical job and accepted call IDs.
     """
     supports_root_preparation=True
+    supports_single_call_jobs=True
 
     def __init__(self,path,*,registry,registry_actor,service_id,stint_policy=None):
         required(registry_actor);required(service_id)
@@ -54,6 +56,37 @@ class RootPreparingArbiter(Arbiter):
         except BaseException:
             self.close()
             raise
+
+    @staticmethod
+    def _single_call_key(grant_id,client_key):
+        required(grant_id);required(client_key)
+        return 'execution-root:'+hashlib.sha256(json.dumps(
+            ['root-single-call-v1',grant_id,client_key],separators=(',',':')).encode()).hexdigest()
+
+    def existing_execution(self,grant_id,owner,client_key,request,*,yield_grant_keys=(),job_key=None):
+        if job_key is None:
+            self._owned(grant_id,owner)
+            old=self.db.execute('SELECT job_id FROM executions WHERE grant_id=? AND client_key=?',
+                                (grant_id,client_key)).fetchone()
+            # A genuine pre-upgrade unlinked call keeps its exact identity.
+            # Do not silently migrate/adopt it while replaying a saved ACK.
+            if old is None or old['job_id'] is not None:
+                job_key=self._single_call_key(grant_id,client_key)
+        return super().existing_execution(grant_id,owner,client_key,request,
+            yield_grant_keys=yield_grant_keys,job_key=job_key)
+
+    def _new_call_job(self,owner,job_key,resource,grant_id,client_key):
+        single=job_key is None
+        if single:job_key=self._single_call_key(grant_id,client_key)
+        job_id=super()._new_call_job(owner,job_key,resource,grant_id,client_key)
+        if single:
+            # Same transaction as the actual execution INSERT. A one-call
+            # client has no later parent-finish verb; backend termination will
+            # expose physical ENDING, never a clock or observer disconnect.
+            now=time.time()
+            self.db.execute('INSERT OR IGNORE INTO requester_job_ends VALUES(?,?,?)',(owner,job_key,now))
+            self.db.execute("UPDATE requester_jobs SET end_requested='finish',updated=? WHERE id=?",(now,job_id))
+        return job_id
 
     def preparation(self,preparation_id):
         row=self.db.execute('SELECT * FROM requester_root_preparations WHERE id=?',(preparation_id,)).fetchone()

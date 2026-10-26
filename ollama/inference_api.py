@@ -83,7 +83,7 @@ def build_router(supervisor, resolve_model, validate_call):
     async def capabilities(request: Request):
         owner(request)
         policy = supervisor.journal.stint_policy
-        return {'stints': {'version': 1, 'enabled': policy is not None,
+        result = {'stints': {'version': 1, 'enabled': policy is not None,
                           'dependency_yield': True,
                           'lifecycle_yield': True,
                           'idle_grace_seconds': policy.idle_grace_seconds if policy else None,
@@ -91,6 +91,9 @@ def build_router(supervisor, resolve_model, validate_call):
                 'jobs': {'version': 1, 'enabled': policy is not None,
                          'same_service_children': True, 'cross_service_delegation': False,
                          'explicit_finish': True, 'explicit_yield': True}}
+        if getattr(supervisor.journal,'supports_single_call_jobs',False):
+            result['jobs']['implicit_single_call_finish']=True
+        return result
 
     @router.get('/jobs')
     async def jobs(request: Request, key: str = Query(min_length=1, max_length=512)):

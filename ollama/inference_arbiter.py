@@ -375,6 +375,10 @@ class Arbiter(JobScheduling):
             return dict(old)
         return None
 
+    def _new_call_job(self,owner,job_key,resource,grant_id,client_key):
+        """Trusted journal policy hook, inside the execution intake transaction."""
+        return self._bind_job(owner,job_key,resource)
+
     def enqueue(self, grant_id, owner, client_key, request, *, yield_grant_keys=(), job_key=None):
         """Persist a call while its grant waits; reconnect never submits twice.
 
@@ -417,7 +421,7 @@ class Arbiter(JobScheduling):
                 raise Conflict('job continuity and legacy dependency yield are distinct contracts')
             if job_key is not None and self.stint_policy is None:
                 raise Conflict('job continuity requires atomic dispatch policy')
-            job_id = self._bind_job(owner, job_key, grant['resource'])
+            job_id = self._new_call_job(owner, job_key, grant['resource'], grant_id, client_key)
             execution_id, now = uuid.uuid4().hex, time.time()
             self.db.execute("""INSERT INTO executions
                 (id,grant_id,client_key,request,state,created,updated,yield_grant_keys,job_id)

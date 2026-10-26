@@ -41,6 +41,10 @@ it does not submit another operation.
 
 ## Preparation and model selection
 
+Bare single-call intake gets a durable sealed one-call parent; explicit parents
+keep spanning calls (see root-preparation.md). No new finish verb is needed for
+a standalone call, and uncertainty still retains it.
+
 The scheduler first persists/selects the eligible logical parent without
 marking its call running. Root admission uses the durable physical preparation
 ID; lost replies recover the same root/claim. A queued root never permits model

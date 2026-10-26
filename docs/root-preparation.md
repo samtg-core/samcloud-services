@@ -111,3 +111,36 @@ Actual registry-change and host observation feeds, bootstrap/operator constructi
 and migration still need shipping integration. These hooks alone do not activate whole-root scheduling or qualify
 physical/native/image generation. Standalone Hermes first-image work remains
 independent.
+
+
+## Single-call clients without an explicit parent
+
+New root-mode intake can serve an ordinary execution request that omits job_key.
+The journal derives one internal parent from that exact grant ID and call key.
+Parent creation, its finish marker and execution intake commit in one transaction;
+a failed execution INSERT leaves no orphan job or marker. No username, model,
+HTTP connection or timing heuristic joins independent work together.
+
+The internal parent is sealed for this one call. Its accepted child must actually
+finish; unknown execution keeps ownership. Physical ENDING still requires strict
+provider absence and exact root settlement before logical closure. Cancellation
+before physical admission can end the saved intent without creating a claim.
+A client doesn't need a new finish request or a holding connection.
+
+Exact retries, including after restart or terminal cleanup, recover the same
+execution/grant/job and cannot re-admit or regenerate. A changed payload is still
+a conflict. A later call on the same work_session grant gets a distinct single-
+call parent unless the client explicitly supplied a shared parent key. This does
+not claim turn continuity for an older native client that never supplies parent
+identity: all shipping Hermes profiles must still qualify the existing native
+job-continuity binding before that stronger behavior is claimed.
+
+Explicit parents retain their existing multi-call/compaction/reconnect lifecycle
+and require their real finish/yield. Historical pre-upgrade unlinked rows are not
+rewritten: their saved ACK remains readable under the original identity and
+nonterminal ones must drain/reconcile before a root-mode rollout. The default
+Arbiter intake behavior is unchanged.
+
+Only root-mode capability responses add jobs.implicit_single_call_finish=true.
+That is a reported intake contract, not a runtime activation switch or a grant
+of physical capacity. Cross-service delegation remains false.

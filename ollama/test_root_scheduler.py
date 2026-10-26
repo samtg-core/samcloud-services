@@ -51,7 +51,12 @@ def test_prepare_is_durable_and_keeps_first_call_queued(scheduler):
 
 def test_no_demand_no_preparation_and_earlier_legacy_work_is_not_skipped(scheduler):
     a=scheduler;assert a.prepare_root('host/gpu') is None
-    _,legacy=call(a,job=None);call(a,'two','later','later')
+    legacy_journal=Arbiter(a.path,stint_policy=a.stint_policy)
+    try:_,legacy=call(legacy_journal,job=None)
+    finally:legacy_journal.close()
+    replay=a.enqueue(legacy['grant_id'],'one','first',{'fixture':True})
+    assert replay['id']==legacy['id'] and replay['job_id'] is None
+    call(a,'two','later','later')
     with pytest.raises(Conflict):a.prepare_root('host/gpu')
     assert a.execution(legacy['id'],'one')['state']=='queued'
     assert a.db.execute('SELECT COUNT(*) FROM requester_root_preparations').fetchone()[0]==0
@@ -198,3 +203,72 @@ def test_yielded_root_job_cannot_reopen_through_unqualified_legacy_scheduler(sch
     a.finish(first['id'],{});a.end_job('one','parent',finish=False)
     a.settle_preparation(prep['id'],terminal(body))
     with pytest.raises(Conflict):Arbiter(a.path,stint_policy=StintPolicy())
+
+
+def test_single_call_parent_and_end_are_atomic_with_intake_and_replay(scheduler):
+    a=scheduler;grant,first=call(a,job=None)
+    job=dict(a.db.execute('SELECT * FROM requester_jobs WHERE id=?',(first['job_id'],)).fetchone())
+    assert job['state']=='queued' and job['end_requested']=='finish'
+    assert a.db.execute('SELECT 1 FROM requester_job_ends WHERE owner=? AND client_key=?',('one',job['client_key'])).fetchone()
+    assert first['client_key']=='first' and first['grant_id']==grant['id']
+    assert a.existing_execution(grant['id'],'one','first',{'fixture':True})['id']==first['id']
+    prep=a.prepare_root('host/gpu');body,view=admitted(prep)
+    a.confirm_root(prep['id'],body,view);a.dispatch_next('host/gpu',permitted_model=lambda *_:True)
+    a.finish(first['id'],{})
+    assert a.preparation(prep['id'])['state']=='ending' and a.owns_job('host/gpu')
+    a.settle_preparation(prep['id'],terminal(body))
+    assert a.job('one',job['client_key'],'host/gpu')['state']=='closed'
+    assert a.enqueue(grant['id'],'one','first',{'fixture':True})['id']==first['id']
+    with pytest.raises(Conflict):a.enqueue(grant['id'],'one','first',{'different':True})
+    assert a.db.execute('SELECT COUNT(*) FROM requester_jobs').fetchone()[0]==1
+
+
+def test_single_call_intake_failure_rolls_back_parent_and_end_marker(scheduler):
+    import sqlite3
+    a=scheduler;g=a.submit('one','first','host/gpu','text','execution')
+    a.db.execute("CREATE TRIGGER refuse_call BEFORE INSERT ON executions BEGIN SELECT RAISE(ABORT,'fixture abort'); END")
+    with pytest.raises(sqlite3.IntegrityError):a.enqueue(g['id'],'one','first',{'fixture':True})
+    for table in ('requester_jobs','requester_job_ends','executions'):
+        assert a.db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+    a.db.execute('DROP TRIGGER refuse_call')
+    assert a.enqueue(g['id'],'one','first',{'fixture':True})['job_id'] is not None
+
+
+def test_single_call_unknown_execution_retains_parent_and_exact_root(scheduler):
+    a=scheduler;_,first=call(a,job=None);prep=a.prepare_root('host/gpu');body,view=admitted(prep)
+    a.confirm_root(prep['id'],body,view);a.dispatch_next('host/gpu',permitted_model=lambda *_:True)
+    a.uncertain(first['id'])
+    assert a.prepare_root('host/gpu')['id']==prep['id']
+    assert a.preparation(prep['id'])['state']=='admitted' and a.owns_job('host/gpu')
+    with pytest.raises(Conflict):a.settle_preparation(prep['id'],terminal(body))
+
+
+def test_single_call_cancel_before_admission_closes_without_physical_intent(scheduler):
+    a=scheduler;grant,first=call(a,job=None)
+    a.request_release(grant['id'],'one')
+    assert a.execution(first['id'],'one')['state']=='cancelled'
+    assert a.db.execute('SELECT state FROM requester_jobs WHERE id=?',(first['job_id'],)).fetchone()[0]=='closed'
+    assert a.prepare_root('host/gpu') is None
+    assert a.db.execute('SELECT COUNT(*) FROM requester_root_preparations').fetchone()[0]==0
+
+
+def test_work_session_single_calls_get_distinct_jobs_without_changing_execution_keys(scheduler):
+    a=scheduler;g=a.submit('one','main','host/gpu','text','work_session')
+    first=a.enqueue(g['id'],'one','first',{})
+    prep=a.prepare_root('host/gpu');body,view=admitted(prep)
+    a.confirm_root(prep['id'],body,view);a.dispatch_next('host/gpu',permitted_model=lambda *_:True)
+    a.finish(first['id'],{});a.settle_preparation(prep['id'],terminal(body))
+    second=a.enqueue(g['id'],'one','second',{})
+    assert second['grant_id']==first['grant_id'] and second['job_id']!=first['job_id']
+    assert a.enqueue(g['id'],'one','first',{})['id']==first['id']
+    assert a.db.execute('SELECT COUNT(*) FROM requester_jobs').fetchone()[0]==2
+
+
+def test_reopen_single_call_keeps_finish_marker_and_same_call(scheduler):
+    a=scheduler;grant,first=call(a,job=None)
+    b=RootPreparingArbiter(a.path,registry=a.registry,registry_actor=a.registry_actor,service_id=a.service_id)
+    try:
+        replay=b.enqueue(grant['id'],'one','first',{'fixture':True})
+        assert replay['id']==first['id'] and replay['job_id']==first['job_id']
+        assert b.db.execute('SELECT end_requested FROM requester_jobs WHERE id=?',(first['job_id'],)).fetchone()[0]=='finish'
+    finally:b.close()
