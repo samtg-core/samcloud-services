@@ -102,6 +102,36 @@ host absence. Tests use deterministic providers/callbacks. Before activation,
 qualify actual model process identity, GPU/cache release and pressure/headroom,
 cold recovery, service-worker ownership and operator fencing on the shipping host.
 
+## Shutdown boundary
+
+ModelManager.shutdown invokes a root audit BEFORE pool release, model unload or
+cancelling health tasks. An idle backend or empty manager inventory is not proof
+that an admitted, queued, unknown or lost-ACK physical root ended. Unknown model
+intent, unresolved execution, changed bound source, unmatched logical owner or non-terminal client
+receipt refuses shutdown without changing claims or maintenance.
+
+If a controller is attached, its source must first be paused and all supervisor
+backend/input/control preparations drained. Queued accepted work may survive.
+A preparation with no SDK intent row is known never submitted because the SDK
+persists its intent before any HTTP attempt; shutdown suspends that durable
+logical identity without closing it. Once an SDK intent exists, even a missing
+reply requires an exact terminal receipt rather than an empty-inventory guess.
+
+A positive physical terminal receipt may precede a failed local logical close.
+With no model/execution/task debt, physical shutdown can proceed while preserving
+that ending job for exact metadata recovery. It does not fabricate job success,
+retry inference or discard a queued call.
+
+Only after this audit does shutdown install a one-way observation fence, detach
+the health callback and stop root-health waiting. Late host/health hints cannot
+start another preparation or query a closed journal. An acknowledged stop can be
+retried; a stopped source cannot resume/load models and needs fresh startup.
+Source ownership stays bound even if the mutable manager source field is
+cleared, and stopped/preparation entry points refuse before any new root submit.
+The shutdown path creates/ends/releases no root itself. Native/service bootstrap,
+operator orchestration and awaiting manager maintenance workers before closing
+clients/journals still need qualification.
+
 ## Remaining integration
 
 The staged RootController connects supervisor/model readiness and cleanup.

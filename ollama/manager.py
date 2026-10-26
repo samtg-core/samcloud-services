@@ -3766,6 +3766,10 @@ class ModelManager:
 
     def shutdown(self) -> list[dict]:
         """Release all leases. Only stop processes we started (managed=True)."""
+        if self.root_binding is not None:
+            # Idle workers/empty inventory do not prove a retained root ended.
+            # Refuse BEFORE pool release, unload or stopping health maintenance.
+            self.root_binding.begin_shutdown()
         if self.durable_inference:
             # This check must precede EVERY release, including pool leases and
             # adopted models. An HTTP caller disappearing is not worker exit.

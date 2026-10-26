@@ -66,10 +66,11 @@ class RootModelBinding:
         self.manager,self.scheduler,self.client,self.store=manager,scheduler,client,store
         self.resource,self.models=resource,dict(models)
         self.confirm_cold=confirm_cold
-        self._lock=threading.Lock();self._permission=None
+        self._lock=threading.Lock();self._permission=None;self._source_owner=None
         self._health_changed=asyncio.Event()
         self._health_marker=None;self._health_due=None;self._health_ttl=None
         self.on_health_observed=None
+        self._health_stopped=False
         with store._transaction() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS root_model_intents (
                 id TEXT PRIMARY KEY,preparation_id TEXT NOT NULL,resource TEXT NOT NULL,
@@ -81,10 +82,12 @@ class RootModelBinding:
         manager.sc=self._proxy
         manager.root_binding=self
 
-    def _mode(self):
-        if (not self.manager.durable_inference or self.manager.root_binding is not self or self.manager.sc is not self._proxy
+    def _mode(self,*,allow_stopped=False):
+        if (self._health_stopped and not allow_stopped or not self.manager.durable_inference or self.manager.root_binding is not self or self.manager.sc is not self._proxy
             or self.manager.initial_reservations is not None or self.manager.residency_renewal is not None):
             raise Conflict('Root manager accounting configuration changed')
+        if self._source_owner is not None and self.manager.inference_capacity_source is not self._source_owner:
+            raise Conflict('Root manager source ownership changed')
 
     def publish(self,preparation_id,receipt,resource_snapshot):
         """Event-loop only: bind fresh registry observations to the scheduler."""
@@ -124,6 +127,7 @@ class RootModelBinding:
     async def wait_for_renewal(self):
         """Wait for accepted health, then its due heartbeat; no idle busy poll."""
         while True:
+            if self._health_stopped:raise asyncio.CancelledError()
             self._health_changed.clear()
             due=self._health_due
             if due is None:
@@ -312,6 +316,67 @@ class RootModelBinding:
         with self.store._transaction() as conn:
             conn.execute("UPDATE root_model_intents SET state='gone',observation=? WHERE id=?",(observation,intent_id))
 
+    def assert_shutdown_ready(self):
+        """No mutation or HTTP: prove this manager has no physical root debt.
+
+        Stop new source work and drain tracked tasks before this check. Queued
+        calls may remain durable. A preparation with no client intent is known
+        never submitted (SDK persists before HTTP); it is suspended, not ended.
+        Unknown/lost-ACK client intent requires an exact terminal receipt.
+        """
+        self._mode(allow_stopped=True)
+        source=self.manager.inference_capacity_source
+        if source is not None:
+            if getattr(source,'binding',None) is not self or not getattr(source,'paused',False):
+                raise Conflict('Root source must be paused before manager shutdown')
+            supervisor=source.supervisor
+            if any(not task.done() for task in (*supervisor.workers.values(),*supervisor.preparations)):
+                raise Conflict('Root control/backend work remains; shutdown refused')
+        if self.manager.models or self._rows():
+            raise Conflict('Root model ownership requires explicit cleanup before shutdown')
+        with self.store._transaction() as conn:
+            intents={row['job_id']:dict(row) for row in conn.execute(
+                'SELECT * FROM root_client_intents WHERE resource=?',(self.resource,))}
+        receipts={}
+        for key,row in intents.items():
+            try:receipt=json.loads(row['receipt']) if row['receipt'] else None
+            except (TypeError,ValueError):receipt=None
+            if not isinstance(receipt,dict) or receipt.get('state')!='complete':
+                raise Conflict('Root intent lacks exact terminal acknowledgement; shutdown refused')
+            receipts[key]=receipt
+        conn=sqlite3.connect('file:'+str(self.scheduler.path)+'?mode=ro',uri=True)
+        conn.row_factory=sqlite3.Row
+        try:
+            if conn.execute("SELECT 1 FROM executions e JOIN grants g ON g.id=e.grant_id WHERE g.resource=? AND e.state IN ('running','uncertain')",(self.resource,)).fetchone():
+                raise Conflict('Root execution ownership remains unresolved; shutdown refused')
+            preps=[dict(row) for row in conn.execute(
+                "SELECT * FROM requester_root_preparations WHERE resource=? AND state!='complete'",(self.resource,))]
+            owned={row['id'] for row in conn.execute(
+                "SELECT id FROM requester_jobs WHERE resource=? AND state='owned'",(self.resource,))}
+        finally:conn.close()
+        if owned-{row['job_id'] for row in preps}:
+            raise Conflict('Unqualified logical owner requires reconciliation before shutdown')
+        for prep in preps:
+            receipt=receipts.get(prep['id'])
+            if receipt is None:
+                if any(prep[key] is not None for key in ('root_id','initial_lease_id','current_lease_id')):
+                    raise Conflict('Root preparation lost its physical receipt; shutdown refused')
+                continue  # No SDK intent: no submit ever started; keep queued identity.
+            if prep['root_id'] is not None and any(prep[key]!=receipt.get(key) for key in ('root_id','initial_lease_id')):
+                raise Conflict('Terminal root acknowledgement differs from preparation')
+        # A terminal physical receipt may precede logical settlement. Preserve
+        # that metadata for exact recovery; do not fabricate logical completion.
+
+    def begin_shutdown(self):
+        """One-way observation fence after positive physical drain, no release."""
+        self.assert_shutdown_ready()
+        source=self.manager.inference_capacity_source
+        if source is not None:source._stop_observations()
+        self.withdraw()
+        self.on_health_observed=None
+        self._health_stopped=True;self._health_due=None;self._health_marker=None
+        self._health_changed.set()
+
     async def renew_models(self):
         """One exact root heartbeat even with no resident models; no swap."""
         try:
@@ -357,6 +422,7 @@ class RootModelBinding:
 
     async def prepare_root(self,preparation_id):
         """Explicit saved begin; arm health even when model admission is unknown."""
+        self._mode()  # Refuse stopped/drifted ownership BEFORE any root submit.
         prep=self.scheduler.preparation(preparation_id)
         if prep['state'] not in ('prepared','admitted'):
             raise Conflict('Root preparation is ending; flush its saved end instead')

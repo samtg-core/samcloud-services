@@ -93,9 +93,14 @@ pause withdraws new work while retaining accepted jobs and exact claims. resume
 requires a new positive host observation. Running/preparing work is not cancelled.
 retains_model reports logical parent ownership to existing manager housekeeping.
 Cached guards also refuse changed manager source/accounting identity. snapshot
-exposes bounded source state, not prompts/credentials. Stop normal manager loops
-and drain tracked work before closing the scheduler; source pause is not parent
-finish and never substitutes for physical settlement.
+exposes bounded source state, not prompts/credentials. Pause the source and drain tracked work before manager shutdown. While paused,
+a completed physical boundary does not select another queued parent. The manager
+requires positive physical drain before stopping observations; late hints then
+cannot create preparation, and resume requires fresh startup. Queued work and
+terminal-physical/pending-logical recovery remain durable (root-models.md).
+Orchestration must await manager maintenance workers before closing its clients
+and journal. Source pause is not parent finish and never substitutes for physical
+settlement.
 
 ## Remaining shipping work
 

@@ -442,3 +442,54 @@ def test_postload_sensor_gap_preserves_known_completion_without_new_admission(en
     assert e.binding._rows()[0]['state']=='resident'
     with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
     assert e.m.ollama.loads==['text'];e.sc.release_lease.assert_not_called()
+
+
+class ShutdownTask:
+    def __init__(self):self.cancelled=False
+    def done(self):return False
+    def cancel(self):self.cancelled=True
+
+
+def shutdown_fixture(e):
+    e.m._pool_lock=threading.Lock();e.m._pool_leases=set()
+    tasks=[ShutdownTask() for _ in range(6)]
+    for name,task in zip(('_cooldown_task','_health_task','_renewal_task','_pool_renewal_task','_stats_task','_offering_task'),tasks):
+        setattr(e.m,name,task)
+    return tasks
+
+
+def test_shutdown_idle_root_refuses_before_pool_release_unload_or_health_cancel(env):
+    e=env;tasks=shutdown_fixture(e);e.m.load_ollama_model('text')
+    e.m._pool_leases={'pool-fixture'};e.m.release_pool=Mock()
+    with pytest.raises(Conflict):e.m.shutdown()
+    assert all(not task.cancelled for task in tasks)
+    assert 'text' in e.m.models and e.m.ollama.unloads==[]
+    e.m.release_pool.assert_not_called();e.sc.release_lease.assert_not_called()
+    assert e.body['lease']['status']=='active' and e.a.owns_job('host/gpu')
+
+
+def test_shutdown_empty_backend_still_retains_unfinished_root(env):
+    e=env;tasks=shutdown_fixture(e)
+    with pytest.raises(Conflict):e.m.shutdown()
+    assert not e.m.models and e.body['lease']['status']=='active'
+    assert all(not task.cancelled for task in tasks)
+
+
+def settle_for_shutdown(e):
+    assert e.a.dispatch_next('host/gpu',permitted_model=lambda *_:True)['execution']['id']==e.call['id']
+    e.m.load_ollama_model('text');e.a.finish(e.call['id'],{});e.a.end_job('one','parent')
+    assert asyncio.run(e.binding.end_drained_root(e.prep['id'],observation='fixture-shutdown-provider-absence'))['state']=='complete'
+
+
+def test_shutdown_after_explicit_exact_settlement_can_stop_health(env):
+    e=env;tasks=shutdown_fixture(e);settle_for_shutdown(e)
+    assert e.m.shutdown()==[] and all(task.cancelled for task in tasks)
+    assert e.body['lease']['status']=='released' and not e.binding._rows()
+    e.sc.release_lease.assert_not_called()
+
+
+def test_shutdown_unknown_orphan_intent_is_not_assumed_never_submitted(env):
+    e=env;tasks=shutdown_fixture(e);settle_for_shutdown(e)
+    e.store.prepare('unacknowledged-intent','host/gpu')
+    with pytest.raises(Conflict):e.m.shutdown()
+    assert all(not task.cancelled for task in tasks)

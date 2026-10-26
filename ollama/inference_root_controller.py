@@ -24,12 +24,12 @@ class RootController:
             or supervisor.on_resource_demand is not None or supervisor.permitted_model is not None
             or supervisor.workers or supervisor.preparations
             or binding.manager.inference_capacity_source is not None
-            or binding.on_health_observed is not None):
+            or binding.on_health_observed is not None or binding._source_owner is not None):
             raise Conflict('Explicit idle root supervisor/binding required')
         self.supervisor,self.binding=supervisor,binding
         self.scheduler,self.manager=supervisor.journal,binding.manager
         self.resource=binding.resource;self.permission=work_permitted
-        self.paused=False;self._host_known=True
+        self.paused=False;self._host_known=True;self._stopped=False
         self._ready=None;self._task=None;self._dirty=False;self._epoch=0;self._publishing=False
         self.last={'state':'unknown','reason':'unobserved'}
         binding.withdraw()
@@ -38,6 +38,7 @@ class RootController:
         supervisor.on_resource_demand=self.request
         # Reuse actual manager stats and root-health maintenance. No new timer
         # or second allocator/watcher is constructed here.
+        binding._source_owner=self
         self.manager.inference_capacity_source=self
         binding.on_health_observed=lambda:self.request(self.resource)
 
@@ -45,6 +46,7 @@ class RootController:
         return model in self.binding.models and self.scheduler.owns_job(self.resource)
 
     def invalidate(self,reason='observing'):
+        if self._stopped:return
         # Existing stats_loop calls this BEFORE collecting. Failed/cancelled
         # collection cannot leave an old positive readiness cached.
         self._epoch+=1;self._ready=None;self._host_known=False
@@ -52,6 +54,7 @@ class RootController:
         self.last={'state':'unknown','reason':reason}
 
     async def refresh(self,physical):
+        if self._stopped:return
         self.invalidate()
         values=[physical.get(name) if isinstance(physical,dict) else None
                 for name in ('memory_available_mb','memory_device_inuse_mb')]
@@ -66,14 +69,21 @@ class RootController:
         self.invalidate('source_paused')
 
     def resume(self):
+        if self._stopped:raise Conflict('Stopped root source requires fresh startup')
         # Like the legacy source, resume needs a new positive observation.
         self.paused=False
         self.invalidate('awaiting_observation')
 
     def snapshot(self):
-        return {'resource':self.resource,**self.last,'paused':self.paused,
+        return {'resource':self.resource,**self.last,'paused':self.paused,'stopped':self._stopped,
                 'host_known':self._host_known,
                 'preparing':self._task is not None and not self._task.done()}
+
+    def _stop_observations(self):
+        # Called only by binding.begin_shutdown AFTER its positive audit.
+        self.paused=True
+        self.invalidate('manager_stopped')
+        self._stopped=True
 
     def set_work_permitted(self,value):
         if type(value) is not bool:raise ValueError('Explicit service work permission required')
@@ -111,7 +121,7 @@ class RootController:
         change or a completed root heartbeat, never from a periodic retry loop.
         Publishing our own readiness suppresses its synchronous pump hint.
         """
-        if resource!=self.resource or self._publishing:return None
+        if self._stopped or resource!=self.resource or self._publishing:return None
         self._epoch+=1;self._ready=None;self._dirty=True
         self.binding.withdraw()
         if self._task is None or self._task.done():
@@ -139,6 +149,9 @@ class RootController:
                 logging.getLogger(__name__).warning('Root preparation observation incomplete (%s)',type(error).__name__)
 
     async def _step(self,epoch):
+        if self.paused and self.scheduler._current_preparation(self.resource) is None:
+            self.last={'state':'unknown','reason':'source_paused'}
+            return  # Preserve queued work; don't select a new parent while stopping.
         prep=self.scheduler.prepare_root(self.resource)
         if prep is None:
             self.last={'state':'idle','reason':'no_accepted_demand'}

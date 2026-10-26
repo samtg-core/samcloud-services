@@ -1,3 +1,15 @@
+# Refuse shutdown while root ownership is unresolved — 27 October 2026
+
+Audit root/model/execution/control debt before ANY manager pool release, unload
+or health cancellation. Empty/idle inventory cannot settle a root. Pause/drain
+the source first; exact terminal physical receipts permit stop while preserving
+logical recovery, and known unsubmitted preparations preserve queued identity.
+Unknown SDK intent requires acknowledgement. Successful stop fences late host/
+health hints and prevents new loads; retrying the acknowledged stop is safe.
+No root is automatically ended/released, no job clock or runtime activation added.
+Bootstrap/operator/maintenance-worker shutdown orchestration, migration and actual
+physical/native qualification remain open. See docs/root-models.md.
+
 # Give root-mode single calls a durable completion boundary — 27 October 2026
 
 Ordinary calls without job_key now get one sealed internal parent bound to their

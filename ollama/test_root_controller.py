@@ -6,6 +6,7 @@ import pytest
 
 from .test_root_models import env  # noqa: F401
 from .inference_root_controller import RootController
+from .inference_arbiter import Conflict
 from .inference_root_scheduler import RootPreparingArbiter
 from .inference_supervisor import Supervisor
 
@@ -283,4 +284,23 @@ def test_cached_dispatch_refuses_changed_manager_source_or_accounting_owner(cont
         finally:
             setattr(x.e.m,field,previous);x.gate['event'].set();await drain(x)
         assert x.e.a.execution(x.e.call['id'],'one')['state']=='complete'
+    asyncio.run(scenario())
+
+
+def test_root_shutdown_requires_pause_then_fences_late_health_and_host_events(controlled):
+    from .test_root_models import shutdown_fixture
+    async def scenario():
+        x=controlled;tasks=shutdown_fixture(x.e)
+        x.s.pump('host/gpu');await drain(x);x.s.end_job('one','parent');await drain(x)
+        with pytest.raises(Conflict):x.e.m.shutdown()
+        assert all(not t.cancelled for t in tasks)
+        x.c.pause();await x.c.drain();assert x.e.m.shutdown()==[]
+        assert x.e.m.shutdown()==[]  # Acknowledged stop can be retried.
+        assert all(t.cancelled for t in tasks) and x.c.snapshot()['stopped']
+        assert x.e.binding.on_health_observed is None
+        assert x.c.request('host/gpu') is None
+        await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0})
+        with pytest.raises(Conflict):x.c.resume()
+        with pytest.raises(asyncio.CancelledError):await x.e.binding.wait_for_renewal()
+        with pytest.raises(Conflict):x.e.m.load_ollama_model('text')
     asyncio.run(scenario())
