@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 
@@ -19,6 +19,7 @@ class Lifespan(unittest.IsolatedAsyncioTestCase):
         self.manager = SimpleNamespace(sc=self.registry,models={},durable_inference=False,
             residency_renewal=None,discover=Mock(return_value=[]),claim_leases=Mock(return_value=[]),
             start_background_tasks=Mock(),shutdown=Mock(return_value=[]))
+        self.manager.shutdown_async = AsyncMock(side_effect=lambda:self.manager.shutdown())
         self.app = FastAPI()
         self.patches = [patch.object(server,'app',self.app),
             patch.object(server,'mgr',None),patch.object(server,'inference_dispatcher',None),
@@ -112,6 +113,25 @@ class Lifespan(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError,'ownership differs'):
             await self.exit()
         self.manager.shutdown.assert_not_called()
+
+    async def test_real_lifespan_keeps_journal_open_until_manager_maintenance_drain(self):
+        runtime=self.install();entered=asyncio.Event();release=asyncio.Event()
+        async def drain():
+            self.manager.shutdown()
+            entered.set()
+            await release.wait()
+            return []
+        self.manager.shutdown_async.side_effect=drain
+        stop=asyncio.create_task(self.exit())
+        try:
+            await asyncio.wait_for(entered.wait(),2)
+            self.assertFalse(stop.done())
+            self.assertEqual(runtime.queue.supervisor.journal.db.execute('SELECT 1').fetchone()[0],1)
+        finally:release.set()
+        await asyncio.wait_for(stop,2)
+        import sqlite3
+        with self.assertRaises(sqlite3.ProgrammingError):
+            runtime.queue.supervisor.journal.db.execute('SELECT 1')
 
     async def test_legacy_uninstalled_lifecycle_is_unchanged(self):
         await self.exit()

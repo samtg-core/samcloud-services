@@ -98,8 +98,8 @@ a completed physical boundary does not select another queued parent. The manager
 requires positive physical drain before stopping observations; late hints then
 cannot create preparation, and resume requires fresh startup. Queued work and
 terminal-physical/pending-logical recovery remain durable (root-models.md).
-Orchestration must await manager maintenance workers before closing its clients
-and journal. Source pause is not parent finish and never substitutes for physical
+The service lifespan awaits `manager.shutdown_async()` before runtime/journal
+close; operator/bootstrap orchestration must use the same owned drain boundary. Source pause is not parent finish and never substitutes for physical
 settlement.
 
 ## Remaining shipping work

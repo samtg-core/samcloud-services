@@ -130,8 +130,15 @@ retried; a stopped source cannot resume/load models and needs fresh startup.
 Source ownership stays bound even if the mutable manager source field is
 cleared, and stopped/preparation entry points refuse before any new root submit.
 The shutdown path creates/ends/releases no root itself. Native/service bootstrap,
-operator orchestration and awaiting manager maintenance workers before closing
-clients/journals still need qualification.
+operator orchestration and full native/host restart still need qualification.
+The service lifespan now awaits `shutdown_async()` before runtime/journal close.
+The root audit still precedes any task cancellation. That async boundary drains
+all six manager maintenance tasks, including `source_call` threads finishing
+after cancellation. Concurrent/reconnected waiters join the same retained drain;
+cancelling an observer cannot cancel it. A refused audit does not cancel
+maintenance and may be retried after explicit reconciliation. No compute/job
+deadline or inferred logical finish is added. Direct synchronous `shutdown()`
+callers must not close shared clients/journals until maintenance is drained.
 
 ## Explicit restart suspension
 

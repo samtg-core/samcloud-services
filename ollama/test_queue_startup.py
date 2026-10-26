@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 import httpx
@@ -28,6 +28,7 @@ class Startup(unittest.IsolatedAsyncioTestCase):
             residency_renewal=None,ollama=SimpleNamespace(list_running=Mock(return_value=[])),
             discover=Mock(),claim_leases=Mock(),start_background_tasks=Mock(),
             shutdown=Mock(return_value=[]))
+        self.manager.shutdown_async = AsyncMock(side_effect=lambda:self.manager.shutdown())
         self.app = FastAPI()
         for name,value in (('app',self.app),('mgr',None),('inference_dispatcher',None),
                            ('inference_runtime',None),('inference_startup',None),

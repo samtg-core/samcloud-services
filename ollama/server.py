@@ -432,7 +432,7 @@ async def lifespan(app: FastAPI):
             # work. This protects graceful cleanup, not SIGKILL/power loss.
             log.error('Inference ownership unresolved; manager shutdown refused')
             raise RuntimeError('Inference ownership requires reconciliation before shutdown')
-    results = mgr.shutdown()
+    results = await mgr.shutdown_async()
     for r in results:
         log.info(f"  {r}")
     if runtime is not None:

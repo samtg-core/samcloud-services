@@ -3764,6 +3764,30 @@ class ModelManager:
             self._pool_watch_task = asyncio.create_task(self.pool_watch_loop())
         log.info("Background tasks started (cooldown, health, lease renewal, POOL lease renewal, stats, offering, pool watch)")
 
+    async def shutdown_async(self) -> list[dict]:
+        """Audit/stop, then drain maintenance before clients/journals may close.
+
+        Cancelling the lifecycle observer cannot cancel an already-started drain.
+        In particular, source_call may still own a thread after task.cancel().
+        No age deadline or automatic parent finish/release is introduced here.
+        A refused audit can be retried after explicit reconciliation.
+        """
+        task = getattr(self, '_shutdown_drain_task', None)
+        if task is not None and task.done() and (task.cancelled() or task.exception() is not None):
+            task = None
+        if task is None:
+            async def stop_and_drain():
+                results = self.shutdown()  # ownership audit precedes ALL cancellation
+                pending = [task for name in ('_cooldown_task', '_health_task', '_renewal_task',
+                    '_pool_renewal_task', '_stats_task', '_offering_task')
+                    if (task := getattr(self, name, None)) is not None]
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                return results
+            task = asyncio.create_task(stop_and_drain())
+            self._shutdown_drain_task = task
+        return await asyncio.shield(task)
+
     def shutdown(self) -> list[dict]:
         """Release all leases. Only stop processes we started (managed=True)."""
         if self.root_binding is not None:

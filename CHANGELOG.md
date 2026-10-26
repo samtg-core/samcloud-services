@@ -1,3 +1,15 @@
+# Drain manager maintenance before closing the service journal — 27 October 2026
+
+The actual server lifespan now awaits an owned async shutdown drain after its
+existing quiesce checks. Manager ownership audit runs before cancellation; then
+all maintenance tasks finish, including source_call threads that outlive a task
+cancel. Cancelling the shutdown observer does not cancel the drain, and a later
+waiter joins that same stop rather than repeating cleanup. Refused ownership
+leaves maintenance alive and can retry after explicit reconciliation. No job
+clock, parent finish or automatic claim release is introduced. Actual legacy
+sync-stop-before-thread-exit reproduced; fake-thread/lifespan tests qualify the
+ordering, not physical/native/root bootstrap or deployment. Local candidate only.
+
 # Suspend root control for restart without losing ownership — 27 October 2026
 
 Add explicit qualified restart suspension alongside strict ordinary shutdown.
