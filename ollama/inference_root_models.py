@@ -69,6 +69,7 @@ class RootModelBinding:
         self._lock=threading.Lock();self._permission=None
         self._health_changed=asyncio.Event()
         self._health_marker=None;self._health_due=None;self._health_ttl=None
+        self.on_health_observed=None
         with store._transaction() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS root_model_intents (
                 id TEXT PRIMARY KEY,preparation_id TEXT NOT NULL,resource TEXT NOT NULL,
@@ -313,24 +314,34 @@ class RootModelBinding:
 
     async def renew_models(self):
         """One exact root heartbeat even with no resident models; no swap."""
-        prep=self.scheduler._current_preparation(self.resource)
-        if prep is None:
-            self._health_due=None;self._health_marker=None
-            return []
-        # Failed observations retain intent/charge, but cannot make this a
-        # zero-delay retry loop after a missed heartbeat.
-        if self._health_ttl is not None:self._health_due=time.monotonic()+self._health_ttl/4
-        self.withdraw()
-        current=await source_call(self.client.observe,prep['id'],self.resource)
-        self._note_health(current)
-        if self._health_due is None:
-            raise Conflict('Current root health requires exact-holder reconciliation')
-        renewed=await source_call(lambda:self.client.renew(prep['id'],self.resource,lease_id=current['current_lease_id']))
-        self._note_health(renewed)
-        if prep['state']!='ending' and renewed['state']=='open':
-            view=await source_call(self.manager.sc.get_resource,self.resource)
-            self.publish(prep['id'],renewed,view)
-        return [renewed]
+        try:
+            prep=self.scheduler._current_preparation(self.resource)
+            if prep is None:
+                self._health_due=None;self._health_marker=None
+                return []
+            # Failed observations retain intent/charge, but cannot make this a
+            # zero-delay retry loop after a missed heartbeat.
+            if self._health_ttl is not None:self._health_due=time.monotonic()+self._health_ttl/4
+            self.withdraw()
+            current=await source_call(self.client.observe,prep['id'],self.resource)
+            self._note_health(current)
+            if self._health_due is None:
+                raise Conflict('Current root health requires exact-holder reconciliation')
+            renewed=await source_call(lambda:self.client.renew(prep['id'],self.resource,lease_id=current['current_lease_id']))
+            self._note_health(renewed)
+            if prep['state']!='ending' and renewed['state']=='open':
+                view=await source_call(self.manager.sc.get_resource,self.resource)
+                self.publish(prep['id'],renewed,view)
+            return [renewed]
+        finally:
+            # A completed health observation (including a failed read) is a
+            # real event, not an admission receipt. The optional source owns
+            # its coalesced task; it cannot mask the maintenance result.
+            if self.on_health_observed is not None:
+                try:self.on_health_observed()
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).warning('Root health source notification incomplete')
 
     async def refresh(self):
         """Withdraw before reading; failed observation never reuses old permission."""

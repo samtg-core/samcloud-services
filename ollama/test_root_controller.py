@@ -170,3 +170,117 @@ def test_many_hints_during_started_preload_coalesce_without_second_load(controll
             assert x.e.binding._rows()[0]['state']=='resident'
         finally:finish.set();await drain(x)
     asyncio.run(scenario())
+
+
+def test_manager_stats_loop_uses_same_source_and_preserves_existing_sample_clock(controlled,monkeypatch):
+    from unittest.mock import Mock
+    from . import manager as module
+    async def scenario():
+        x=controlled;x.e.sc.push_stats=Mock();x.e.m._collect_stats=lambda:{'memory_available_mb':64000,'memory_device_inuse_mb':0}
+        assert x.e.m.inference_capacity_source is x.c
+        sleep=asyncio.sleep;sleeps=[]
+        async def stop_after_sample(delay):
+            if delay==15:
+                sleeps.append(delay);raise asyncio.CancelledError()
+            await sleep(delay)
+        monkeypatch.setattr(module.asyncio,'sleep',stop_after_sample)
+        with pytest.raises(asyncio.CancelledError):await x.e.m.stats_loop()
+        await drain(x)
+        assert sleeps==[15] and x.e.sc.push_stats.call_count==1
+        assert x.entered==['text'] and x.e.m.ollama.loads==['text']
+    asyncio.run(scenario())
+
+
+def test_unknown_sample_blocks_new_work_until_actual_positive_sample(controlled):
+    async def scenario():
+        x=controlled;await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':None});await drain(x)
+        assert not x.entered and x.e.m.ollama.loads==[]
+        assert x.c.snapshot()['reason']=='host_observation_unknown'
+        assert x.e.a.execution(x.e.call['id'],'one')['state']=='queued'
+        await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0});await drain(x)
+        assert x.entered==['text']
+    asyncio.run(scenario())
+
+
+def test_source_pause_and_resume_require_new_observation(controlled):
+    async def scenario():
+        x=controlled;x.c.pause()
+        await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0});await drain(x)
+        assert not x.entered and x.c.snapshot()['paused']
+        x.c.resume();x.s.pump('host/gpu');await drain(x)
+        assert not x.entered and x.c.snapshot()['host_known'] is False
+        await x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0});await drain(x)
+        assert x.entered==['text'] and x.c.retains_model('text')
+    asyncio.run(scenario())
+
+
+def test_actual_manager_root_heartbeat_notifies_same_controller_without_per_model_renew(controlled):
+    async def scenario():
+        x=controlled;x.s.pump('host/gpu');await drain(x)
+        a=x.e.a;g=a.submit('one','saved-next','host/gpu','text','execution')
+        call=a.enqueue(g['id'],'one','saved-next',{'fixture':True},job_key='parent')
+        # No fresh enqueue pump: an actual maintenance completion wakes saved
+        # demand. This is one real event, not an independently polling retry.
+        await x.e.m.renew_model_leases();await drain(x)
+        assert a.execution(call['id'],'one')['state']=='complete'
+        assert x.entered==['text','text'] and x.e.m.ollama.loads==['text']
+        assert len([p for method,p in x.e.control if p.endswith('/renew')])==1
+        x.e.sc.renew_lease.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_failed_heartbeat_keeps_claim_and_needs_fresh_event_without_retry_loop(controlled,monkeypatch):
+    async def scenario():
+        import httpx
+        x=controlled;x.s.pump('host/gpu');await drain(x)
+        observe=x.e.client.observe
+        def fail(*_):raise httpx.ConnectError('fixture control observation failed')
+        monkeypatch.setattr(x.e.client,'observe',fail)
+        with pytest.raises(httpx.ConnectError):await x.e.m.renew_model_leases()
+        await drain(x);count=len(x.e.control)
+        assert x.e.body['lease']['status']=='active' and x.e.a.owns_job('host/gpu')
+        assert x.c.guard('host/gpu') is False
+        await asyncio.sleep(0);await asyncio.sleep(0)
+        assert len(x.e.control)==count and x.e.m.ollama.loads==['text']
+        monkeypatch.setattr(x.e.client,'observe',observe)
+        enqueue(x,'next');await drain(x)
+        assert x.entered==['text','text'] and x.e.m.ollama.loads==['text']
+    asyncio.run(scenario())
+
+
+def test_host_sample_returns_while_service_owned_preload_is_still_running(controlled):
+    import threading
+    async def scenario():
+        x=controlled;load=x.e.m.ollama.load_model;started=threading.Event();finish=threading.Event()
+        def delayed(*args,**kwargs):
+            load(*args,**kwargs);started.set()
+            if not finish.wait(3):raise AssertionError('fixture preload not released')
+        x.e.m.ollama.load_model=delayed
+        sample=asyncio.create_task(x.c.refresh({'memory_available_mb':64000,'memory_device_inuse_mb':0}))
+        try:
+            assert await asyncio.to_thread(started.wait,2)
+            assert sample.done() and x.c.snapshot()['preparing']
+            assert not x.entered
+            await x.c.refresh({'memory_available_mb':18000,'memory_device_inuse_mb':46000})
+            assert x.c.snapshot()['preparing'] and not finish.is_set()
+            finish.set();await drain(x)
+            assert x.entered==['text'] and x.e.m.ollama.loads==['text']
+        finally:finish.set();await sample;await drain(x)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('field',['inference_capacity_source','root_binding'])
+def test_cached_dispatch_refuses_changed_manager_source_or_accounting_owner(controlled,field):
+    async def scenario():
+        x=controlled;x.gate['event']=asyncio.Event();x.s.pump('host/gpu');await x.c.drain()
+        while not x.entered:await asyncio.sleep(0)
+        previous=getattr(x.e.m,field)
+        try:
+            assert x.c.guard('host/gpu') is True
+            setattr(x.e.m,field,object())
+            assert x.c.guard('host/gpu') is False
+            assert x.e.body['lease']['status']=='active'
+        finally:
+            setattr(x.e.m,field,previous);x.gate['event'].set();await drain(x)
+        assert x.e.a.execution(x.e.call['id'],'one')['state']=='complete'
+    asyncio.run(scenario())

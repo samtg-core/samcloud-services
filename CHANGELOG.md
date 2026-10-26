@@ -1,3 +1,16 @@
+# Reuse manager observations for root readiness — 27 October 2026
+
+The explicitly constructed RootController now implements the existing manager
+capacity-source protocol: invalidate before host collection, refresh after,
+pause/resume, drain and logical residency retention. Refresh registers preparation
+without waiting for a long preload, keeping host stats/reporting live. The same
+controller receives actual completed root-health notifications; failed reads
+retain claims/readiness debt without masking maintenance or starting a retry loop.
+Resume needs a positive sample, and cached guards refuse source/accounting drift.
+No new sampling clock, watcher, job deadline, bootstrap selection or live change.
+Direct registry push mapping, operator/bootstrap/migration and physical/native
+qualification remain open. See docs/root-controller.md.
+
 # Drive root/model preparation from service events — 27 October 2026
 
 Add an explicitly constructed RootController connecting qualified scheduler,

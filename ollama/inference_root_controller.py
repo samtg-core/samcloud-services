@@ -22,17 +22,58 @@ class RootController:
         if (not isinstance(supervisor.journal,RootPreparingArbiter)
             or supervisor.journal is not binding.scheduler
             or supervisor.on_resource_demand is not None or supervisor.permitted_model is not None
-            or supervisor.workers or supervisor.preparations):
+            or supervisor.workers or supervisor.preparations
+            or binding.manager.inference_capacity_source is not None
+            or binding.on_health_observed is not None):
             raise Conflict('Explicit idle root supervisor/binding required')
         self.supervisor,self.binding=supervisor,binding
         self.scheduler,self.manager=supervisor.journal,binding.manager
         self.resource=binding.resource;self.permission=work_permitted
+        self.paused=False;self._host_known=True
         self._ready=None;self._task=None;self._dirty=False;self._epoch=0;self._publishing=False
         self.last={'state':'unknown','reason':'unobserved'}
         binding.withdraw()
         supervisor.permitted=self.guard
         supervisor.permitted_model=self.permitted_model
         supervisor.on_resource_demand=self.request
+        # Reuse actual manager stats and root-health maintenance. No new timer
+        # or second allocator/watcher is constructed here.
+        self.manager.inference_capacity_source=self
+        binding.on_health_observed=lambda:self.request(self.resource)
+
+    def retains_model(self,model):
+        return model in self.binding.models and self.scheduler.owns_job(self.resource)
+
+    def invalidate(self,reason='observing'):
+        # Existing stats_loop calls this BEFORE collecting. Failed/cancelled
+        # collection cannot leave an old positive readiness cached.
+        self._epoch+=1;self._ready=None;self._host_known=False
+        self.binding.withdraw()
+        self.last={'state':'unknown','reason':reason}
+
+    async def refresh(self,physical):
+        self.invalidate()
+        values=[physical.get(name) if isinstance(physical,dict) else None
+                for name in ('memory_available_mb','memory_device_inuse_mb')]
+        self._host_known=all(type(value) is int and value>=0 for value in values)
+        if self.paused:return
+        # Stats collection/reporting must not wait behind a long model preload.
+        # The supervisor owns preparation; drain() is the explicit waiter.
+        self.request(self.resource)
+
+    def pause(self):
+        self.paused=True
+        self.invalidate('source_paused')
+
+    def resume(self):
+        # Like the legacy source, resume needs a new positive observation.
+        self.paused=False
+        self.invalidate('awaiting_observation')
+
+    def snapshot(self):
+        return {'resource':self.resource,**self.last,'paused':self.paused,
+                'host_known':self._host_known,
+                'preparing':self._task is not None and not self._task.done()}
 
     def set_work_permitted(self,value):
         if type(value) is not bool:raise ValueError('Explicit service work permission required')
@@ -46,7 +87,11 @@ class RootController:
     def permitted_model(self,resource,model):
         """Cached loop-local dispatch check: no SQL, network or model load."""
         r=self._ready
-        if not self.permission or resource!=self.resource or r is None or r['model']!=model:
+        if self.paused or not self._host_known or not self.permission or resource!=self.resource or r is None or r['model']!=model:
+            return None
+        if (self.manager.inference_capacity_source is not self or self.manager.root_binding is not self.binding
+            or self.manager.sc is not self.binding._proxy or not self.manager.durable_inference
+            or self.manager.initial_reservations is not None or self.manager.residency_renewal is not None):
             return None
         with self.binding._lock:current=self.binding._permission
         if (current is None or current[0]!=r['preparation_id']
@@ -104,8 +149,9 @@ class RootController:
             # No busy retry: failed/unknown cleanup exits above until an event.
             self._dirty=True
             return
-        if not self.permission:
-            self.last={'state':'unknown','reason':'work_not_permitted'}
+        if self.paused or not self.permission or not self._host_known:
+            reason='source_paused' if self.paused else 'work_not_permitted' if not self.permission else 'host_observation_unknown'
+            self.last={'state':'unknown','reason':reason}
             return
         await self.binding.prepare_root(prep['id'])
         if epoch!=self._epoch:

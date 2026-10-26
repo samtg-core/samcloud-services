@@ -4,6 +4,7 @@ RootController explicitly connects one RootPreparingArbiter, Supervisor and
 RootModelBinding for one physical resource. It is a capacity source and a
 coalesced preparation driver, not an allocator. Only the shared registry admits
 physical roots. No current service bootstrap, profile or capability selects it.
+Explicit construction now attaches it to the manager's existing source protocol.
 Standalone first native image/endpoint work stays independent.
 
 ## Construction and event contract
@@ -17,8 +18,11 @@ Default bootstrap continues to use the existing journal/source.
 
 The controller installs only the loop-local dispatch guards and synchronous
 resource-demand hook. An enqueue, owner end, release or completed child already
-pumps that hook. Host/resource/registry-change hints must call request(resource)
-on the service event loop after a real external observation or heartbeat.
+pumps that hook. The existing manager stats_loop calls invalidate before collecting and
+refresh after a physical sample; the controller implements that source protocol.
+RootModelBinding notifies the same controller after an actual root-health pass,
+including a failed read. Direct registry-change hints can also call
+request(resource) on the service loop.
 Unrelated resources are ignored. Event payloads never carry admission authority:
 the controller reads the exact root, actual resource snapshot and host capacity.
 
@@ -71,12 +75,30 @@ external event can reconcile the saved intent. A lost committed settlement reply
 reads the terminal root and finishes logical handback without a second release.
 No cancel, success or absence is inferred from elapsed time or a lost observer.
 
+## Manager observation and lifecycle
+
+The existing15-second physical sampler and root-health loop are reused; no new
+sampling/retry timer or second watcher is created. refresh schedules preparation
+and returns immediately, so host reporting continues during a long preload.
+Unknown/invalid samples withdraw readiness; a positive later sample can wake the
+same saved work. Invalidation happens before collection, so a failed or cancelled
+collector cannot leave stale permission. Health notifications do not mask the
+maintenance result and carry no admission authority.
+
+pause withdraws new work while retaining accepted jobs and exact claims. resume
+requires a new positive host observation. Running/preparing work is not cancelled.
+retains_model reports logical parent ownership to existing manager housekeeping.
+Cached guards also refuse changed manager source/accounting identity. snapshot
+exposes bounded source state, not prompts/credentials. Stop normal manager loops
+and drain tracked work before closing the scheduler; source pause is not parent
+finish and never substitutes for physical settlement.
+
 ## Remaining shipping work
 
-Connect the actual registry-change and host-observation feeds, including completed
-health observations, to the service-loop request hook. Keep finite registry
-health maintenance under its accepted root contract while waiting/loading; those
-heartbeats are distinct from job deadlines. Integrate explicit bootstrap/operator
+Qualify any direct registry push-change mapping; the current host-sample path
+already causes a fresh root/resource read, using the existing observation loop.
+Keep finite registry health maintenance under its accepted root contract while
+waiting/loading; those heartbeats are distinct from job deadlines. Integrate explicit bootstrap/operator
 construction and graceful drain, and qualify migration of legacy accepted calls,
 initial reservations and residency before enabling any live root policy.
 

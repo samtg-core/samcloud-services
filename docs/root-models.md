@@ -66,7 +66,9 @@ adoption or new load is inferred from empty manager inventory.
 actual registry contract, including when physical/model readiness is unknown.
 `refresh` withdraws permission before observation. `publish` validates the root
 and supplies readiness; neither a read failure nor old cached success permits
-new load. `renew_models` sends one exact root heartbeat, even with no resident
+new load. An explicitly attached controller receives a completed-health hint
+(successful or failed) without replacing the maintenance result.
+`renew_models` sends one exact root heartbeat, even with no resident
 model, instead of resizing/replacing each model lease.
 
 Root mode's maintenance waits for accepted health and schedules from one quarter
