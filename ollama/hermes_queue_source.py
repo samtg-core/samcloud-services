@@ -96,11 +96,11 @@ class CompactionSource:
         if hashlib.sha256(encoded(messages).encode()).hexdigest() != self.digest:
             raise ValueError('explicit compaction source differs from held input')
 
-    def bind(self, path, request):
+    def bind(self, path, request, *, job_turn=''):
         self.messages()
         store = IdentityStore(path)
         try:
             return store.bind_execution(self.scope, self.purpose,
-                'operation:' + self.operation, request)
+                'operation:' + self.operation, request, job_turn=job_turn)
         finally:
             store.close()

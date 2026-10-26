@@ -1,3 +1,17 @@
+# Staged requester-job candidate — 26 October 2026
+
+Not activated. Durable parent jobs preserve requester and residency ownership
+across native text, compaction, sequential/concurrent tools and interrupted
+recovery. Successful native completion emits a durable explicit finish. Ordinary
+foreign demand/cooldown no longer silently ends the parent; ended managed vision
+children can recover under their retained exact active charge. Unknown execution,
+cleanup or admission retains debt and refuses dispatch. Registry cross-service
+image delegation, cold-process/expired-debt recovery and native explicit yield
+remain unqualified. See docs/requester-jobs.md for contracts, tests and rollback.
+
+The prior staged durable queue/compaction snapshot is committed separately for
+honest review lineage; this branch does not claim a production activation.
+
 # Changelog & Working Notes
 
 Project history and current state. This is a living document.

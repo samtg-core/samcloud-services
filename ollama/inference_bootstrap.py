@@ -395,6 +395,12 @@ class QueueRuntime:
                 source.invalidate()
                 await source.refresh(await source_call(self.manager._collect_stats))
         self.queue.supervisor.on_finished = completed
+        async def job_boundary(resource):
+            from .inference_events import source_call
+            source.invalidate('job_boundary')
+            if not source.paused:
+                await source.refresh(await source_call(self.manager._collect_stats))
+        self.queue.supervisor.on_job_boundary = job_boundary
 
     async def quiesce(self, *, _resource_handoff=False):
         """Drain known workers with no age deadline; report unresolved ownership.

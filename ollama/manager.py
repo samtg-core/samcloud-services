@@ -2930,11 +2930,13 @@ class ModelManager:
             )
         )
         cooldown = 0 if working else COOLDOWN_SECONDS
+        source = self.inference_capacity_source if self.durable_inference else None
         to_unload = [
             name
             for name, mm in self.models.items()
             if mm.managed
             and not mm.in_flight
+            and not (source is not None and source.retains_model(name))
             and (now - mm.last_used) > cooldown
         ]
         for name in to_unload:

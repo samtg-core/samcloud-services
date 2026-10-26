@@ -1,4 +1,4 @@
 name: samcloud-queue-provider
 kind: model-provider
-version: 0.1.0
+version: 0.2.0
 description: Opt-in durable model-service queue (main and auxiliary policies)

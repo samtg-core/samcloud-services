@@ -36,11 +36,27 @@ async def relay_once(consumer, source, *, cursor=None):
     capabilities.raise_for_status()
     document = capabilities.json()
     policy = document.get('stints', {}) if isinstance(document, dict) else None
-    if not isinstance(policy, dict) or policy.get('lifecycle_yield') is not True:
-        return -1
+    jobs = document.get('jobs', {}) if isinstance(document, dict) else None
+    legacy_supported = isinstance(policy, dict) and policy.get('lifecycle_yield') is True
+    jobs_supported = (isinstance(jobs, dict) and type(jobs.get('version')) is int
+                      and jobs['version'] == 1 and jobs.get('explicit_finish') is True)
     acknowledged = 0
     for event in events:
         try:
+            if event.get('kind') == 'job_finish':
+                if not jobs_supported:
+                    continue
+                response = await http.post('/v1/inference/jobs/end', json={
+                    'key': event['job_key'], 'action': 'finish'}, timeout=consumer.request_timeout)
+                if response.status_code == 202:
+                    body = response.json()
+                    if (isinstance(body, dict) and body.get('key') == event['job_key']
+                            and body.get('action') == 'finish' and isinstance(body.get('jobs'), list)):
+                        await source_call(source.acknowledge_event, event, 'accepted')
+                        acknowledged += 1
+                continue
+            if event.get('kind', 'grant_yield') != 'grant_yield' or not legacy_supported:
+                continue
             response = await http.post('/v1/inference/yield', json={
                 'grant_key': event['grant_key'], 'expected_call_key': event['expected_call_key']},
                 timeout=consumer.request_timeout)

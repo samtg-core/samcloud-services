@@ -73,15 +73,15 @@ class HeldSource:
         scope = 'hermes:' + hashlib.sha256(encoded([profile_scope, session_id]).encode()).hexdigest()
         return cls(scope, purpose, tuple(rows), turn_id, api_request_id)
 
-    def bind(self, path, request):
+    def bind(self, path, request, *, job_turn=''):
         boundary = 'rows:' + hashlib.sha256(encoded(self.rows).encode()).hexdigest()
         store = IdentityStore(path)
         try:
-            return store.bind_execution(self.scope, self.purpose, boundary, request)
+            return store.bind_execution(self.scope, self.purpose, boundary, request, job_turn=job_turn)
         finally:
             store.close()
 
-    def bind_stint(self, path, request):
+    def bind_stint(self, path, request, *, job_turn=''):
         """One foreground conversation/model grant, distinct durable call keys.
 
         Separate namespace from per-execution grants: switching modes must not
@@ -96,7 +96,7 @@ class HeldSource:
         boundary = 'rows:' + hashlib.sha256(encoded(self.rows).encode()).hexdigest()
         store = IdentityStore(path)
         try:
-            keys = store.bind(self.scope, work, boundary, request)
+            keys = store.bind(self.scope, work, boundary, request, job_turn=job_turn)
             if self.turn_id:
                 keys = replace(keys, on_accepted=intake_callback(path, self.scope, self.turn_id, keys, self.api_request_id))
             return keys
@@ -106,9 +106,12 @@ class HeldSource:
 
 class HostBindings:
     """Context-local hook and engine seams; never a process-wide 'latest call'."""
-    def __init__(self, identity_path, profile_scope):
+    def __init__(self, identity_path, profile_scope, *, job_continuity=False):
         required(profile_scope)
+        if type(job_continuity) is not bool:
+            raise ValueError('explicit boolean job policy required')
         self.path, self.scope = identity_path, profile_scope
+        self.job_continuity = job_continuity
         self.main = ContextVar('queue_main_source', default=None)
         self.auxiliary = ContextVar('queue_aux_source', default=None)
         self.compaction_resume = ContextVar('queue_compaction_resume', default=None)
@@ -156,6 +159,25 @@ class HostBindings:
         directory=Path(self.path).parent/'tool-sources'
         store=IdentityStore(self.path)
         try:
+            job_turn = ''
+            handoff_parents = None
+            if self.job_continuity:
+                parents = store.db.execute('SELECT DISTINCT c.job_key FROM native_tool_call t '
+                    'JOIN call_identity c ON c.key=t.call_key WHERE t.scope=? AND t.turn_id=? '
+                    'AND t.api_request_id=? AND t.tool_call_id=?', ids).fetchall()
+                if len(parents) != 1:
+                    raise LocalSourceRefused('tool has no unambiguous frozen parent linkage')
+                handoff_parents = tuple(row[0] for row in store.db.execute(
+                    'SELECT DISTINCT t.grant_key FROM native_tool_call t '
+                    'JOIN work_identity w ON w.key=t.grant_key WHERE t.scope=? AND t.turn_id=? '
+                    "AND t.api_request_id=? AND t.tool_call_id=? AND w.boundary LIKE 'conversation-stint:%'",
+                    ids))
+                if parents[0][0] is not None:
+                    bound = store.db.execute('SELECT job_key FROM native_job_binding WHERE scope=? AND turn_id=?',
+                                             ids[:2]).fetchone()
+                    if bound is None or bound[0] != parents[0][0]:
+                        raise LocalSourceRefused('tool parent does not match its exact native job')
+                    job_turn = ids[1]
             store.db.execute('BEGIN IMMEDIATE')
             try:
                 row=store.db.execute("SELECT operation FROM tool_aux_intent WHERE scope=? AND turn_id=? "
@@ -173,8 +195,11 @@ class HostBindings:
                 store.db.execute('COMMIT')
             except BaseException:
                 store.db.execute('ROLLBACK');raise
-            keys=source.bind(self.path,request)
-            keys=store.bind_handoff(keys,store.conversation_stints(source.scope))
+            keys=source.bind(self.path,request,job_turn=job_turn)
+            keys=store.bind_handoff(keys,store.conversation_stints(source.scope)
+                                    if handoff_parents is None else handoff_parents)
+            if keys.job_key is not None:
+                keys=replace(keys,on_accepted=intake_callback(self.path,source.scope,ids[1],keys))
             call['operation']=source.operation
             return keys
         finally:store.close()
@@ -192,7 +217,11 @@ class HostBindings:
     def begin_foreground(self,session_id,turn_id):
         store=IdentityStore(self.path)
         try:
-            store.foreground_turn(owner_scope(self.scope,session_id),turn_id,record=True)
+            scope = owner_scope(self.scope,session_id)
+            if self.job_continuity:
+                store.begin_native_job(scope, turn_id)
+            else:
+                store.foreground_turn(scope,turn_id,record=True)
         finally:
             store.close()
 
@@ -217,6 +246,17 @@ class HostBindings:
         store = IdentityStore(self.path)
         try:
             return store.finish_turn(owner_scope(self.scope, session_id), turn_id)
+        finally:
+            store.close()
+
+    def observe_native_outcome(self, session_id, turn_id, *, completed, failed, interrupted):
+        store = IdentityStore(self.path)
+        try:
+            scope = owner_scope(self.scope, session_id)
+            if not store.foreground_turn(scope, turn_id):
+                return 0  # independent background/fork work does not end a parent
+            return store.observe_native_outcome(scope, turn_id, completed=completed,
+                                               failed=failed, interrupted=interrupted)
         finally:
             store.close()
 
@@ -282,14 +322,31 @@ class HostBindings:
         finally:
             self.compaction_resume.reset(token)
 
-    def _keys(self, source, request):
+    def _keys(self, source, request, *, job_turn=''):
         if source is None:
             raise LocalSourceRefused('no owning persisted call boundary is bound')
-        return source.bind(self.path, request)
+        return source.bind(self.path, request, job_turn=job_turn) if job_turn else source.bind(self.path, request)
+
+    def _main_job_turn(self, source):
+        if not self.job_continuity or not isinstance(source, HeldSource) or not source.turn_id:
+            return ''
+        store = IdentityStore(self.path)
+        try:
+            if not store.foreground_turn(source.scope, source.turn_id):
+                return ''
+            if store.db.execute('SELECT 1 FROM native_job_binding WHERE scope=? AND turn_id=?',
+                                (source.scope, source.turn_id)).fetchone() is None:
+                raise LocalSourceRefused('foreground job has no owning native binding')
+            return source.turn_id
+        finally:
+            store.close()
 
     def main_keys(self, request):
         source=self.main.get()
-        keys=self._keys(source, request)
+        keys=self._keys(source, request, job_turn=self._main_job_turn(source))
+        if self.job_continuity and isinstance(source, HeldSource) and source.turn_id:
+            keys=replace(keys,on_accepted=intake_callback(self.path,source.scope,source.turn_id,keys,
+                                                         source.api_request_id))
         return replace(keys,execution_only=True) if isinstance(source,CompactionSource) else keys
 
     def main_stint_keys(self, request):
@@ -298,7 +355,10 @@ class HostBindings:
             return replace(source.bind(self.path,request),execution_only=True)
         if not isinstance(source, HeldSource):
             raise LocalSourceRefused('no owning foreground source is bound for a stint')
-        return source.bind_stint(self.path, request)
+        job_turn = self._main_job_turn(source)
+        if self.job_continuity and not job_turn:
+            return replace(source.bind(self.path,request),execution_only=True)
+        return source.bind_stint(self.path, request, job_turn=job_turn)
 
     def auxiliary_keys(self, request):
         source = self.auxiliary.get()
@@ -317,12 +377,20 @@ class HostBindings:
                 else:
                     source.messages()
                     boundary = 'operation:' + source.operation
+                job_turn = ''
+                if self.job_continuity and owner:
+                    if store.begin_native_job(source.scope, owner[0]) is None:
+                        raise LocalSourceRefused('foreground compaction owner already finished')
+                    job_turn = owner[0]
                 keys = store.bind_compaction(source.scope, boundary, request,
-                    stint_model=owner[1] if owner else '')
-                if keys.work_session:
+                    stint_model=owner[1] if owner else '',job_turn=job_turn)
+                if keys.work_session or (keys.job_key is not None and owner):
+                    if keys.job_key is not None:
+                        keys=store.bind_handoff(keys,())
                     return replace(keys, on_accepted=intake_callback(self.path, source.scope, owner[0], keys))
             else:
                 keys = self._keys(source, request)
-            return store.bind_handoff(keys, store.conversation_stints(source.scope))
+            parents = () if self.job_continuity else store.conversation_stints(source.scope)
+            return store.bind_handoff(keys, parents)
         finally:
             store.close()

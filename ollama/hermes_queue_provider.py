@@ -18,10 +18,25 @@ MAIN_PROFILES = frozenset(('samcloud-queue', 'samcloud-queue-stint'))
 @lru_cache(maxsize=None)
 def _host_for_home(home):
     home = Path(home)
+    policy = False
+    config = home / 'config.yaml'
+    if config.is_file():
+        import hermes_yaml as yaml
+        document = yaml.safe_load(config.read_text())
+        if document is None:
+            document = {}
+        if not isinstance(document, dict):
+            raise ValueError('queue profile config must be a mapping')
+        section = document.get('samcloud_queue', {})
+        if not isinstance(section, dict):
+            raise ValueError('samcloud_queue config must be a mapping')
+        policy = section.get('job_continuity', False)
+        if type(policy) is not bool:
+            raise ValueError('samcloud_queue.job_continuity must be an explicit boolean')
     # A resolved owning profile, not a fallback search across other homes.
     state = home / 'samcloud-queue'
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return HostBindings(state / 'identity.sqlite', str(home))
+    return HostBindings(state / 'identity.sqlite', str(home), job_continuity=policy)
 
 
 def host_for_home(home):
@@ -81,7 +96,16 @@ def register_hooks(ctx):
 
     def began(*,session_id='',turn_id='',**kwargs):
         if session_id and turn_id:
-            current_host().begin_foreground(session_id,turn_id)
+            host = current_host()
+            if host.job_continuity and not live_owner(host, session_id, turn_id):
+                return
+            host.begin_foreground(session_id,turn_id)
+
+    def live_owner(host, session_id, turn_id):
+        from agent.relay_runtime import active_turn
+        turn = active_turn(session_id)
+        return (turn is not None and not turn.closed and not turn.lease.released
+                and turn.turn_id == turn_id and turn.lease.profile_key == host.scope)
     ctx.register_hook('pre_llm_call', began)
     ctx.register_hook('pre_api_request', before)
     def completed(*, provider='', session_id='', turn_id='', api_request_id='', response=None, **kwargs):
@@ -97,8 +121,17 @@ def register_hooks(ctx):
     ctx.register_hook('api_request_error', after)
     def finished(*, session_id='', turn_id='', **kwargs):
         if session_id and turn_id:
-            current_host().finish_turn(session_id, turn_id)
+            host = current_host()
+            if not host.job_continuity:
+                host.finish_turn(session_id, turn_id)
     ctx.register_hook('post_llm_call', finished)
+    def outcome(*, session_id='', turn_id='', completed=None, failed=None, interrupted=None, **kwargs):
+        if session_id and turn_id:
+            host = current_host()
+            if host.job_continuity and live_owner(host, session_id, turn_id):
+                host.observe_native_outcome(session_id, turn_id, completed=completed,
+                                            failed=failed, interrupted=interrupted)
+    ctx.register_hook('on_session_end', outcome)
     def waiting(*, tool_name='', args=None, session_id='', turn_id='', api_request_id='', tool_call_id='', **kwargs):
         # Explicit annotation, not a duration/command-name heuristic. The native
         # modifier strips only this prefix; normal approval/tool dispatch still
@@ -112,6 +145,10 @@ def register_hooks(ctx):
             return {'action':'block','message':'Queue wait annotation requires a command; nothing started.'}
         try:
             count = current_host().dependency_wait(session_id,turn_id,api_request_id,tool_call_id)
+        except LocalSourceRefused:
+            return {'action':'block','message':
+                'Linked job work cannot use legacy dependency yield. Use qualified child delegation '
+                'or an explicit job yield; nothing started.'}
         except Exception:
             count = 0
         if not count:
@@ -161,7 +198,8 @@ def register_profiles():
                               host.tool_keys if tool else host.auxiliary_keys if auxiliary else host.main_keys),
                 state_frames=not (auxiliary or tool), complete_responses=auxiliary or tool,
                 grant_lifetime='work_session' if stint else 'execution',
-                require_stint_policy=stint, event_source=host if (stint or auxiliary) else None,
+                require_stint_policy=stint,
+                event_source=host if (stint or auxiliary or host.job_continuity) else None,
                 call_scope=host.tool_api_scope if tool else None)
 
     for name in ('samcloud-queue', 'samcloud-queue-stint', 'samcloud-queue-aux','samcloud-queue-tool'):

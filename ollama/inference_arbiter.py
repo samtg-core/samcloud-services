@@ -19,6 +19,8 @@ import sqlite3
 import time
 import uuid
 
+from .inference_jobs import JobScheduling
+
 
 class NotFound(Exception):
     """Same answer for nonexistent and other-owner records."""
@@ -76,7 +78,7 @@ class StintPolicy:
                 raise ValueError('positive finite stint policy bounds required')
 
 
-class Arbiter:
+class Arbiter(JobScheduling):
     def __init__(self, path, *, stint_policy=None):
         if stint_policy is not None and not isinstance(stint_policy, StintPolicy):
             raise TypeError('stint_policy must be service-owned StintPolicy')
@@ -181,6 +183,11 @@ class Arbiter:
                 self.db.execute("ALTER TABLE executions ADD COLUMN yield_grant_keys TEXT NOT NULL DEFAULT '[]'")
             if 'wait_reason' not in execution_columns:
                 self.db.execute('ALTER TABLE executions ADD COLUMN wait_reason TEXT')
+            self._install_jobs()
+        if self.stint_policy is None and self.db.execute(
+                "SELECT 1 FROM requester_jobs WHERE state!='closed'").fetchone():
+            self.db.close()
+            raise Conflict('unfinished requester jobs require their qualified scheduler')
         from .inference_telemetry import install, notify
         install(self.db)
         self._telemetry_seq = self.db.execute('SELECT COALESCE(MAX(seq),0) FROM metadata_events').fetchone()[0]
@@ -249,6 +256,8 @@ class Arbiter:
 
     def next_handoff_at(self, resource):
         """Advisory scheduler wake-up; dispatch rechecks authority transactionally."""
+        if self.owns_job(resource):
+            return None
         policy = self.stint_policy
         if policy is None:
             return None
@@ -336,23 +345,27 @@ class Arbiter:
             return {'execution_id': execution_id, 'state': call['state'], 'events': page,
                     'next_cursor': page[-1]['seq'] if page else after, 'has_more': len(rows) > limit}
 
-    def existing_execution(self, grant_id, owner, client_key, request, *, yield_grant_keys=()):
+    def existing_execution(self, grant_id, owner, client_key, request, *, yield_grant_keys=(), job_key=None):
         """Owner-scoped retry check before installing a durable input.
 
         Advisory only: enqueue repeats it inside its write transaction.
         """
         required(client_key)
         body = encoded(request)
-        self._owned(grant_id,owner)
+        grant = self._owned(grant_id,owner)
         old = self.db.execute('SELECT * FROM executions WHERE grant_id=? AND client_key=?',
                               (grant_id,client_key)).fetchone()
         if old is not None:
             if old['request']!=body or old['yield_grant_keys'] != encoded(list(yield_grant_keys)):
                 raise Conflict('execution key already names another request')
+            linked = self._find_job(owner, job_key, grant['resource']) if job_key is not None else None
+            if ((job_key is not None and linked is None) or
+                    old['job_id'] != (linked['id'] if linked is not None else None)):
+                raise Conflict('execution key already names another job')
             return dict(old)
         return None
 
-    def enqueue(self, grant_id, owner, client_key, request, *, yield_grant_keys=()):
+    def enqueue(self, grant_id, owner, client_key, request, *, yield_grant_keys=(), job_key=None):
         """Persist a call while its grant waits; reconnect never submits twice.
 
         One pending/active call per grant. The grant can span multiple sequential
@@ -368,7 +381,7 @@ class Arbiter:
         with self.transaction():
             grant = self._owned(grant_id, owner)
             old = self.existing_execution(grant_id,owner,client_key,request,
-                                          yield_grant_keys=yield_grant_keys)
+                                          yield_grant_keys=yield_grant_keys,job_key=job_key)
             if old is not None:
                 return old
             parents = []
@@ -390,11 +403,16 @@ class Arbiter:
             if (grant['state'] not in ('queued', 'granted') or
                     grant['release_requested'] or grant['active_execution'] or pending):
                 raise Conflict("grant cannot accept another execution")
+            if job_key is not None and yield_grant_keys:
+                raise Conflict('job continuity and legacy dependency yield are distinct contracts')
+            if job_key is not None and self.stint_policy is None:
+                raise Conflict('job continuity requires atomic dispatch policy')
+            job_id = self._bind_job(owner, job_key, grant['resource'])
             execution_id, now = uuid.uuid4().hex, time.time()
             self.db.execute("""INSERT INTO executions
-                (id,grant_id,client_key,request,state,created,updated,yield_grant_keys)
-                VALUES (?,?,?,?,'queued',?,?,?)""",
-                (execution_id, grant_id, client_key, body, now, now, encoded(list(yield_grant_keys))))
+                (id,grant_id,client_key,request,state,created,updated,yield_grant_keys,job_id)
+                VALUES (?,?,?,?,'queued',?,?,?,?)""",
+                (execution_id, grant_id, client_key, body, now, now, encoded(list(yield_grant_keys)),job_id))
             if self.stint_policy is not None and grant['state'] == 'queued':
                 # Empty grants don't bank a place while their tools run. A
                 # returning conversation joins when it actually has ready work.
@@ -418,6 +436,9 @@ class Arbiter:
         with self.transaction():
             if self.db.execute('SELECT 1 FROM resource_waits WHERE resource=?', (resource,)).fetchone():
                 return None
+            owned, item = self._dispatch_job(resource, permitted_model)
+            if owned:
+                return item
             now = time.time()
             grant = self.db.execute("SELECT * FROM grants WHERE resource=? "
                                     "AND state IN ('granted','uncertain')", (resource,)).fetchone()
@@ -457,13 +478,17 @@ class Arbiter:
                                    (grant['id'],)).fetchone()
             if call is None:
                 return None
-            started = grant['stint_started'] if grant['state'] == 'granted' else now
-            self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,
-                stint_started=?,idle_since=NULL WHERE id=?""",
-                            (call['id'], now, started if started is not None else now, grant['id']))
-            self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
-            return {'grant': dict(self._owned(grant['id'], grant['owner'])),
-                    'execution': self.execution(call['id'], grant['owner'])}
+            self._own_call_job(call)
+            return self._start_queued_call(grant, call, now)
+
+    def _start_queued_call(self, grant, call, now):
+        started = grant['stint_started'] if grant['state'] == 'granted' else now
+        self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,
+            stint_started=?,idle_since=NULL WHERE id=?""",
+                        (call['id'], now, started if started is not None else now, grant['id']))
+        self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
+        return {'grant': dict(self._owned(grant['id'], grant['owner'])),
+                'execution': self.execution(call['id'], grant['owner'])}
 
     def admit_next(self, resource):
         """FIFO admission only after the supervisor establishes capacity/permission.
@@ -534,8 +559,12 @@ class Arbiter:
                 state = 'released'
             self.db.execute("UPDATE grants SET state=?,release_requested=1,updated=? WHERE id=?",
                             (state, time.time(), grant_id))
+            jobs = self.db.execute("SELECT DISTINCT job_id FROM executions "
+                "WHERE grant_id=? AND state='queued' AND job_id IS NOT NULL", (grant_id,)).fetchall()
             self.db.execute("UPDATE executions SET state='cancelled',updated=? "
                             "WHERE grant_id=? AND state='queued'", (time.time(), grant_id))
+            for job in jobs:
+                self._advance_job(job['job_id'])
             return dict(self._owned(grant_id, owner))
 
     def yield_by_key(self, owner, grant_key, expected_call_key):
@@ -603,6 +632,7 @@ class Arbiter:
                 idle_since=? WHERE id=?""",
                             ('released' if released else 'granted', now,
                              None if released else now, grant['id']))
+            self._advance_call_job(row)
 
     def defer_capacity(self, execution_id, reason):
         """Put the SAME logical request back in queue, atomically blocking retry.

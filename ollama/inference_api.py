@@ -25,6 +25,13 @@ class CallRequest(BaseModel):
     key: str = Field(min_length=1, max_length=512)
     request: dict[str, Any]
     yield_grant_keys: list[str] = Field(default_factory=list, max_length=32)
+    job_key: str | None = Field(default=None, min_length=1, max_length=512)
+
+
+class JobBoundary(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    key: str = Field(min_length=1, max_length=512)
+    action: Literal['finish', 'yield'] = 'finish'
 
 
 class LifecycleYield(BaseModel):
@@ -47,6 +54,7 @@ def public_call(row):
     # Input prompts remain in the private journal, not incidental status reads.
     result = {k: row[k] for k in ('id', 'grant_id', 'state', 'created', 'updated')}
     result['wait_reason'] = row['wait_reason']
+    result['job_id'] = row['job_id']
     result['result'] = json.loads(row['result']) if row['result'] is not None else None
     return result
 
@@ -79,7 +87,20 @@ def build_router(supervisor, resolve_model, validate_call):
                           'dependency_yield': True,
                           'lifecycle_yield': True,
                           'idle_grace_seconds': policy.idle_grace_seconds if policy else None,
-                          'fairness_seconds': policy.fairness_seconds if policy else None}}
+                          'fairness_seconds': policy.fairness_seconds if policy else None},
+                'jobs': {'version': 1, 'enabled': policy is not None,
+                         'same_service_children': True, 'cross_service_delegation': False,
+                         'explicit_finish': True, 'explicit_yield': True}}
+
+    @router.get('/jobs')
+    async def jobs(request: Request, key: str = Query(min_length=1, max_length=512)):
+        return {'jobs': invoke(supervisor.journal.jobs, owner(request), key)}
+
+    @router.post('/jobs/end', status_code=202)
+    async def end_job(body: JobBoundary, request: Request):
+        identity = owner(request)
+        rows = invoke(lambda: supervisor.end_job(identity, body.key, finish=body.action == 'finish'))
+        return {'key': body.key, 'action': body.action, 'jobs': rows}
 
     @router.post('/grants', status_code=202)
     async def submit(body: GrantRequest, request: Request):
@@ -109,7 +130,8 @@ def build_router(supervisor, resolve_model, validate_call):
         grant = invoke(supervisor.journal.get, grant_id, identity)
         canonical = invoke(validate_call, grant['model'], body.request)
         call = invoke(lambda: supervisor.journal.enqueue(grant_id, identity, body.key, canonical,
-                                                        yield_grant_keys=body.yield_grant_keys))
+                                                        yield_grant_keys=body.yield_grant_keys,
+                                                        job_key=body.job_key))
         supervisor.pump(grant['resource'])
         return public_call(supervisor.journal.execution(call['id'], identity))
 

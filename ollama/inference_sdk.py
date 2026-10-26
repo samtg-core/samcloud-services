@@ -102,6 +102,7 @@ async def _intent(request, key_provider):
     work_session = False
     accepted = None
     resume_job = None
+    job_key = request.headers.get('X-Inference-Job-Key')
     if key_provider is not None:
         # Runs before any service write, in the submitting caller's ContextVars.
         # Only request content is passed, never credentials or HTTP headers.
@@ -115,6 +116,10 @@ async def _intent(request, key_provider):
         if (grant_key and grant_key != supplied[0]) or (call_key and call_key != supplied[1]):
             raise ValueError('explicit request identity conflicts with host identity')
         grant_key, call_key = supplied
+        linked = getattr(keys, 'job_key', None)
+        if job_key is not None and job_key != linked:
+            raise ValueError('explicit job identity conflicts with frozen host identity')
+        job_key = linked
         yield_grant_keys = getattr(keys, 'yield_grant_keys', ())
         execution_only = getattr(keys,'execution_only',False)
         accepted = getattr(keys, 'on_accepted', None)
@@ -132,8 +137,13 @@ async def _intent(request, key_provider):
             raise ValueError('host returned invalid dependency handoff keys')
     if not grant_key or not call_key:
         raise ValueError('durable inference requires explicit grant and logical call keys')
+    if job_key is not None and (not isinstance(job_key, str) or not job_key.strip()
+                                or len(job_key) > 512 or yield_grant_keys):
+        raise ValueError('invalid explicit job linkage')
     intent = (body, grant_key, call_key, yield_grant_keys)
     lifetime = 'work_session' if work_session else 'execution' if execution_only else None
+    if job_key is not None:
+        return intent+(lifetime,accepted,resume_job,job_key)
     if resume_job is not None:
         return intent+(lifetime,accepted,resume_job)
     if accepted is not None:
@@ -145,9 +155,13 @@ async def _open_intent(consumer, intent, on_state=None, state_frames=False,
                        grant_lifetime='work_session', require_stint_policy=False, observation=None):
     body, grant_key, call_key, yield_grant_keys = intent[:4]
     accepted = intent[5] if len(intent)>=6 else None
-    resume_job = intent[6] if len(intent)==7 else None
+    resume_job = intent[6] if len(intent)>=7 else None
+    job_key = intent[7] if len(intent)==8 else None
+    if job_key is not None and (not isinstance(job_key, str) or not job_key.strip()
+                                or len(job_key) > 512 or yield_grant_keys):
+        raise ValueError('invalid explicit job linkage')
     if len(intent)>4:
-        if len(intent) not in (5,6,7) or intent[4] not in (None, 'execution', 'work_session'):
+        if len(intent) not in (5,6,7,8) or intent[4] not in (None, 'execution', 'work_session'):
             raise ValueError('invalid host grant lifetime policy')
         if intent[4] is not None:
             grant_lifetime=intent[4]
@@ -156,6 +170,8 @@ async def _open_intent(consumer, intent, on_state=None, state_frames=False,
         if accepted is not None and not callable(accepted):
             raise ValueError('invalid host intake callback')
     identity = {'grant_key': grant_key, 'call_key': call_key}
+    if job_key is not None:
+        identity['job_key'] = job_key
     if on_state is not None or observation is not None:
         async def report(state):
             if observation is not None:
@@ -177,7 +193,16 @@ async def _open_intent(consumer, intent, on_state=None, state_frames=False,
         # not make receipt reads depend on current model/lifecycle capability.
         job = await consumer.reattach(*resume_job)
     else:
-        if require_stint_policy or yield_grant_keys:
+        if job_key is not None:
+            capabilities = await consumer.capabilities()
+            policy = capabilities.get('jobs') if isinstance(capabilities, dict) else None
+            if (not isinstance(policy, dict) or type(policy.get('version')) is not int
+                    or policy['version'] != 1 or policy.get('enabled') is not True
+                    or policy.get('same_service_children') is not True
+                    or policy.get('explicit_finish') is not True
+                    or policy.get('explicit_yield') is not True):
+                raise ValueError('service does not advertise explicit requester-job continuity')
+        elif require_stint_policy or yield_grant_keys:
             capabilities = await consumer.capabilities()
             policy = capabilities.get('stints') if isinstance(capabilities, dict) else None
             if (not isinstance(policy, dict) or type(policy.get('version')) is not int
@@ -189,9 +214,10 @@ async def _open_intent(consumer, intent, on_state=None, state_frames=False,
                 raise ValueError('service does not advertise native lifecycle handoff')
             if yield_grant_keys and policy.get('dependency_yield') is not True:
                 raise ValueError('service does not advertise atomic dependency handoff')
+        linkage = {'job_key': job_key} if job_key is not None else {}
         job = await consumer.submit(body['model'], grant_key=grant_key, call_key=call_key,
                                     request=body, lifetime=grant_lifetime,
-                                    yield_grant_keys=yield_grant_keys)
+                                    yield_grant_keys=yield_grant_keys, **linkage)
     if accepted is not None:
         acknowledged = accepted(job)
         if inspect.isawaitable(acknowledged):

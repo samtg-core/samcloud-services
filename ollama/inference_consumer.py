@@ -23,9 +23,13 @@ import httpx
 class Job:
     grant_id: str
     execution_id: str
+    job_id: str | None = None
 
     def as_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        if self.job_id is None:
+            result.pop('job_id')
+        return result
 
 
 class ExecutionStopped(RuntimeError):
@@ -96,18 +100,26 @@ class DurableConsumer:
         return await self._request('GET', '/capabilities')
 
     async def submit(self, model, *, grant_key, call_key, request, lifetime='work_session',
-                     yield_grant_keys=()):
+                     yield_grant_keys=(), job_key=None):
         if not grant_key or not call_key:
             raise ValueError('persisted logical grant and call keys are required')
         if lifetime not in ('work_session', 'execution'):
             raise ValueError('invalid grant lifetime')
+        if job_key is not None and (not isinstance(job_key, str) or not job_key.strip()
+                                    or len(job_key) > 512 or yield_grant_keys):
+            raise ValueError('explicit job identity cannot use legacy dependency yield')
         grant = await self._request('POST', '/grants', json={
             'model': model, 'key': grant_key, 'lifetime': lifetime})
         body = {'key': call_key, 'request': request}
         if yield_grant_keys:
             body['yield_grant_keys'] = list(yield_grant_keys)
+        if job_key is not None:
+            body['job_key'] = job_key
         call = await self._request('POST', '/grants/' + grant['id'] + '/executions', json=body)
-        return Job(grant['id'], call['id'])
+        job_id = call.get('job_id')
+        if job_key is not None and (not isinstance(job_id, str) or not job_id.strip()):
+            raise ValueError('job intake did not acknowledge its scheduling identity; retain exact keys')
+        return Job(grant['id'], call['id'], job_id)
 
     async def reattach(self, grant_id, execution_id):
         """Read an exact acknowledged job under the caller's auth; no submit/admission.
@@ -119,7 +131,14 @@ class DurableConsumer:
         row = await self._request('GET','/executions/'+execution_id)
         if row.get('id') != execution_id or row.get('grant_id') != grant_id:
             raise ValueError('saved execution receipt does not match the service')
-        return Job(grant_id,execution_id)
+        return Job(grant_id,execution_id,row.get('job_id'))
+
+    async def end_job(self, key, *, finish=True):
+        if (not isinstance(key, str) or not key.strip() or len(key) > 512
+                or type(finish) is not bool):
+            raise ValueError('explicit job key and boundary action required')
+        return await self._request('POST', '/jobs/end', json={
+            'key': key, 'action': 'finish' if finish else 'yield'})
 
     async def release(self, job):
         """Explicit safe-boundary handoff; running compute drains on the service."""

@@ -64,13 +64,37 @@ def test_other_session_and_detached_compressor_do_not_borrow(bound):
 
 from .test_hermes_queue_client import queued_profile
 
-def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_path,monkeypatch,queued_profile):
+@pytest.mark.parametrize('job_mode,provider', [
+    (False, 'samcloud-queue-stint'),
+    (True, 'samcloud-queue-stint'),
+    (True, 'samcloud-queue'),
+])
+def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_path,monkeypatch,queued_profile,job_mode,provider):
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
     import hermes_cli.config as config
     from .inference_sdk import QueuedClient
     home=tmp_path/'profile';home.mkdir(exist_ok=True)
+    if job_mode:
+        (home/'config.yaml').write_text('samcloud_queue:\n  job_continuity: true\n')
     host=host_for_home(home)
+    original_handle = queued_profile.handle
+    def job_capabilities(request):
+        import httpx
+        response = original_handle(request)
+        if request.url.path.endswith('/capabilities'):
+            data = response.json()
+            data['jobs'] = {'version': 1, 'enabled': True,
+                            'same_service_children': True, 'explicit_finish': True,
+                            'explicit_yield': True}
+            return httpx.Response(200, json=data)
+        if request.method == 'POST' and request.url.path.endswith('/executions'):
+            import json
+            body = json.loads(request.content)
+            if body.get('job_key'):
+                return httpx.Response(200, json=response.json() | {'job_id': 'parent-job'})
+        return response
+    monkeypatch.setattr(queued_profile, 'handle', job_capabilities)
     original_load=config.load_config
     def cfg(*a,**kw):
         value=original_load(*a,**kw)
@@ -89,10 +113,10 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
     from hermes_cli.auth_plugin_providers import register_plugin_provider
     class StintProfile(ProviderProfile):
         def create_client(self,**kwargs):return client()
-    profile=StintProfile(name='samcloud-queue-stint',auth_type='api_key',
+    profile=StintProfile(name=provider,auth_type='api_key',
         env_vars=('SYNTHETIC_QUEUE_TEST_KEY',),base_url='https://queue.invalid/v1',default_aux_model='qwen')
     providers.register_provider(profile);register_plugin_provider(profile)
-    engine=QueuedContextCompressor(model='qwen',provider='samcloud-queue-stint',
+    engine=QueuedContextCompressor(model='qwen',provider=provider,
         api_key='synthetic',base_url='https://queue.invalid/v1',
         config_context_length=65536,quiet_mode=True)
     engine.bind_session_state(session_id='stock-owner')
@@ -100,6 +124,8 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
     history=[{'role':'user' if i%2==0 else 'assistant','_row_id':i+1,
               'content':('synthetic archive detail '*200)+str(i)} for i in range(40)]
     host.pre_api_request(session_id='stock-owner',turn_id='stock-turn',api_request_id='api',conversation_history=history)
+    if job_mode:
+        host.begin_foreground('stock-owner', 'stock-turn')
     main=host.main_stint_keys({'model':'qwen','messages':[{'role':'user','content':'main fixture'}]})
     coordinator=relay_runtime.RelaySessionCoordinator()
     lease=relay_runtime.ConversationLease(str(home.resolve()),'stock-owner','cli',
@@ -116,8 +142,14 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
         calls=[r[2] for r in queued_profile.requests if r[:2]==('POST','/v1/inference/grants/grant/executions')]
         assert len(calls)==1 and calls[0]['key']!=main.call_key
         assert not calls[0].get('yield_grant_keys')
+        if job_mode:
+            assert calls[0]['job_key'] == main.job_key
         host.finish_turn('stock-owner','stock-turn')
-        assert host.pending_events()[0]['expected_call_key']==calls[0]['key']
+        if job_mode:
+            assert host.pending_events()[0]['kind'] == 'job_finish'
+            assert host.pending_events()[0]['job_key'] == main.job_key
+        else:
+            assert host.pending_events()[0]['expected_call_key']==calls[0]['key']
         # A fresh native turn/model recovers the SAME accepted summary through
         # authenticated receipt reads, even with the aux model pinned to qwen.
         coordinator.end_turn(turn,outcome='success');coordinator.release_conversation(lease)
@@ -133,7 +165,7 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
                 return httpx.Response(response.status_code,json=data)
             return response
         monkeypatch.setattr(queued_profile,'handle',receipt_handle)
-        restored=QueuedContextCompressor(model='qwen-new',provider='samcloud-queue-stint',
+        restored=QueuedContextCompressor(model='qwen-new',provider=provider,
             api_key='synthetic',base_url='https://queue.invalid/v1',config_context_length=65536,quiet_mode=True)
         restored.bind_session_state(session_id='stock-owner')
         restored.threshold_tokens=1000;restored.tail_token_budget=256
@@ -145,7 +177,15 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
         assert all(method=='GET' for method,_,_ in queued_profile.requests[before:])
         assert len(queued_profile.calls)==1
         host.finish_turn('stock-owner','stock-resumed')
-        assert host.pending_events()[-1]['expected_call_key']==calls[0]['key']
+        if job_mode:
+            # The old summary receipt stays on its original, completed parent.
+            # The later foreground attempt may also seal its unused new parent;
+            # outbox ordering is not the recovered summary's identity.
+            events = host.pending_events()
+            assert all(event['kind'] == 'job_finish' for event in events)
+            assert main.job_key in {event['job_key'] for event in events}
+        else:
+            assert host.pending_events()[-1]['expected_call_key']==calls[0]['key']
     finally:
         coordinator.end_turn(turn,outcome='success');coordinator.release_conversation(lease)
         for c in clients:asyncio.run(c.aclose())

@@ -53,6 +53,7 @@ class Supervisor:
         self.permitted = permitted
         self.permitted_model = None
         self.on_finished = on_finished
+        self.on_job_boundary = None
         self.workers = {}
         self.preparations = set()
         self.wakeups = {}
@@ -136,7 +137,11 @@ class Supervisor:
             return
         else:
             self.journal.finish(execution_id, result, failed=failed)
-        self.pump(item['grant']['resource'])
+        resource = item['grant']['resource']
+        if item['execution'].get('job_id') and not self.journal.owns_job(resource):
+            await self._job_boundaries([resource])
+        else:
+            self.pump(resource)
         if self.on_finished is not None:
             try:
                 await self.on_finished(item['grant'],execution_id)
@@ -145,9 +150,35 @@ class Supervisor:
                 # housekeeping must not relabel it uncertain or strand the queue.
                 logging.getLogger(__name__).warning('Saved execution cleanup incomplete')
 
+    async def _job_boundaries(self, resources):
+        for resource in resources:
+            try:
+                if self.on_job_boundary is not None:
+                    await self.on_job_boundary(resource)
+            except (Exception, asyncio.CancelledError):
+                # Admission remains withdrawn by the owning capacity source.
+                # A fresh authoritative observation can retry reconciliation.
+                logging.getLogger(__name__).warning('Requester job boundary reconciliation incomplete')
+                continue
+            self.pump(resource)
+
+    def end_job(self, owner, key, *, finish=True):
+        rows = self.journal.end_job(owner, key, finish=finish)
+        resources = [row['resource'] for row in rows if row['state'] != 'owned']
+        if resources:
+            # Registered before returning the logical receipt. HTTP observer
+            # cancellation cannot cancel this service-owned reconciliation.
+            self.prepare(self._job_boundaries(resources))
+        return rows
+
     def release(self, grant_id, owner):
+        resource = self.journal.get(grant_id, owner)['resource']
+        owned = self.journal.owns_job(resource)
         grant = self.journal.request_release(grant_id, owner)
-        self.pump(grant['resource'])
+        if owned and not self.journal.owns_job(resource):
+            self.prepare(self._job_boundaries([resource]))
+        else:
+            self.pump(resource)
         return grant
 
     def yield_grant(self, grant_id, owner):

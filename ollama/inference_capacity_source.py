@@ -15,6 +15,15 @@ from .inference_bootstrap import cold_capacity
 
 
 class ManagerCapacitySource:
+    def retains_model(self, model):
+        """Loop-local parent ownership, independent of backend activity clocks.
+
+        This only prevents automatic residency release. It is not permission to
+        dispatch, nor proof that a dead backend can be restarted under its lease.
+        """
+        resource = self.runtime.settings.models.get(model)
+        return resource is not None and self.runtime.queue.supervisor.journal.owns_job(resource)
+
     def __init__(self,runtime,binding,*,work_permitted=None):
         if work_permitted is not None and type(work_permitted) is not bool:
             raise ValueError('explicit work permission required')
@@ -139,7 +148,8 @@ class ManagerCapacitySource:
                     foreign = handoff._foreign(registry)  # verifies hold policy and snapshot scope
                     own_debt = any(row.get('service_id') == handoff.initial.service for row in
                                    registry.get('unsettled', []) if isinstance(row, dict))
-                    if (foreign is not None and manager.models) or own_debt:
+                    owned_job = self.runtime.queue.supervisor.journal.owns_job(resource)
+                    if (foreign is not None and manager.models and not owned_job) or own_debt:
                         handoff.begin()  # pause before any available publication
                         return
                     from .manager import VLM_MODELS

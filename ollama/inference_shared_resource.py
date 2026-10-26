@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 import subprocess
+from datetime import datetime
 
 from .inference_arbiter import Conflict
 from .inference_events import source_call
@@ -51,6 +52,9 @@ class ResourceHandoff:
         self.db.execute('''CREATE TABLE IF NOT EXISTS service_handoffs (
             resource TEXT PRIMARY KEY, phase TEXT NOT NULL, contender TEXT,
             allocations TEXT NOT NULL, updated REAL NOT NULL)''')
+        columns = {row['name'] for row in self.db.execute('PRAGMA table_info(service_handoffs)')}
+        if 'recovering' not in columns:
+            self.db.execute("ALTER TABLE service_handoffs ADD COLUMN recovering TEXT NOT NULL DEFAULT '[]'")
         self.task = None
         if self.snapshot()['phase'] != 'idle':
             self._pause()  # restart cannot resurrect stale dispatch permission
@@ -58,17 +62,20 @@ class ResourceHandoff:
     def snapshot(self):
         row = self.db.execute('SELECT * FROM service_handoffs WHERE resource=?',
                               (self.resource,)).fetchone()
-        return ({**dict(row), 'allocations':json.loads(row['allocations'])} if row else
-                {'resource':self.resource,'phase':'idle','contender':None,'allocations':[]})
+        return ({**dict(row), 'allocations':json.loads(row['allocations']),
+                 'recovering':json.loads(row['recovering'])} if row else
+                {'resource':self.resource,'phase':'idle','contender':None,'allocations':[], 'recovering':[]})
 
-    def _save(self, phase, *, contender=None, allocations=None):
+    def _save(self, phase, *, contender=None, allocations=None, recovering=None):
         old = self.snapshot()
         selected = contender if contender is not None else old['contender']
         pointers = old['allocations'] if allocations is None else allocations
+        recovery = old['recovering'] if recovering is None else recovering
         now = time.time()
         with self.runtime.queue.supervisor.journal.transaction():
-            self.db.execute('INSERT OR REPLACE INTO service_handoffs VALUES(?,?,?,?,?)',
-                (self.resource, phase, selected, json.dumps(pointers), now))
+            self.db.execute('''INSERT OR REPLACE INTO service_handoffs
+                (resource,phase,contender,allocations,updated,recovering) VALUES(?,?,?,?,?,?)''',
+                (self.resource, phase, selected, json.dumps(pointers), now, json.dumps(recovery)))
             if (phase, selected, pointers) != (old['phase'], old['contender'], old['allocations']):
                 self.db.execute('''INSERT INTO metadata_events(kind,at,resource,state,reason)
                     VALUES('service_handoff',?,?,?,?)''', (now,self.resource,phase,selected))
@@ -129,6 +136,27 @@ class ResourceHandoff:
             isinstance(row.get('name'), str) and row['name'].removesuffix(':latest') !=
             model.removesuffix(':latest') for row in running))
 
+    def _confirm_retained_vision(self, model):
+        """Fresh exact admission for recovery, never a new registry request."""
+        if self.runtime.manager.models.get(model.name) is not model:
+            raise Conflict('retained vision pointer changed')
+        rows = self.runtime.manager.sc.list_leases(
+            resource_id=self.resource, service_id=self.initial.service)
+        matches = [row for row in rows if isinstance(row, dict) and
+                   row.get('id') == model.lease_id] if isinstance(rows, list) else []
+        if len(matches) != 1 or type(matches[0].get('memory_mb')) is not int:
+            raise Conflict('retained vision claim is unknown')
+        row = self._exact(rows, {'lease_id':model.lease_id,
+                                'memory_mb':matches[0]['memory_mb']})
+        try:
+            expiry = datetime.fromisoformat(row['expires_at'].replace('Z', '+00:00'))
+            valid = expiry.tzinfo is not None and expiry.timestamp() > time.time()
+        except (KeyError, AttributeError, ValueError, TypeError, OverflowError):
+            valid = False
+        if (row.get('status') != 'active' or needs_settlement(row) or not valid
+                or type(model.memory_mb) is not int or row['memory_mb'] < model.memory_mb):
+            raise Conflict('retained vision claim is not current admission')
+
     async def _run(self):
         manager = self.runtime.manager
         try:
@@ -144,6 +172,31 @@ class ResourceHandoff:
             own_debt = any(row.get('service_id') == self.initial.service for row in
                            view.get('unsettled', []) if isinstance(row, dict))
             allocations = saved['allocations']
+            if (not allocations and not own_debt and
+                    self.runtime.queue.supervisor.journal.owns_job(self.resource)):
+                # A foreign waiter is demand, not authority to end a requester
+                # job. Recheck after draining: the current call may have ended
+                # but its parent is still doing a tool or preparing its child.
+                # Saved/uncertain teardown and physical accounting debt still
+                # require reconciliation; never undo an unload already begun.
+                from .manager import VLM_MODELS
+                from .vision_lifecycle import recover_owned_vision
+                vision = {info['default'] for info in VLM_MODELS.values()}
+                if set(saved['recovering']) - set(manager.models):
+                    raise Conflict('saved vision recovery has no owned process handle')
+                for name, mm in list(manager.models.items()):
+                    if (name in vision and getattr(mm, 'managed', False)
+                            and getattr(mm, 'vlm_process', None) is not None
+                            and (mm.vlm_process.poll() is not None or name in saved['recovering'])):
+                        self._save('recovering', recovering=[name])
+                        binding = getattr(manager, 'residency_renewal', None)
+                        if binding is not None:
+                            binding.resume()  # startup wait must keep renewing its exact charge
+                        await source_call(lambda:recover_owned_vision(mm,
+                            confirm_admission=lambda:self._confirm_retained_vision(mm),
+                            resume=name in saved['recovering']))
+                        self._save('draining', recovering=[])
+                return self._finish()
             if not allocations:
                 from .manager import VLM_MODELS
                 vision = {info['default'] for info in VLM_MODELS.values()}
@@ -235,7 +288,7 @@ class ResourceHandoff:
             return self.snapshot()
 
     def _finish(self):
-        self._save('idle', allocations=[])
+        self._save('idle', allocations=[], recovering=[])
         if not getattr(self.runtime, '_external_quiesce', False):
             self.runtime.resume()  # requires fresh capacity; never directly pumps
         return self.snapshot()

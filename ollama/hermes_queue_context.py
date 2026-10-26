@@ -10,7 +10,7 @@ import logging
 
 from agent.context_compressor import ContextCompressor
 
-from .hermes_queue_provider import host_for_home
+from .hermes_queue_provider import MAIN_PROFILES, host_for_home
 
 
 def configured_options():
@@ -53,15 +53,15 @@ class QueuedContextCompressor(ContextCompressor):
         # Relay is bound by the native turn facade, not an observer hook worker.
         # Revalidate it at submission so copied contexts cannot revive a closed turn.
         owner_provider = None
-        if self.provider == 'samcloud-queue-stint':
+        if self.provider == 'samcloud-queue-stint' or (host.job_continuity and self.provider in MAIN_PROFILES):
             from agent.relay_runtime import active_turn
             turn = active_turn(self._session_id)
             if turn is not None and turn.lease.profile_key == host.scope:
-                turn_id, session_id = turn.turn_id, self._session_id
+                turn_id, session_id, provider = turn.turn_id, self._session_id, self.provider
                 def owner_provider():
                     current = active_turn(session_id)
                     if (current is turn and not current.closed and not current.lease.released
-                            and self._session_id == session_id and self.provider == 'samcloud-queue-stint'):
+                            and self._session_id == session_id and self.provider == provider):
                         return turn_id, self.model
                     return None
         with host.compression_scope(self._session_id, messages, persist_unstored=True,

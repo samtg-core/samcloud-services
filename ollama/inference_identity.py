@@ -7,7 +7,7 @@ Only identifiers and a request-integrity digest are stored, never request bodies
 One connection per owning thread; independent processes/connections serialize
 allocation with SQLite. Nothing here is installed in the live clients.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import os
 from pathlib import Path
@@ -30,9 +30,13 @@ class CallKeys:
     work_session: bool = False
     on_accepted: object = field(default=None, compare=False, repr=False)
     resume_job: object = field(default=None, compare=False, repr=False)
+    job_key: str | None = None
 
     def headers(self):
-        return {'X-Inference-Grant-Key': self.grant_key, 'Idempotency-Key': self.call_key}
+        result = {'X-Inference-Grant-Key': self.grant_key, 'Idempotency-Key': self.call_key}
+        if self.job_key is not None:
+            result['X-Inference-Job-Key'] = self.job_key
+        return result
 
 
 class IdentityStore:
@@ -55,6 +59,12 @@ class IdentityStore:
             CREATE TABLE IF NOT EXISTS native_foreground_turn (
                 scope TEXT NOT NULL, turn_id TEXT NOT NULL,
                 PRIMARY KEY(scope,turn_id));
+            CREATE TABLE IF NOT EXISTS native_job_binding (
+                scope TEXT NOT NULL, turn_id TEXT NOT NULL, job_key TEXT NOT NULL,
+                PRIMARY KEY(scope,turn_id));
+            CREATE TABLE IF NOT EXISTS native_requester_job (
+                scope TEXT PRIMARY KEY, job_key TEXT NOT NULL, turn_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('active','recoverable')));
             CREATE TABLE IF NOT EXISTS tool_aux_intent (
                 scope TEXT NOT NULL, turn_id TEXT NOT NULL, api_request_id TEXT NOT NULL,
                 tool_call_id TEXT NOT NULL, step INTEGER NOT NULL, operation TEXT NOT NULL UNIQUE,
@@ -102,6 +112,15 @@ class IdentityStore:
             columns = {row[1] for row in self.db.execute('PRAGMA table_info(call_identity)')}
             if 'yield_grant_keys' not in columns:
                 self.db.execute('ALTER TABLE call_identity ADD COLUMN yield_grant_keys TEXT')
+            if 'job_key' not in columns:
+                # NULL is a frozen legacy binding, not an invitation to attach
+                # an already allocated/accepted call to a newly inferred job.
+                self.db.execute('ALTER TABLE call_identity ADD COLUMN job_key TEXT')
+            outbox_columns = {row[1] for row in self.db.execute('PRAGMA table_info(lifecycle_outbox)')}
+            if 'kind' not in outbox_columns:
+                self.db.execute("ALTER TABLE lifecycle_outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'grant_yield'")
+            if 'job_key' not in outbox_columns:
+                self.db.execute('ALTER TABLE lifecycle_outbox ADD COLUMN job_key TEXT')
             compaction_columns = {row[1] for row in self.db.execute('PRAGMA table_info(compaction_binding)')}
             for column in ('model','shape_digest'):
                 if column not in compaction_columns:
@@ -111,29 +130,39 @@ class IdentityStore:
             self.db.execute('ROLLBACK')
             raise
 
-    def _bind_in_transaction(self, scope, work_boundary, call_boundary, request):
+    def _bind_in_transaction(self, scope, work_boundary, call_boundary, request, *, job_turn=''):
+        if job_turn != '':
+            required(job_turn)
         digest = hashlib.sha256(encoded(request).encode()).hexdigest()
         row = self.db.execute('SELECT key FROM work_identity WHERE scope=? AND boundary=?',
                               (scope, work_boundary)).fetchone()
         grant = row[0] if row else uuid.uuid4().hex
         if row is None:
             self.db.execute('INSERT INTO work_identity VALUES(?,?,?)', (scope, work_boundary, grant))
-        row = self.db.execute('SELECT key,digest FROM call_identity WHERE work_key=? AND boundary=?',
+        row = self.db.execute('SELECT key,digest,job_key FROM call_identity WHERE work_key=? AND boundary=?',
                               (grant, call_boundary)).fetchone()
         if row and row[1] != digest:
             raise Conflict('persisted call boundary has different request content; reconcile before submitting')
         call = row[0] if row else uuid.uuid4().hex
+        job_key = row[2] if row else None
         if row is None:
-            self.db.execute('INSERT INTO call_identity(work_key,boundary,key,digest) VALUES(?,?,?,?)',
-                            (grant, call_boundary, call, digest))
-        return CallKeys(grant, call)
+            if job_turn:
+                required(job_turn)
+                bound = self.db.execute('SELECT job_key FROM native_job_binding WHERE scope=? AND turn_id=?',
+                                        (scope, job_turn)).fetchone()
+                job_key = bound[0] if bound else 'job:' + hashlib.sha256(encoded([scope, job_turn]).encode()).hexdigest()
+                self.db.execute('INSERT OR IGNORE INTO native_job_binding VALUES(?,?,?)',
+                                (scope, job_turn, job_key))
+            self.db.execute('INSERT INTO call_identity(work_key,boundary,key,digest,job_key) VALUES(?,?,?,?,?)',
+                            (grant, call_boundary, call, digest, job_key))
+        return CallKeys(grant, call, job_key=job_key)
 
-    def bind(self, scope, work_boundary, call_boundary, request):
+    def bind(self, scope, work_boundary, call_boundary, request, *, job_turn=''):
         for value in (scope, work_boundary, call_boundary):
             required(value)
         self.db.execute('BEGIN IMMEDIATE')
         try:
-            keys = self._bind_in_transaction(scope, work_boundary, call_boundary, request)
+            keys = self._bind_in_transaction(scope, work_boundary, call_boundary, request, job_turn=job_turn)
             self.db.execute('COMMIT')
             return keys
         except BaseException:
@@ -141,7 +170,7 @@ class IdentityStore:
             raise
 
     def _saved_compaction(self, scope, work, call, *, required_receipt=True):
-        rows = self.db.execute('SELECT DISTINCT w.key,c.key,a.grant_id,a.execution_id '
+        rows = self.db.execute('SELECT DISTINCT w.key,c.key,a.grant_id,a.execution_id,c.job_key '
             'FROM work_identity w JOIN call_identity c ON c.work_key=w.key '
             'JOIN accepted_native_call a ON a.scope=w.scope AND a.grant_key=w.key AND a.call_key=c.key '
             'WHERE w.scope=? AND w.boundary=? AND c.boundary=?', (scope,work,call)).fetchall()
@@ -150,10 +179,10 @@ class IdentityStore:
         if len(rows) != 1:
             raise Conflict('saved summary has no exact acknowledged intake; restore its original model and '
                            'request to reattach the same keys, never delete the mapping or create a new grant')
-        grant, key, grant_id, execution_id = rows[0]
-        return CallKeys(grant,key,work_session=True,resume_job=(grant_id,execution_id))
+        grant, key, grant_id, execution_id, job_key = rows[0]
+        return CallKeys(grant,key,work_session=True,resume_job=(grant_id,execution_id),job_key=job_key)
 
-    def bind_compaction(self, scope, source_boundary, request, *, stint_model=''):
+    def bind_compaction(self, scope, source_boundary, request, *, stint_model='', job_turn=''):
         """Freeze source policy. A model-only switch can READ its acknowledged job.
 
         Prompt/options changes cannot borrow an old summary. Unknown intake is
@@ -191,14 +220,14 @@ class IdentityStore:
                     keys = self._saved_compaction(scope,work,call)
                     self.db.execute('COMMIT')
                     return keys
-            keys = self._bind_in_transaction(scope, work, call, request)
+            keys = self._bind_in_transaction(scope, work, call, request, job_turn=job_turn)
             if original_model is None or original_shape is None:
                 # Backfill only after the original request digest has matched.
                 self.db.execute('UPDATE compaction_binding SET model=?,shape_digest=? '
                     'WHERE scope=? AND source_boundary=?',(request.get('model'),shape,scope,source_boundary))
             saved = self._saved_compaction(scope,work,call,required_receipt=False) if lifetime == 'work_session' else None
             self.db.execute('COMMIT')
-            return saved or CallKeys(keys.grant_key, keys.call_key, work_session=lifetime == 'work_session')
+            return saved or replace(keys, work_session=lifetime == 'work_session')
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
@@ -213,6 +242,51 @@ class IdentityStore:
         return self.db.execute('SELECT 1 FROM native_foreground_turn WHERE scope=? AND turn_id=?',
                                (scope,turn_id)).fetchone() is not None
 
+    def begin_native_job(self, scope, turn_id):
+        """Called by the explicit foreground owner, never by username discovery.
+
+        A new native attempt on this SAME conversation resumes its unfinished
+        parent. Successful completion removes that parent; a sibling scope or
+        a subsequent completed job gets a separate key.
+        """
+        required(scope); required(turn_id)
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            self.foreground_turn(scope, turn_id, record=True)
+            if self.db.execute('SELECT 1 FROM native_turn_end WHERE scope=? AND turn_id=?',
+                               (scope, turn_id)).fetchone():
+                self.db.execute('COMMIT')
+                return None
+            bound = self.db.execute('SELECT job_key FROM native_job_binding WHERE scope=? AND turn_id=?',
+                                    (scope, turn_id)).fetchone()
+            active = self.db.execute('SELECT job_key FROM native_requester_job WHERE scope=?',
+                                     (scope,)).fetchone()
+            if bound and active and bound[0] != active[0]:
+                raise Conflict('native turn belongs to another parent job')
+            key = (bound[0] if bound else active[0] if active else
+                   'job:' + hashlib.sha256(encoded([scope, turn_id]).encode()).hexdigest())
+            self.db.execute('INSERT OR IGNORE INTO native_job_binding VALUES(?,?,?)', (scope, turn_id, key))
+            self.db.execute("INSERT INTO native_requester_job VALUES(?,?,?,'active') "
+                "ON CONFLICT(scope) DO UPDATE SET turn_id=excluded.turn_id,state='active'", (scope, key, turn_id))
+            self.db.execute('COMMIT')
+            return key
+        except BaseException:
+            self.db.execute('ROLLBACK')
+            raise
+
+    def observe_native_outcome(self, scope, turn_id, *, completed, failed, interrupted):
+        required(scope); required(turn_id)
+        if any(type(value) is not bool for value in (completed, failed, interrupted)):
+            raise LocalSourceRefused('native completion verdict is missing or invalid')
+        if completed and (failed or interrupted):
+            raise LocalSourceRefused('native completion verdict is contradictory')
+        if completed:
+            return self.finish_turn(scope, turn_id)
+        # Late failure metadata cannot demote the subsequent live attempt.
+        self.db.execute("UPDATE native_requester_job SET state='recoverable' WHERE scope=? AND turn_id=?",
+                        (scope, turn_id))
+        return 0
+
     def record_turn_call(self, scope, turn_id, keys, *, api_request_id='', job=None):
         for value in (scope, turn_id):
             required(value)
@@ -220,11 +294,13 @@ class IdentityStore:
             required(api_request_id)
         self.db.execute('BEGIN IMMEDIATE')
         try:
-            owned = self.db.execute('SELECT 1 FROM work_identity w JOIN call_identity c '
+            owned = self.db.execute('SELECT c.job_key FROM work_identity w JOIN call_identity c '
                 'ON c.work_key=w.key WHERE w.scope=? AND w.key=? AND c.key=?',
                 (scope, keys.grant_key, keys.call_key)).fetchone()
             if owned is None:
                 raise Conflict('native turn does not own the durable call')
+            if owned[0] != getattr(keys, 'job_key', None):
+                raise Conflict('native call changed its frozen parent job')
             if job is not None:
                 required(job.grant_id); required(job.execution_id)
                 old = self.db.execute('SELECT grant_id,execution_id FROM accepted_native_call '
@@ -248,8 +324,11 @@ class IdentityStore:
                                (scope,turn_id)).fetchone():
                 # A late intake cannot rewrite an already relayed event. Give it
                 # a new fenced event; a subsequent real call makes it stale safely.
-                self._queue_yields(scope,'late-intake:'+turn_id+':'+keys.call_key,
-                                   [(keys.grant_key,keys.call_key)])
+                boundary = 'late-intake:'+turn_id+':'+keys.call_key
+                if keys.job_key is not None:
+                    self._queue_job_finishes(scope, boundary, (keys.job_key,))
+                else:
+                    self._queue_yields(scope,boundary,[(keys.grant_key,keys.call_key)])
             self.db.execute('COMMIT')
         except BaseException:
             self.db.execute('ROLLBACK')
@@ -266,6 +345,13 @@ class IdentityStore:
             self.db.execute('INSERT OR IGNORE INTO lifecycle_outbox '
                 '(id,scope,turn_id,grant_key,call_key,state) VALUES(?,?,?,?,?,?)',
                 (uuid.uuid4().hex,scope,boundary,grant_key,call_key,'pending'))
+
+    def _queue_job_finishes(self, scope, boundary, keys):
+        for key in keys:
+            self.db.execute('INSERT OR IGNORE INTO lifecycle_outbox '
+                '(id,scope,turn_id,grant_key,call_key,state,kind,job_key) '
+                "VALUES(?,?,?,?,'finish','pending','job_finish',?)",
+                (uuid.uuid4().hex, scope, boundary, key, key))
 
     def complete_api(self, scope, turn_id, api_request_id, tool_call_ids):
         """Freeze actual returned tool IDs, not the reusable native API counter."""
@@ -311,6 +397,9 @@ class IdentityStore:
             rows = self.db.execute('SELECT grant_key,call_key FROM native_tool_call '
                 'WHERE scope=? AND turn_id=? AND api_request_id=? AND tool_call_id=?',
                 (scope,turn_id,api_request_id,tool_call_id)).fetchall()
+            if any(self.db.execute('SELECT job_key FROM call_identity WHERE key=?', (call,)).fetchone()[0]
+                   is not None for _, call in rows):
+                raise LocalSourceRefused('linked job dependency requires qualified delegation or explicit job yield')
             self._queue_yields(scope,boundary,rows)
             self.db.execute('COMMIT')
             return len(rows)
@@ -325,11 +414,22 @@ class IdentityStore:
         self.db.execute('BEGIN IMMEDIATE')
         try:
             self.db.execute('INSERT OR IGNORE INTO native_turn_end VALUES(?,?)',(scope,turn_id))
-            rows = self.db.execute('SELECT grant_key,call_key FROM turn_call '
-                                  'WHERE scope=? AND turn_id=?', (scope, turn_id)).fetchall()
-            self._queue_yields(scope,turn_id,rows)
+            rows = self.db.execute('SELECT t.grant_key,t.call_key,c.job_key FROM turn_call t '
+                'JOIN call_identity c ON c.key=t.call_key WHERE t.scope=? AND t.turn_id=?',
+                (scope, turn_id)).fetchall()
+            jobs = {row[2] for row in rows if row[2] is not None}
+            jobs.update(row[0] for row in self.db.execute('SELECT job_key FROM native_job_binding '
+                                                       'WHERE scope=? AND turn_id=?', (scope, turn_id)))
+            active = self.db.execute('SELECT job_key,turn_id FROM native_requester_job WHERE scope=?',
+                                     (scope,)).fetchone()
+            if active and active[1] != turn_id:
+                jobs.discard(active[0])  # delayed old success cannot finish a resumed live parent
+            self._queue_job_finishes(scope, turn_id, sorted(jobs))
+            self.db.execute('DELETE FROM native_requester_job WHERE scope=? AND turn_id=?', (scope, turn_id))
+            legacy = [(grant, call) for grant, call, job in rows if job is None]
+            self._queue_yields(scope,turn_id,legacy)
             self.db.execute('COMMIT')
-            return len(rows)
+            return len(legacy) + len(jobs)
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
@@ -339,9 +439,14 @@ class IdentityStore:
             raise ValueError('bounded event page required')
         if type(after) is not int or after < 0:
             raise ValueError('valid event cursor required')
-        return [dict(zip(('cursor','id','grant_key','expected_call_key'), row)) for row in self.db.execute(
-            "SELECT rowid,id,grant_key,call_key FROM lifecycle_outbox WHERE state='pending' AND rowid>? ORDER BY rowid LIMIT ?",
-            (after, limit))]
+        result = []
+        for row in self.db.execute("SELECT rowid,id,grant_key,call_key,kind,job_key FROM lifecycle_outbox "
+                                   "WHERE state='pending' AND rowid>? ORDER BY rowid LIMIT ?", (after, limit)):
+            event = dict(zip(('cursor','id','grant_key','expected_call_key'), row[:4]))
+            if row[4] != 'grant_yield':
+                event.update(kind=row[4], job_key=row[5])
+            result.append(event)
+        return result
 
     def acknowledge_event(self, event, verdict):
         if verdict not in ('accepted', 'stale'):
@@ -364,7 +469,7 @@ class IdentityStore:
         An empty first parent set is meaningful and must be persisted too.
         """
         import json
-        value = encoded(sorted(set(parents)))
+        value = encoded([] if keys.job_key is not None else sorted(set(parents)))
         self.db.execute('BEGIN IMMEDIATE')
         try:
             row = self.db.execute('SELECT yield_grant_keys FROM call_identity WHERE key=? AND work_key=?',
@@ -376,13 +481,15 @@ class IdentityStore:
                 self.db.execute('UPDATE call_identity SET yield_grant_keys=? WHERE key=?',
                                 (value, keys.call_key))
                 saved = value
+            if keys.job_key is not None and json.loads(saved):
+                raise Conflict('linked job cannot use legacy dependency yield')
             self.db.execute('COMMIT')
-            return CallKeys(keys.grant_key, keys.call_key, tuple(json.loads(saved)))
+            return replace(keys, yield_grant_keys=tuple(json.loads(saved)))
         except BaseException:
             self.db.execute('ROLLBACK')
             raise
 
-    def bind_execution(self, scope, work_boundary, call_boundary, request):
+    def bind_execution(self, scope, work_boundary, call_boundary, request, *, job_turn=''):
         """One durable grant per explicit host call, including within a tool loop.
 
         Hashes only the caller's declared boundary IDs to keep identifiers short;
@@ -393,4 +500,4 @@ class IdentityStore:
         required(call_boundary)
         boundary = 'execution:' + hashlib.sha256(
             encoded([work_boundary, call_boundary]).encode()).hexdigest()
-        return self.bind(scope, boundary, call_boundary, request)
+        return self.bind(scope, boundary, call_boundary, request, job_turn=job_turn)

@@ -12,10 +12,58 @@ from unittest.mock import Mock, patch
 
 from . import manager as module
 from .manager import ModelManager, Backend
-from .vision_lifecycle import stop_owned_vision
+from .vision_lifecycle import stop_owned_vision, recover_owned_vision
 
 
 class VisionLifecycle(unittest.TestCase):
+    def test_dead_child_reload_keeps_claim_and_records_replacement_before_health(self):
+        mm = self.model()
+        mm.vlm_process.poll.side_effect = None
+        mm.vlm_process.poll.return_value = 1
+        replacement = Mock(pid=2345, args=mm.vlm_process.args)
+        replacement.poll.return_value = None
+        admission = Mock()
+        def ready(*args, **kwargs):
+            self.assertIs(mm.vlm_process, replacement)
+            self.assertEqual(mm.lease_id, 'exact')
+            return SimpleNamespace(status_code=200)
+        with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=True), \
+             patch('ollama.vision_lifecycle.subprocess.Popen', return_value=replacement), \
+             patch('httpx.get', side_effect=ready):
+            recover_owned_vision(mm, confirm_admission=admission)
+        self.assertEqual(admission.call_count, 2)
+        replacement.terminate.assert_not_called()
+
+    def test_recovery_observation_loss_resumes_same_child_without_new_spawn(self):
+        mm = self.model()
+        mm.vlm_process.poll.side_effect = None
+        mm.vlm_process.poll.return_value = 1
+        replacement = Mock(pid=2345, args=mm.vlm_process.args)
+        replacement.poll.return_value = None
+        admission = Mock(side_effect=[None, RuntimeError('lease observation unavailable')])
+        with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=True), \
+             patch('ollama.vision_lifecycle.subprocess.Popen', return_value=replacement) as spawn, \
+             patch('httpx.get', return_value=SimpleNamespace(status_code=200)):
+            with self.assertRaises(RuntimeError):
+                recover_owned_vision(mm, confirm_admission=admission)
+            with patch('httpx.get', return_value=SimpleNamespace(status_code=200)):
+                recover_owned_vision(mm, confirm_admission=Mock(), resume=True)
+            spawn.assert_called_once()
+        self.assertIs(mm.vlm_process, replacement)
+        self.assertEqual(mm.lease_id, 'exact')
+
+    def test_unknown_absence_or_admission_never_starts_replacement(self):
+        for absent in (False, True):
+            mm = self.model()
+            mm.vlm_process.poll.side_effect = None
+            mm.vlm_process.poll.return_value = 1
+            with patch('ollama.inference_shared_resource.cold_vision_absent', return_value=absent), \
+                 patch('ollama.vision_lifecycle.subprocess.Popen') as spawn:
+                with self.assertRaises(RuntimeError):
+                    recover_owned_vision(mm, confirm_admission=Mock(side_effect=RuntimeError('not admitted')))
+                spawn.assert_not_called()
+            self.assertEqual(mm.lease_id, 'exact')
+
     def model(self):
         process = Mock(pid=1234)
         process.args = ['python', '-m', 'mlx_vlm.server', '--model', 'vision',

@@ -92,7 +92,8 @@ class ArbitrationJournal(unittest.TestCase):
 from ollama.inference_arbiter import Arbiter
 a=Arbiter(sys.argv[1]); a.submit('child','request','slice','qwen'); os._exit(0)
 """
-        subprocess.run([sys.executable, '-c', code, str(self.path)], check=True, timeout=5)
+        subprocess.run([sys.executable, '-c', code, str(self.path)], check=True, timeout=5,
+                       cwd=Path(__file__).resolve().parents[1])
         grant = self.a.admit_next('slice')
         self.assertEqual(grant['owner'], 'child')
         self.assertEqual(grant['state'], 'granted')
