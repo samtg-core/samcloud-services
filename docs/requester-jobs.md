@@ -40,6 +40,16 @@ is read from the supplied profile at startup, with no environment behavior switc
 The same policy covers every Hermes role and both main queued-provider types.
 It must not be enabled on a running seat from this source checkpoint.
 
+Parent linkage alone does not override a native tool observer's deadline. A
+named tool that observes a durable queued job must use the existing per-call
+wait policy, for example timeouts.tools.calls.vision_analyze: 0 for queued vision.
+Keep the ordinary generic tool/batch limits; do not disable all tool timeouts or
+apply this to arbitrary terminal commands. Interrupted observation still retains
+the accepted receipt. The native round-trip test deliberately holds a child
+beyond a one-second generic guard and requires its original result, rather than
+accepting a timeout message as a successful handback. Both providers pass with
+the named policy. No live profile is configured by this test.
+
 Existing native foreground ownership links main calls, active compaction and
 originating tools. Concurrent tools get distinct call identities under one parent.
 Detached/background work does not borrow that parent. Copied contexts must still

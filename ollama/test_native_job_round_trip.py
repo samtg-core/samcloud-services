@@ -57,6 +57,8 @@ def local_queue(tmp_path, monkeypatch):
             state['supervisor'].journal.append_event(ident, 'data: ' + json.dumps(frame) + '\n\n', terminal=True)
             state['supervisor'].journal.append_event(ident, 'data: [DONE]\n\n', terminal=True)
             return {'kind': 'stream', 'event_count': 2, 'media_type': 'text/event-stream'}
+        if grant['model'] == 'vision' and state.get('child_delay'):
+            await asyncio.sleep(state['child_delay'])
         return {'kind': 'json', 'body': {'id': ident, 'object': 'chat.completion', 'created': 1,
             'model': grant['model'], 'choices': [{'index': 0, 'finish_reason': 'stop',
                                                 'message': {'role': 'assistant', 'content': 'child done'}}]}}
@@ -104,9 +106,12 @@ def local_queue(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('provider', ['samcloud-queue', 'samcloud-queue-stint'])
-@pytest.mark.parametrize('child_count,interrupt_after_child', [(1, False), (1, True), (0, False), (2, False)])
+@pytest.mark.parametrize('child_count,interrupt_after_child,durable_wait', [
+    (1, False, False), (1, True, False), (0, False, False), (2, False, False),
+    (1, False, True),
+])
 def test_native_parent_tool_and_recovery_keep_place_until_real_finish(
-    tmp_path, monkeypatch, local_queue, provider, child_count, interrupt_after_child,
+    tmp_path, monkeypatch, local_queue, provider, child_count, interrupt_after_child, durable_wait,
 ):
     from agent import secret_scope
     from agent.auxiliary_client import resolve_provider_client
@@ -120,6 +125,7 @@ def test_native_parent_tool_and_recovery_keep_place_until_real_finish(
     url, observed, _, service_state = local_queue
     service_state['tool_first'] = bool(child_count)
     service_state['child_count'] = child_count
+    service_state['child_delay'] = 2.5 if durable_wait else 0
     home = tmp_path / 'profile'
     home.mkdir()
     monkeypatch.setenv('HERMES_HOME', str(home))
@@ -127,10 +133,14 @@ def test_native_parent_tool_and_recovery_keep_place_until_real_finish(
     source = Path(__file__).resolve().parents[1] / 'hermes-plugins'
     for name in ('samcloud-queue-hooks', 'samcloud-queue-provider'):
         shutil.copytree(source / name, home / 'plugins' / name)
-    (home / 'config.yaml').write_text(json.dumps({
+    config = {
         'plugins': {'isolation': 'in_process', 'enabled': ['samcloud-queue-hooks']},
         'samcloud_queue': {'job_continuity': True},
-    }))
+    }
+    if durable_wait:
+        config['timeouts'] = {'tools': {'sequential_call': 1, 'concurrent_batch': 1,
+                                        'calls': {'job_round_trip_probe': 0}}}
+    (home / 'config.yaml').write_text(json.dumps(config))
     plugins.discover_plugins()
     token = secret_scope.set_secret_scope({'SAMCLOUD_QUEUE_API_KEY': 'native-test'})
     schema = {'name': 'job_round_trip_probe', 'description': 'Synthetic child round trip',
@@ -191,6 +201,8 @@ def test_native_parent_tool_and_recovery_keep_place_until_real_finish(
         else:
             result = first
         assert result['completed'] and result['final_response'] == 'done'
+        assert [message.get('content') for message in result['messages']
+                if message.get('role') == 'tool'] == ['child finished'] * child_count
         # The async lifecycle relay may already have accepted the same event.
         from .inference_identity import IdentityStore
         store = IdentityStore(home / 'samcloud-queue' / 'identity.sqlite')
