@@ -45,8 +45,10 @@ def _base(value):
 class RootIntentStore:
     """Private durable client intent, bound to one registry/principal/service.
 
-    Use the actual requester-job ID as job_id, not a username or mutable session
-    alias. Connections are operation-local so threads never share a SQLite handle.
+    The job_id argument identifies one durable physical intent, not a username
+    or mutable session alias. RootPreparingArbiter supplies its preparation ID,
+    bound to the logical requester job. Yield/resume uses a fresh physical intent
+    without changing that logical job. Connections are operation-local.
     """
     def __init__(self,path,*,registry,actor,service):
         self.registry,self.actor,self.service=_base(registry),_identifier(actor),_identifier(service)

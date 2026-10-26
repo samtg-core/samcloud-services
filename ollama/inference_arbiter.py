@@ -184,6 +184,16 @@ class Arbiter(JobScheduling):
             if 'wait_reason' not in execution_columns:
                 self.db.execute('ALTER TABLE executions ADD COLUMN wait_reason TEXT')
             self._install_jobs()
+        # Optional staged root-controller journals cannot silently fall back to
+        # legacy dispatch while physical preparation/end debt remains. The
+        # qualified subclass keeps that boundary ahead of execution admission.
+        if (not getattr(self,'supports_root_preparation',False) and self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='requester_root_preparations'").fetchone()
+            and self.db.execute("""SELECT 1 FROM requester_root_preparations p
+                JOIN requester_jobs j ON j.id=p.job_id
+                WHERE p.state!='complete' OR j.state!='closed' LIMIT 1""").fetchone()):
+            self.db.close()
+            raise Conflict('unfinished root preparations require their qualified scheduler')
         if self.stint_policy is None and self.db.execute(
                 "SELECT 1 FROM requester_jobs WHERE state!='closed'").fetchone():
             self.db.close()

@@ -50,6 +50,9 @@ text parent holds capacity and waits for it: that is a deadlock, not delegation.
 The separate [staged registry-root client](registry-root-client.md) persists
 physical-root control intent. It is not wired into this scheduler/capacity source
 and does not change the false cross-service capability or authorize activation.
+The [staged preparation scheduler](root-preparation.md) now holds a logical
+slot before physical admission and retains it until exact physical cleanup.
+It remains an explicit alternate class; no bootstrap or supervisor uses it.
 
 ## API
 

@@ -8,9 +8,12 @@ First standalone image generation remains independent of compound-root support.
 
 Create `RootIntentStore` at an owned private file, explicitly bound to the HTTPS
 registry `/api/v1` origin, the provider's verified actor and registered service.
-Use the actual service `requester_jobs.id` as `job_id`, not a username, current
-conversation or latest job. A new completed job needs a new ID; reconnect and
-interruption reuse the old one. The journal stores no bearer, prompt or model
+The `job_id` client argument identifies one durable physical root intent.
+The staged `RootPreparingArbiter` supplies its saved preparation ID, bound to
+the actual `requester_jobs.id`. Reconnect/interruption reuse that preparation;
+explicit yield can later create a fresh physical preparation while preserving
+the logical job. Never substitute a username, current conversation or latest
+job, or overwrite the old intent. The journal stores no bearer, prompt or model
 weights. Operation-local SQLite connections commit with `synchronous=FULL`.
 
 `RegistryRootClient(store, token=own_provider_token)` creates a dedicated HTTP
@@ -61,3 +64,8 @@ job completion/drain, exact backend cleanup, same-envelope child transfer and
 operator reconciliation. Do not independently request an image claim while a
 text root holds capacity and waits. That remains the unqualified self-deadlock
 this component will help repair; this client alone does not fix or enable it.
+
+The [staged preparation scheduler](root-preparation.md) now implements the local
+pre-dispatch/end boundaries. It is not constructed by the service supervisor or
+bootstrap. The actual model loader/capacity source and delegated child path still
+need coherent integration and physical qualification.

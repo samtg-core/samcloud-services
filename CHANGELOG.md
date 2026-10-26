@@ -1,3 +1,16 @@
+# Staged physical-root preparation boundary — 27 October 2026
+
+Add an uninstalled RootPreparingArbiter that selects/persists the next logical
+job before physical root admission, keeping the accepted call queued. Exact
+fresh full-root observation plus ordinary model/headroom permission gates
+actual dispatch. Finish/yield retains the logical slot until terminal physical
+cleanup acknowledgement; stale/unknown/restarted state cannot release it.
+Yield can reuse a logical job under a new durable physical intent, without
+replacing accepted calls or letting old completions affect the new root.
+Ordinary Arbiter refuses unfinished root-protocol journals. No supervisor,
+capacity/model manager, native bootstrap or live deployment uses this class.
+See docs/root-preparation.md for the controller contract and remaining work.
+
 # Staged registry-root control client — 27 October 2026
 
 Add an uninstalled durable root client: save identity before submit, recover the
