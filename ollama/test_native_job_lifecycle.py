@@ -45,6 +45,23 @@ class NativeParentRecovery(unittest.TestCase):
             self.assertEqual(self.store.pending_events(), [])
             self.assertEqual(self.store.begin_native_job('scope', 'turn'), key)
 
+    def test_superseded_attempt_cannot_take_back_recovery_ownership(self):
+        key = self.store.begin_native_job('scope', 'original')
+        self.assertEqual(self.store.begin_native_job('scope', 'retry'), key)
+        with self.assertRaises(LocalSourceRefused):
+            self.store.begin_native_job('scope', 'original')
+        self.assertEqual(self.store.db.execute(
+            'SELECT turn_id FROM native_requester_job WHERE scope=?', ('scope',)).fetchone(), ('retry',))
+
+    def test_native_owner_is_revalidated_inside_binding_transaction(self):
+        key = self.store.begin_native_job('scope', 'original')
+        with self.assertRaises(LocalSourceRefused):
+            self.store.begin_native_job('scope', 'late', is_current=lambda: False)
+        self.assertEqual(self.store.db.execute(
+            'SELECT job_key,turn_id FROM native_requester_job WHERE scope=?', ('scope',)).fetchone(),
+            (key, 'original'))
+        self.assertFalse(self.store.foreground_turn('scope', 'late'))
+
     def test_success_queues_one_parent_finish_instead_of_per_child_yields(self):
         key = self.store.begin_native_job('scope', 'turn')
         for role in ('main', 'compression', 'tool'):

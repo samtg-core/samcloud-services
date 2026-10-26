@@ -25,6 +25,8 @@ identity or bypass the durable SDK with an anonymous custom transport.
 The explicit owning profile's config.yaml can contain:
 
 ```yaml
+context:
+  engine: samcloud-queue-context
 samcloud_queue:
   job_continuity: true
 ```
@@ -36,6 +38,11 @@ one parent. Concurrent tools have distinct calls under that parent; detached
 background work stays independent. Error/interruption retains the parent for
 recovery. Only authoritative successful native completion finishes it through
 the durable metadata outbox. A tool finishing does not finish the parent.
+
+The queued context engine supplies its owning SessionDB for compaction-lineage
+recovery. Foreground intake without that binding refuses locally. A committed
+compression child can recover its unfinished parent even after process exit
+before alias persistence; unrelated resets/forks/profiles remain independent.
 
 Legacy sc-queue-wait cannot silently yield a linked parent. Explicit native yield
 and registry-authorized cross-service image delegation remain unfinished. In

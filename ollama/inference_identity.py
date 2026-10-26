@@ -242,7 +242,7 @@ class IdentityStore:
         return self.db.execute('SELECT 1 FROM native_foreground_turn WHERE scope=? AND turn_id=?',
                                (scope,turn_id)).fetchone() is not None
 
-    def begin_native_job(self, scope, turn_id):
+    def begin_native_job(self, scope, turn_id, *, is_current=None):
         """Called by the explicit foreground owner, never by username discovery.
 
         A new native attempt on this SAME conversation resumes its unfinished
@@ -252,6 +252,8 @@ class IdentityStore:
         required(scope); required(turn_id)
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            if is_current is not None and is_current() is not True:
+                raise LocalSourceRefused('native foreground ended before its parent binding committed')
             self.foreground_turn(scope, turn_id, record=True)
             if self.db.execute('SELECT 1 FROM native_turn_end WHERE scope=? AND turn_id=?',
                                (scope, turn_id)).fetchone():
@@ -259,10 +261,12 @@ class IdentityStore:
                 return None
             bound = self.db.execute('SELECT job_key FROM native_job_binding WHERE scope=? AND turn_id=?',
                                     (scope, turn_id)).fetchone()
-            active = self.db.execute('SELECT job_key FROM native_requester_job WHERE scope=?',
+            active = self.db.execute('SELECT job_key,turn_id FROM native_requester_job WHERE scope=?',
                                      (scope,)).fetchone()
             if bound and active and bound[0] != active[0]:
                 raise Conflict('native turn belongs to another parent job')
+            if bound and active and active[1] != turn_id:
+                raise LocalSourceRefused('native attempt was superseded by its recovery owner')
             key = (bound[0] if bound else active[0] if active else
                    'job:' + hashlib.sha256(encoded([scope, turn_id]).encode()).hexdigest())
             self.db.execute('INSERT OR IGNORE INTO native_job_binding VALUES(?,?,?)', (scope, turn_id, key))

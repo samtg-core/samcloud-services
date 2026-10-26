@@ -67,15 +67,19 @@ def register_hooks(ctx):
         with lock:
             pending.pop(call, None)
         if host.job_continuity:
-            from agent.relay_runtime import active_turn
-            turn = active_turn()
+            from agent.relay_runtime import current_turn
+            turn = current_turn()
             if (turn is not None and turn.turn_id == turn_id
                     and turn.lease.profile_key == host.scope
-                    and not live_owner(host, session_id, turn_id)):
+                    and (not live_owner(host, session_id, turn_id)
+                         or not host.foreground_bound(session_id, turn_id))):
                 raise LocalSourceRefused('foreground session changed without committed compaction lineage')
         try:
             source = HeldSource.capture(host.scope, host.owner_session(session_id), 'main', conversation_history,
                                         turn_id=turn_id, api_request_id=api_request_id)
+            if host.job_continuity and (not live_owner(host, session_id, turn_id)
+                    or not host.foreground_bound(session_id, turn_id)):
+                raise LocalSourceRefused('persisted native main call has no verified foreground binding')
         except UnpersistedSource:
             source = host.detached_source(session_id,turn_id,conversation_history)
         with lock:
@@ -104,9 +108,24 @@ def register_hooks(ctx):
     def began(*,session_id='',turn_id='',**kwargs):
         if session_id and turn_id:
             host = current_host()
+            validator = None
             if host.job_continuity and not live_owner(host, session_id, turn_id):
                 return
-            host.begin_foreground(session_id,turn_id)
+            if host.job_continuity:
+                from agent.relay_runtime import active_turn
+                host.verify_foreground(session_id, turn_id, enabled=False)
+                host.recover_compaction_lineage(session_id, turn_id)
+                if not live_owner(host, session_id, turn_id):
+                    return
+                turn = active_turn()
+                if turn is None:
+                    return
+                # Runs under IdentityStore's write transaction: no nested store
+                # open/schema migration from the liveness predicate.
+                validator = lambda: active_turn() is turn
+            host.begin_foreground(session_id,turn_id, is_current=validator)
+            if host.job_continuity:
+                host.verify_foreground(session_id, turn_id, enabled=True)
 
     def live_owner(host, session_id, turn_id):
         from agent.relay_runtime import active_turn

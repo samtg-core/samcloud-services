@@ -118,6 +118,8 @@ class HostBindings:
         self.compaction_owner = ContextVar('queue_compaction_owner', default=None)
         self.tool = ContextVar('queue_tool_source',default=None)
         self.tool_api = ContextVar('queue_tool_api',default=None)
+        self._session_databases = {}
+        self._verified_foregrounds = {}
         if job_continuity:
             store = IdentityStore(self.path)
             try:
@@ -138,6 +140,101 @@ class HostBindings:
             return row[0] if row is not None else session_id
         finally:
             store.close()
+
+    def bind_session_database(self, session_id, database):
+        """An owning context engine supplies its exact SessionDB, never a search."""
+        if self.job_continuity and session_id and database is not None:
+            self._session_databases[session_id] = database
+
+    def foreground_bound(self, session_id, turn_id):
+        owner = self.owner_session(session_id)
+        if self._verified_foregrounds.get(owner) != turn_id:
+            return False
+        store = IdentityStore(self.path)
+        try:
+            scope = owner_scope(self.scope, owner)
+            return store.foreground_turn(scope, turn_id) and store.db.execute(
+                'SELECT 1 FROM native_job_binding WHERE scope=? AND turn_id=?',
+                (scope, turn_id)).fetchone() is not None
+        finally:
+            store.close()
+
+    def verify_foreground(self, session_id, turn_id, *, enabled):
+        owner = self.owner_session(session_id)
+        if enabled:
+            self._verified_foregrounds[owner] = turn_id
+        elif self._verified_foregrounds.get(owner) == turn_id:
+            self._verified_foregrounds.pop(owner, None)
+
+    def recover_compaction_lineage(self, session_id, turn_id):
+        """Recover the publication/alias crash window from exact native lineage.
+
+        This runs only at a positively verified foreground begin. A normal new,
+        reset or fork session cannot inherit an old job by username or recency.
+        Partial alias commits can be replayed; old call identities never move.
+        """
+        if not self.job_continuity or self.owner_session(session_id) != session_id:
+            return
+        database = self._session_databases.get(session_id)
+        if database is None:
+            raise LocalSourceRefused('native job requires its owning queued context-engine SessionDB')
+        from agent.relay_runtime import active_turn
+        turn = active_turn(session_id)
+        if turn is None or turn.turn_id != turn_id or turn.lease.profile_key != self.scope:
+            raise LocalSourceRefused('session lineage recovery has no live foreground owner')
+        child = database.get_session(session_id)
+        links, visited = [], {session_id}
+        while isinstance(child, dict) and child.get('parent_session_id'):
+            parent_id = child['parent_session_id']
+            if parent_id in visited:
+                raise LocalSourceRefused('native compression lineage contains a cycle')
+            visited.add(parent_id)
+            parent = database.get_session(parent_id)
+            if (not isinstance(parent, dict) or parent.get('end_reason') != 'compression'
+                    or parent.get('source') != child.get('source')
+                    or parent.get('profile_name') != child.get('profile_name')):
+                break
+            links.append((parent_id, child['id']))
+            child = parent
+        store = IdentityStore(self.path)
+        try:
+            candidates = {}
+            for parent_id, _ in links:
+                owner = self.owner_session(parent_id)
+                scope = owner_scope(self.scope, owner)
+                active = store.db.execute('SELECT job_key FROM native_requester_job WHERE scope=?',
+                                          (scope,)).fetchone()
+                if active is not None:
+                    candidates[owner] = active[0]
+            if not candidates:
+                return
+            if len(candidates) != 1:
+                raise LocalSourceRefused('native lineage contains multiple unfinished parents')
+            owner, expected = next(iter(candidates.items()))
+            # Older completed ancestors are history, not this unfinished job.
+            boundary = next(index for index, (parent_id, _) in enumerate(links)
+                            if self.owner_session(parent_id) == owner)
+            links = links[:boundary + 1]
+            # An already-used raw child scope must never be reinterpreted as
+            # the ancestor's calls. Such a pre-existing conflict needs recovery.
+            for _, child_id in links:
+                if self.owner_session(child_id) == child_id:
+                    child_scope = owner_scope(self.scope, child_id)
+                    independent = store.db.execute(
+                        'SELECT job_key FROM native_requester_job WHERE scope=?', (child_scope,)).fetchone()
+                    if ((independent is not None and independent[0] != expected)
+                            or store.db.execute('SELECT 1 FROM work_identity WHERE scope=?',
+                                                (child_scope,)).fetchone()):
+                        raise LocalSourceRefused('compression child already has frozen independent work')
+            if store.begin_native_job(owner_scope(self.scope, owner), turn_id,
+                    is_current=lambda: active_turn(session_id) is turn) != expected:
+                raise LocalSourceRefused('native parent changed during lineage recovery')
+        finally:
+            store.close()
+        # Persist from the root outward. A process exit between these commits
+        # leaves an exact prefix which the next owner can recover identically.
+        for parent_id, child_id in reversed(links):
+            self.link_compaction_session(parent_id, child_id, turn_id)
 
     def link_compaction_session(self, parent_session, child_session, turn_id):
         """The context engine calls this only after durable native publication."""
@@ -264,13 +361,13 @@ class HostBindings:
     def post_api_request(self, **unused):
         self.main.set(None)
 
-    def begin_foreground(self,session_id,turn_id):
+    def begin_foreground(self,session_id,turn_id, *, is_current=None):
         session_id = self.owner_session(session_id)
         store=IdentityStore(self.path)
         try:
             scope = owner_scope(self.scope,session_id)
             if self.job_continuity:
-                store.begin_native_job(scope, turn_id)
+                store.begin_native_job(scope, turn_id, is_current=is_current)
             else:
                 store.foreground_turn(scope,turn_id,record=True)
         finally:
@@ -437,7 +534,8 @@ class HostBindings:
                     boundary = 'operation:' + source.operation
                 job_turn = ''
                 if self.job_continuity and owner:
-                    if store.begin_native_job(source.scope, owner[0]) is None:
+                    if store.begin_native_job(source.scope, owner[0],
+                            is_current=lambda: owner_provider() == owner) is None:
                         raise LocalSourceRefused('foreground compaction owner already finished')
                     job_turn = owner[0]
                 keys = store.bind_compaction(source.scope, boundary, request,

@@ -123,6 +123,14 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
     engine.threshold_tokens=1000;engine.tail_token_budget=256
     history=[{'role':'user' if i%2==0 else 'assistant','_row_id':i+1,
               'content':('synthetic archive detail '*200)+str(i)} for i in range(40)]
+    native_db = None
+    if job_mode:
+        from hermes_state import SessionDB
+        native_db = SessionDB(tmp_path / 'stock-state.sqlite')
+        native_db.create_session('stock-owner', source='cli')
+        for message in history:
+            message['_row_id'] = native_db.append_message('stock-owner', message['role'], message['content'])
+        engine.bind_session_state(native_db, 'stock-owner')
     host.pre_api_request(session_id='stock-owner',turn_id='stock-turn',api_request_id='api',conversation_history=history)
     if job_mode:
         host.begin_foreground('stock-owner', 'stock-turn')
@@ -168,6 +176,8 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
         restored=QueuedContextCompressor(model='qwen-new',provider=provider,
             api_key='synthetic',base_url='https://queue.invalid/v1',config_context_length=65536,quiet_mode=True)
         restored.bind_session_state(session_id='stock-owner')
+        if native_db is not None:
+            restored.bind_session_state(native_db, 'stock-owner')
         restored.threshold_tokens=1000;restored.tail_token_budget=256
         before=len(queued_profile.requests)
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -189,3 +199,5 @@ def test_stock_compressor_worker_inherits_owner_and_uses_continuation_wire(tmp_p
     finally:
         coordinator.end_turn(turn,outcome='success');coordinator.release_conversation(lease)
         for c in clients:asyncio.run(c.aclose())
+        if native_db is not None:
+            native_db.close()

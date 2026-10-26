@@ -48,6 +48,10 @@ class QueuedContextCompressor(ContextCompressor):
         # Never deepcopy a bound native SessionDB or any mutable session state.
         return type(self)(**deepcopy(self._queue_constructor_options))
 
+    def bind_session_state(self, session_db=None, session_id=''):
+        super().bind_session_state(session_db, session_id)
+        host_for_home(self._queue_home).bind_session_database(session_id, session_db)
+
     def on_session_start(self, session_id, **kwargs):
         host = host_for_home(self._queue_home)
         parent = kwargs.get('old_session_id')
@@ -58,11 +62,28 @@ class QueuedContextCompressor(ContextCompressor):
             turn = active_turn()
             db = kwargs.get('session_db', getattr(self, '_session_db', None))
             child = db.get_session(session_id) if db is not None else None
-            if (turn is None or turn.lease.profile_key != host.scope
-                    or host.owner_session(turn.lease.session_id) != host.owner_session(parent)
-                    or not isinstance(child, dict) or child.get('parent_session_id') != parent):
+            if not isinstance(child, dict) or child.get('parent_session_id') != parent:
                 raise LocalSourceRefused('native compaction lineage is not committed under this owner')
-            host.link_compaction_session(parent, session_id, turn.turn_id)
+            if turn is not None:
+                if turn.lease.profile_key != host.scope:
+                    raise LocalSourceRefused('native compaction notification belongs to another profile')
+                owner = host.owner_session(turn.lease.session_id)
+                if owner == host.owner_session(parent):
+                    # Prune-only compression can rotate before any inference.
+                    # Establish metadata under the live owner, never a claim.
+                    host.begin_foreground(parent, turn.turn_id,
+                        is_current=lambda: active_turn() is turn)
+                    host.link_compaction_session(parent, session_id, turn.turn_id)
+                elif owner == host.owner_session(session_id):
+                    # A committed rotation can be adopted after process exit.
+                    # Bind its database before recovering the exact old parent.
+                    super().on_session_start(session_id, **kwargs)
+                    host.recover_compaction_lineage(session_id, turn.turn_id)
+                    return
+                else:
+                    raise LocalSourceRefused('native compaction notification has another live owner')
+            # A deferred notification may bind committed session data without
+            # granting scheduling authority. The next live begin recovers it.
         super().on_session_start(session_id, **kwargs)
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
@@ -75,6 +96,8 @@ class QueuedContextCompressor(ContextCompressor):
             turn = active_turn() if host.job_continuity else active_turn(self._session_id)
             if (turn is not None and turn.lease.profile_key == host.scope
                     and host.owner_session(turn.lease.session_id) == host.owner_session(self._session_id)):
+                if host.job_continuity:
+                    host.recover_compaction_lineage(self._session_id, turn.turn_id)
                 turn_id, session_id, provider = turn.turn_id, self._session_id, self.provider
                 def owner_provider():
                     current = active_turn() if host.job_continuity else active_turn(session_id)

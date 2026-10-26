@@ -6,9 +6,9 @@ the same. Existing grants, accepted execution receipts and legacy calls retain
 their frozen identities across retries and reconnects.
 
 Source review450/c832 found lifecycle gaps. This candidate must remain disabled
-on every real parent until session-ID rotation during native compaction, missing
-reservation reconciliation under retained ownership, and an explicit operator
-end path are repaired and qualified. Interrupted/failed work must stay recoverable;
+on every real parent until missing reservation reconciliation under retained
+ownership and an explicit operator end path are repaired and qualified, along
+with the remaining review findings. Interrupted/failed work must stay recoverable;
 neither session reset nor process exit alone is proof that it can be released.
 The first repair addresses offline journal recovery and late-intake finish
 fencing; it does not close the other review findings or authorize activation.
@@ -22,9 +22,17 @@ completion and later recovery use the same explicit lineage. Existing accepted
 call records are not rewritten. An unknown/uncommitted or closed copied context
 cannot create an alias; a live foreground with missing lineage refuses intake
 rather than sending an unlinked call behind itself. No Hermes core hook was added.
-This qualifies the live committed-notification path. Recovery after process exit
-between SessionDB publication and alias persistence remains unqualified; the
-candidate must not be activated with that reconnect window unresolved.
+After a process exits between SessionDB publication and alias persistence, the
+queued context engine supplies its exact owning SessionDB on resume. A positively
+verified native foreground follows committed compression ancestors to its exact
+unfinished local parent and persists the missing aliases before new intake.
+Existing independent child intents, reset/fork/profile boundaries, ambiguous
+parents or invalid lineage refuse that attachment. A stale attempt cannot take
+back a resumed parent's ownership. The native owner is checked again inside the
+identity transaction using a database-free predicate.
+Deferred native notifications can bind the committed child transcript before a
+live turn exists. That only advances context data; it creates no scheduling
+alias or ownership. Resume/adoption recovers ownership at the next verified turn.
 
 This is the inference service's requester scheduler. The shared Samcloud registry
 remains the only physical allocation authority. Cross-service child delegation is
@@ -52,6 +60,8 @@ resume the same job. Neither action cancels an execution or proves backend death
 The explicit owning profile may opt in at a natural maintenance boundary:
 
 ```yaml
+context:
+  engine: samcloud-queue-context
 samcloud_queue:
   job_continuity: true
 ```
@@ -60,6 +70,10 @@ The default is legacy behavior; malformed/non-boolean policy refuses. This optio
 is read from the supplied profile at startup, with no environment behavior switch.
 The same policy covers every Hermes role and both main queued-provider types.
 It must not be enabled on a running seat from this source checkpoint.
+The matching queued context engine is part of the adapter, including when
+compaction is not currently needed: it supplies the explicit SessionDB used for
+reconnect proof. Missing that binding fails locally before new foreground intake.
+It does not change the model's compression thresholds or summary algorithm.
 
 Parent linkage alone does not override a native tool observer's deadline. A
 named tool that observes a durable queued job must use the existing per-call

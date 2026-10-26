@@ -131,11 +131,12 @@ def test_native_parent_tool_and_recovery_keep_place_until_real_finish(
     monkeypatch.setenv('HERMES_HOME', str(home))
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
     source = Path(__file__).resolve().parents[1] / 'hermes-plugins'
-    for name in ('samcloud-queue-hooks', 'samcloud-queue-provider'):
+    for name in ('samcloud-queue-hooks', 'samcloud-queue-provider', 'samcloud-queue-context'):
         shutil.copytree(source / name, home / 'plugins' / name)
     config = {
         'plugins': {'isolation': 'in_process', 'enabled': ['samcloud-queue-hooks']},
         'samcloud_queue': {'job_continuity': True},
+        'context': {'engine': 'samcloud-queue-context'},
     }
     if durable_wait:
         config['timeouts'] = {'tools': {'sequential_call': 1, 'concurrent_batch': 1,
