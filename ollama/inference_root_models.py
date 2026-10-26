@@ -27,6 +27,18 @@ class RootAdmissionDeferred(CapacityDeferred):
         super().__init__('capacity_unavailable')
 
 
+def _physical_headroom():
+    try:
+        reading=capacity.collect()
+        available=reading.get('memory_available_mb')
+        device=reading.get('memory_device_inuse_mb')
+    except Exception:
+        raise RootAdmissionDeferred('host_headroom_unknown') from None
+    if type(available) is not int or available<0 or type(device) is not int or device<0:
+        raise RootAdmissionDeferred('host_headroom_unknown')
+    return available,device
+
+
 class _RootOnlyClient:
     def __init__(self,client):self._client=client
     def __getattr__(self,name):
@@ -183,11 +195,11 @@ class RootModelBinding:
         limit=receipt['lease']['memory_mb']
         if need_mb>limit:raise RootAdmissionDeferred('model_exceeds_root_envelope')
         def fits():
-            physical=capacity.collect();available=physical.get('memory_available_mb')
-            if type(available) is not int or available<0:
-                raise RootAdmissionDeferred('host_headroom_unknown')
+            available,device=_physical_headroom()
             used=sum(row['reported_mb'] for row in self._rows() if row['state']=='resident')
-            return used+need_mb<=limit and capacity.fits(need_mb,available)
+            # A cached model size excludes later KV/context growth. Do not
+            # infer spare root bytes from that smaller historical number.
+            return used+need_mb<=limit and device+need_mb<=limit and capacity.fits(need_mb,available)
         if not fits():
             for row in rows:
                 # Strict manager unload proves owned backend absence. Its root
@@ -228,10 +240,18 @@ class RootModelBinding:
             # Provider mutation has happened. Never describe this as a safe
             # pre-provider refusal or let the supervisor silently repeat it.
             raise Conflict('Post-load root admission requires reconciliation') from None
+        try:_,device=_physical_headroom()
+        except CapacityDeferred:
+            # The load already started under positive admission. An observer
+            # gap does not undo known provider completion or admit another
+            # call; the source still needs fresh physical data for dispatch.
+            device=None
+            with self._lock:self._permission=None
         with self.store._transaction() as conn:
             others=list(conn.execute("SELECT * FROM root_model_intents WHERE resource=? AND state!='gone' AND id!=?",(self.resource,row['id'])))
             valid=(row['preparation_id']==ident and row['lease_id']==receipt['current_lease_id']
                 and type(mm.memory_mb) is int and mm.memory_mb>0
+                and (device is None or device<=receipt['lease']['memory_mb'])
                 and all(r['state']=='resident' for r in others)
                 and sum(r['reported_mb'] for r in others)+mm.memory_mb<=receipt['lease']['memory_mb'])
             conn.execute('UPDATE root_model_intents SET state=?,reported_mb=? WHERE id=?',

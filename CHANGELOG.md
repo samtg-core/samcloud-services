@@ -1,3 +1,13 @@
+# Check fresh aggregate device headroom — 27 October 2026
+
+Check current device usage as well as available host RAM and reported model
+sizes before root-owned loads. Cached size can miss later KV/context growth;
+a model switch must unload within the same root rather than exceed its budget.
+Unknown physical readings defer before mutation. Positive post-load overrun
+retains debt; an observation gap preserves known started completion but withdraws
+new admission. Add stale-context, invalid-reading and post-load regressions.
+No source/controller/bootstrap activation or physical model qualification.
+
 # Retain started model loads across heartbeat observation — 27 October 2026
 
 Separate new-dispatch admission from retained ownership at model-load completion.

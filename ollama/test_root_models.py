@@ -72,7 +72,10 @@ def env(tmp_path,monkeypatch):
     m.durable_inference=True;m.initial_reservations=None;m.residency_renewal=None;m._unreleased={}
     m.ollama=Ollama();m.refuse_if_device_in_use=lambda *_:None
     child=[]
-    monkeypatch.setattr(module.capacity,'collect',lambda:{'memory_available_mb':64000-sum(m.ollama.running.values())-sum(5700 for p in child if p.alive)})
+    def physical():
+        device=sum(m.ollama.running.values())+sum(5700 for p in child if p.alive)
+        return {'memory_available_mb':64000-device,'memory_device_inuse_mb':device}
+    monkeypatch.setattr(module.capacity,'collect',physical)
     monkeypatch.setattr(module,'match_vlm_model',lambda name:('vision',5700))
     from . import inference_shared_resource,vision_lifecycle
     monkeypatch.setattr(inference_shared_resource,'cold_vision_absent',lambda:True)
@@ -391,3 +394,51 @@ def test_provider_finishes_while_real_heartbeat_observation_is_in_flight(env):
             if heartbeat is not None:await heartbeat
     asyncio.run(scenario())
     assert e.m.ollama.loads==['text'];e.sc.request_lease.assert_not_called();e.sc.release_lease.assert_not_called()
+
+
+def test_grown_cached_context_uses_fresh_device_total_before_model_switch(env,monkeypatch):
+    e=env;e.m.ollama.actual=17000
+    def physical():
+        used=sum(e.m.ollama.running.values())+sum(5700 for process in e.child if process.alive)
+        return {'memory_available_mb':64000-used,'memory_device_inuse_mb':used}
+    monkeypatch.setattr(module.capacity,'collect',physical)
+    e.m.load_ollama_model('text')
+    e.m.ollama.running['text']=46000  # KV/context grew after its recorded load size.
+    assert e.m.models['text'].memory_mb==17000
+    e.m.load_vlm_model('vision')
+    assert e.m.ollama.unloads==['text']
+    assert physical()['memory_device_inuse_mb']==5700
+    e.sc.request_lease.assert_not_called();e.sc.release_lease.assert_not_called()
+
+
+@pytest.mark.parametrize('device',[None,-1,True,'0'])
+def test_unknown_aggregate_usage_never_starts_or_evicts_a_model(env,monkeypatch,device):
+    e=env;monkeypatch.setattr(module.capacity,'collect',lambda:{'memory_available_mb':64000,'memory_device_inuse_mb':device})
+    with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
+    assert e.m.ollama.loads==[] and e.m.ollama.unloads==[] and not e.binding._rows()
+    e.sc.request_lease.assert_not_called();e.sc.release_lease.assert_not_called()
+
+
+def test_positive_postload_aggregate_overrun_retains_model_and_claim(env,monkeypatch):
+    e=env;load=e.m.ollama.load_model;overhead={'mb':0}
+    def physical():
+        device=sum(e.m.ollama.running.values())+overhead['mb']
+        return {'memory_available_mb':64000-device,'memory_device_inuse_mb':device}
+    def load_with_overhead(*args,**kwargs):load(*args,**kwargs);overhead['mb']=4000
+    monkeypatch.setattr(module.capacity,'collect',physical);e.m.ollama.load_model=load_with_overhead
+    with pytest.raises(Conflict):e.m.load_ollama_model('text')
+    assert e.m.models['text'].memory_mb==46000 and e.binding._rows()[0]['state']=='unknown'
+    assert e.m.models['text'].lease_id=='root-lease';e.sc.release_lease.assert_not_called()
+
+
+def test_postload_sensor_gap_preserves_known_completion_without_new_admission(env,monkeypatch):
+    e=env;load=e.m.ollama.load_model;missing={'now':False}
+    def physical():
+        if missing['now']:return {'memory_available_mb':None,'memory_device_inuse_mb':None}
+        return {'memory_available_mb':64000,'memory_device_inuse_mb':0}
+    def load_then_gap(*args,**kwargs):load(*args,**kwargs);missing['now']=True
+    monkeypatch.setattr(module.capacity,'collect',physical);e.m.ollama.load_model=load_then_gap
+    assert e.m.load_ollama_model('text').lease_id=='root-lease'
+    assert e.binding._rows()[0]['state']=='resident'
+    with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
+    assert e.m.ollama.loads==['text'];e.sc.release_lease.assert_not_called()

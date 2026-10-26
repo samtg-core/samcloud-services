@@ -23,7 +23,11 @@ A saved receipt is not fresh permission after restart. Withdrawal, a newer
 expired/ended receipt or changed current member blocks new backend work.
 
 The manager checks work permission before preparing a model switch. Before load,
-the binding checks real host headroom and its declared full-root envelope. If a
+the binding checks fresh available host RAM, aggregate device use and its
+declared full-root envelope. Cached per-model sizes alone are insufficient:
+KV/context growth can outgrow a model's recorded load size. Unknown/invalid
+physical readings defer before any load or eviction; missing usage is never
+assumed to be zero. If a
 new model needs room, strict owned-model unload must confirm backend absence;
 the model's intent becomes gone, but the parent root is never released. The
 46,000 MB text plus5,700 MB vision example therefore unloads the text model
@@ -42,7 +46,11 @@ it never permits another start. Completion records residency without publishing
 fresh permission. A terminal/released/settled claim or changed current holder
 still preserves unknown model debt. Do not reuse new-admission freshness as the
 completion condition of a provider operation that already owns its claim.
-VLM's configured/profile figure is not claimed as a measured peak.
+A positive post-load aggregate overrun retains unknown model/claim debt. A
+post-load sensor gap preserves known provider completion while withdrawing new
+admission; it does not retry that already-started load. Fresh physical data is
+still required for subsequent dispatch. VLM's configured/profile figure is not
+claimed as a measured peak.
 
 Strict unload records the exact model intent gone before dropping its manager
 pointer, without ordinary lease DELETE. Idle/foreign-demand cooldown clocks do
