@@ -430,6 +430,7 @@ class QueueTransport(httpx.BaseTransport):
         self.key_provider = key_provider
         self.grant_lifetime = grant_lifetime
         self.require_stint_policy = require_stint_policy
+        self.event_source = event_source
         async def initialize():
             self.http = http_factory()
             self.consumer = DurableConsumer(self.http, poll_interval=poll_interval)
@@ -462,7 +463,16 @@ class QueueTransport(httpx.BaseTransport):
                     self.events_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await self.events_task
-                await self.http.aclose()
+                try:
+                    if self.event_source is not None:
+                        from .inference_events import flush_events
+                        try:
+                            await flush_events(self.consumer, self.event_source)
+                        except Exception as error:
+                            import logging
+                            logging.getLogger(__name__).warning('Closing lifecycle observation failed (%s)', type(error).__name__)
+                finally:
+                    await self.http.aclose()
             try:
                 self.portal.call(shutdown)
                 self.portal.call(self.portal.stop, True)

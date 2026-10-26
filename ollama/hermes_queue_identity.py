@@ -411,6 +411,13 @@ class HostBindings:
         finally:
             store.close()
 
+    def pending_event_highwater(self):
+        store = IdentityStore(self.path)
+        try:
+            return store.pending_event_highwater()
+        finally:
+            store.close()
+
     def pending_events(self, after=0):
         store = IdentityStore(self.path)
         try:

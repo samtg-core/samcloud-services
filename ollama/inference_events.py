@@ -20,12 +20,14 @@ async def source_call(callback, *args):
         raise
 
 
-async def relay_once(consumer, source, *, cursor=None):
+async def relay_once(consumer, source, *, cursor=None, through=None, wrap=True):
     cursor = [0] if cursor is None else cursor
     events = await source_call(source.pending_events, cursor[0])
-    if not events and cursor[0]:
+    if not events and cursor[0] and wrap:
         cursor[0] = 0
         events = await source_call(source.pending_events, 0)
+    if through is not None:
+        events = [event for event in events if event['cursor'] <= through]
     if not events:
         return 0
     cursor[0] = events[-1]['cursor']
@@ -77,6 +79,33 @@ async def relay_once(consumer, source, *, cursor=None):
         except (httpx.HTTPError, ValueError):
             continue  # same event remains pending; no inferred backend state
     return acknowledged or -1
+
+
+async def flush_events(consumer, source):
+    """Observe the finite pending prefix once before closing the HTTP client.
+
+    Failed pages never hide later finishes and never loop back during shutdown.
+    This sends only persisted intent; it cannot create a finish from client exit.
+    An observation failure retains its exact event for the next client/operator.
+    """
+    highwater = getattr(source, 'pending_event_highwater', None)
+    if highwater is None:
+        return await relay_once(consumer, source)  # legacy custom source protocol
+    through = await source_call(highwater)
+    if type(through) is not int or through < 0:
+        raise ValueError('explicit lifecycle outbox high-water mark required')
+    cursor = [0]
+    acknowledged = 0
+    while cursor[0] < through:
+        previous = cursor[0]
+        try:
+            result = await relay_once(consumer, source, cursor=cursor, through=through, wrap=False)
+            acknowledged += max(result, 0)
+        except Exception as error:
+            logging.getLogger(__name__).warning('Closing lifecycle observation failed (%s)', type(error).__name__)
+        if cursor[0] <= previous:
+            break  # concurrent acknowledgement or unreadable metadata; never spin
+    return acknowledged
 
 
 async def relay_events(consumer, source, interval=1.0):

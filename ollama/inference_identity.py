@@ -500,6 +500,9 @@ class IdentityStore:
         return dict(cursor=row[0],id=row[1],grant_key=row[2],expected_call_key=row[3],
                     job_key=row[4],state=row[5],kind='job_finish')
 
+    def pending_event_highwater(self):
+        return self.db.execute("SELECT coalesce(max(rowid),0) FROM lifecycle_outbox WHERE state='pending'").fetchone()[0]
+
     def pending_events(self, limit=32, *, after=0):
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError('bounded event page required')

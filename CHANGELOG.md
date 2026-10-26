@@ -20,6 +20,10 @@ finish intent before HTTP observation, replays only that exact end event after
 lost acknowledgement and lets the service drain accepted work. No timer-based
 abandonment, inference resubmission or direct physical release was added.
 Remaining lifecycle/capacity review findings keep this candidate disabled.
+The SDK now makes a final finite outbox pass before HTTP shutdown, delivering
+already-persisted completion even between relay polls. Failed earlier pages do
+not hide later finishes; unacknowledged events remain durable. Client close
+itself never ends a parent or resubmits inference.
 
 # Changelog & Working Notes
 

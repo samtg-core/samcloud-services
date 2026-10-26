@@ -99,6 +99,13 @@ prove a live owning turn. An incomplete/interrupted/error attempt preserves its
 parent for recovery. Authoritative successful on_session_end or the explicit
 operator command below queues the durable job finish. The per-profile outbox retries metadata
 without resubmitting inference. All opted-in queued client types run its relay.
+Before an SDK client closes its HTTP transport, it stops the polling relay and
+observes the finite prefix of lifecycle events already pending. It visits later
+pages even when earlier events remain unacknowledged and does not chase events
+created after that snapshot. Failed observations stay on disk. Both synchronous
+close and asynchronous close use this final pass. Shutdown never creates a finish
+or declares an interrupted parent complete; a forced process death still relies
+on durable replay by a later client or the explicit operator command.
 
 An old sc-queue-wait annotation on linked work refuses rather than silently
 yielding the whole parent. Native explicit yield and qualified child delegation
