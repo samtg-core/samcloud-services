@@ -1,3 +1,10 @@
+# Include pool watcher in manager shutdown drain — 27 October 2026
+
+The manager starts seven maintenance tasks when exo is enabled; the old stop
+list omitted pool_watch_loop. Share one explicit task list between cancellation
+and async drain, including that watcher. A held pool-watcher thread reproduced
+the omission before repair. No backend admission, root policy or live rollout.
+
 # Drain manager maintenance before closing the service journal — 27 October 2026
 
 The actual server lifespan now awaits an owned async shutdown drain after its

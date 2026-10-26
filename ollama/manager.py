@@ -366,6 +366,9 @@ class ManagedModel:
 
 @dataclass
 class ModelManager:
+    MAINTENANCE_TASKS = ('_cooldown_task', '_health_task', '_renewal_task',
+                         '_pool_renewal_task', '_stats_task', '_offering_task', '_pool_watch_task')
+
     sc: SamcloudClient
     # Set only by an installed durable runtime. Background cooldown and explicit
     # controls must preserve accounting when backend termination is unconfirmed.
@@ -3778,8 +3781,7 @@ class ModelManager:
         if task is None:
             async def stop_and_drain():
                 results = self.shutdown()  # ownership audit precedes ALL cancellation
-                pending = [task for name in ('_cooldown_task', '_health_task', '_renewal_task',
-                    '_pool_renewal_task', '_stats_task', '_offering_task')
+                pending = [task for name in self.MAINTENANCE_TASKS
                     if (task := getattr(self, name, None)) is not None]
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
@@ -3827,8 +3829,8 @@ class ModelManager:
                     results.append({"model": name, "status": "lease_released", "process": "kept"})
                 except Exception:
                     pass
-        for task in [self._cooldown_task, self._health_task, getattr(self, '_renewal_task', None),
-                     getattr(self, '_pool_renewal_task', None), self._stats_task, self._offering_task]:
+        for name in self.MAINTENANCE_TASKS:
+            task = getattr(self, name, None)
             if task and not task.done():
                 task.cancel()
         return results

@@ -133,7 +133,7 @@ The shutdown path creates/ends/releases no root itself. Native/service bootstrap
 operator orchestration and full native/host restart still need qualification.
 The service lifespan now awaits `shutdown_async()` before runtime/journal close.
 The root audit still precedes any task cancellation. That async boundary drains
-all six manager maintenance tasks, including `source_call` threads finishing
+all seven manager maintenance tasks (including the exo pool watcher), including `source_call` threads finishing
 after cancellation. Concurrent/reconnected waiters join the same retained drain;
 cancelling an observer cannot cancel it. A refused audit does not cancel
 maintenance and may be retried after explicit reconciliation. No compute/job

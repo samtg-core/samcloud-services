@@ -38,6 +38,18 @@ class MaintenanceShutdown(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(stop,2),[])
         self.assertTrue(finished.is_set());self.assertTrue(m._stats_task.done())
 
+    async def test_pool_watcher_thread_is_cancelled_and_drained_before_stop_returns(self):
+        m=self.manager();release,finished=await self.held_thread(m)
+        m._pool_watch_task=m._stats_task;m._stats_task=None
+        stop=asyncio.create_task(m.shutdown_async())
+        try:
+            await asyncio.sleep(0);await asyncio.sleep(0)
+            self.assertFalse(stop.done());self.assertFalse(finished.is_set())
+            self.assertGreater(m._pool_watch_task.cancelling(),0)
+        finally:release.set()
+        self.assertEqual(await asyncio.wait_for(stop,2),[])
+        self.assertTrue(m._pool_watch_task.done());self.assertTrue(finished.is_set())
+
     async def test_observer_cancel_does_not_cancel_drain_and_retry_joins_same_stop(self):
         m=self.manager();release,finished=await self.held_thread(m)
         m.shutdown=Mock(wraps=m.shutdown)
