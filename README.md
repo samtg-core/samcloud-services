@@ -37,6 +37,12 @@ pip install fastapi uvicorn httpx
 
 ### Run
 
+The optional explicit-end requester/root runtime has a separate launcher and
+maintenance procedure in [Root startup](docs/root-bootstrap.md). It retains one
+logical job across native tools and compaction; it is not enabled by the ordinary
+commands below. Its registry installation, own provider policy, legacy-work
+drain and physical-host qualification must be completed before live selection.
+
 ```bash
 export SC_TOKEN=<your-samcloud-agent-token>
 python -m uvicorn ollama.server:app --host 0.0.0.0 --port 8800

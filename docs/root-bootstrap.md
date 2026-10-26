@@ -1,11 +1,76 @@
 # Root startup — explicit local candidate, not deployed
 
 `RootQueueStartup` connects the alternate root scheduler, actual GatewayQueue,
-ModelManager binding and RootController to the existing server lifespan. No
-launcher, environment default, registry router/policy or agent profile selects it.
+ModelManager binding and RootController to the existing server lifespan. The
+separate `ollama.inference_root_launch` entry point selects it explicitly. No
+existing launcher, environment default, deployed registry policy or agent profile
+has been changed to select it.
 The default QueueStartup and an absent startup binding retain their behavior.
 A configured root startup failure propagates; it never adopts legacy models or
 falls through to unjournaled direct dispatch.
+
+## Operational selection
+
+Use the matching registry build with `SAMCLOUD_LEASE_ROOTS=1` installed on every
+writer before enabling any root policy. Installation creates no provider policy
+and grants no capacity. The resource device principal/admin must authorize this
+service's own actor explicitly. A group reader or registered provider cannot
+authorize itself. Cross-service handoff remains unavailable.
+
+Keep the queue config's exact accepted model/resource map and durable journal.
+For a fresh root deployment, omit `reservation_mb` and finite
+`shared_queue_wait_s`. An unfinished legacy journal still refuses startup; remove
+neither the journal nor its accepted work to make it pass. Drain or qualify an
+explicit migration first.
+
+Create a separate version-1 root config with these exact fields (replace every
+example identity/path with the service's own verified values):
+
+```json
+{
+  "version": 1,
+  "registry": "https://cloud.samtg.xyz/api/v1",
+  "actor": "own-provider-principal",
+  "service": "own-device/model-service",
+  "resource": "own-device/gpu-0",
+  "journal": "/absolute/private/path/root-client.sqlite",
+  "backends": {"exact-text-model": "ollama", "exact-vision-model": "mlx-vlm"}
+}
+```
+
+The backend map must name exactly the queue config's models on one resource.
+The root-client journal must differ from the inference journal. This config has
+no bearer field; the launcher uses only the service's explicitly configured
+credential, with no seat-token fallback. Its registry/service/resource must match
+the service configuration. Set `EXO_ENABLED=false` for this local-only runtime.
+Ollama's configured origin must be a loopback URL with an explicit port, no
+credentials or proxy path; the VLM host must also be loopback. Local headroom and
+process observations cannot qualify a remote or wildcard-bound backend here.
+
+```sh
+python -m ollama.inference_root_launch \
+  --queue-config /absolute/queue.json --root-config /absolute/root.json \
+  --work-permission allow --check
+```
+
+`--check` reads the configs and prints their source hashes. It opens no journals,
+network clients, listener or backend inventory, and is not an identity,
+capability, cold-absence or physical-admission receipt. The ordinary service
+configuration import may read its own configured credential file. At the safe
+maintenance boundary, run the same command without `--check` and with the
+explicit intended host/port. One process, no reload or multi-worker fork. A
+live runtime cannot be hot-converted.
+
+Before attachment, startup freshly verifies own actor/capability, exact shared
+hold resource and whole local backend absence: successful empty Ollama inventory
+plus no `mlx_vlm` process from any account and refused VLM-port connection. An
+unknown/failed inventory is not empty; observation never stops a foreign process.
+An unrelated account's VLM server therefore blocks cold attachment deliberately.
+
+After attachment, existing qualified runtime shutdown owns control-client close.
+A failed launcher before attachment closes only its local HTTP client; it sends
+no root finish, release or replacement intake. A failure after attachment must
+not sever that runtime's control channel as an observer cleanup shortcut.
 
 ## Trusted construction
 

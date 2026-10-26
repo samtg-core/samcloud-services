@@ -1,3 +1,15 @@
+# Add explicit operational root-runtime launcher — 27 October 2026
+
+Add a separate versioned root config and single-process launcher, leaving the
+existing launcher and defaults unchanged. Validate exact queue models/backends,
+own registry/service/resource, distinct durable journal and explicit permission.
+An offline check reads source hashes without opening journals or network clients.
+Startup uses the service credential and freshly checks actor/capability and full
+Ollama/VLM absence; unknown inventory refuses. Failed unattached startup closes
+only its own control client, never releasing capacity or substituting a claim.
+Tests use synthetic configuration and no provider/network I/O. No live activation
+or external image-service delegation is implied.
+
 # Reconcile root integration docs and child-service boundary — 27 October 2026
 
 Correct stale client/preparation text that still said source/supervisor/startup
