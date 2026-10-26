@@ -49,6 +49,7 @@ from typing import Optional
 from . import capacity
 from . import config
 from . import prompt_size
+from .inference_arbiter import CapacityDeferred
 from .manager import (
     backend_serves,
     backend_is_exclusive,
@@ -58,7 +59,7 @@ from .manager import (
 )
 from .manager import TranscriberBusy
 from .exo_client import ExoUnavailable, ExoRequestFailed, ExoStalled
-from .ollama_client import OllamaStalled, OllamaRequestTimeout
+from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaRefused
 from .samcloud import SamcloudClient
 from .ollama_client import OllamaClient
 from .llama_client import LlamaServerClient
@@ -348,15 +349,20 @@ async def lifespan(app: FastAPI):
     sc = SamcloudClient(token=SC_TOKEN)
     mgr = ModelManager(sc=sc)
 
-    # Discover and adopt running models
-    adopted = mgr.discover()
-    for m in adopted:
-        log.info(f"Adopted: {m.name} ({m.backend.value}) ~{m.memory_mb}MB on port {m.port}")
-
-    # Claim leases for everything running
-    leases = mgr.claim_leases()
-    for l in leases:
-        log.info(f"Lease: {l}")
+    if inference_startup is not None:
+        from .inference_bootstrap import QueueStartup
+        if not isinstance(inference_startup,QueueStartup):
+            raise TypeError('Trusted QueueStartup binding required')
+        # Must precede adoption and background maintenance. A failed durable
+        # startup propagates; it cannot fall through to unjournaled legacy work.
+        await inference_startup.start(sys.modules[__name__])
+    else:
+        adopted = mgr.discover()
+        for m in adopted:
+            log.info(f"Adopted: {m.name} ({m.backend.value}) ~{m.memory_mb}MB on port {m.port}")
+        leases = mgr.claim_leases()
+        for l in leases:
+            log.info(f"Lease: {l}")
 
     # Check the pool's resource id resolves, once, at boot. At runtime the code
     # genuinely cannot tell a missing resource from a registry outage — both
@@ -413,9 +419,24 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("Shutting down...")
+    runtime = inference_runtime
+    if (runtime is None) != (inference_dispatcher is None):
+        raise RuntimeError('Inference dispatcher has no matching lifecycle owner; shutdown refused')
+    if runtime is not None:
+        if runtime.manager is not mgr or runtime.queue is not inference_dispatcher:
+            raise RuntimeError('Inference runtime/manager ownership differs; shutdown refused')
+        state = await runtime.quiesce()
+        if not state['drained']:
+            # A stopped HTTP waiter is not backend termination. Do not enter
+            # the manager's lease-release path or close its journal on unknown
+            # work. This protects graceful cleanup, not SIGKILL/power loss.
+            log.error('Inference ownership unresolved; manager shutdown refused')
+            raise RuntimeError('Inference ownership requires reconciliation before shutdown')
     results = mgr.shutdown()
     for r in results:
         log.info(f"  {r}")
+    if runtime is not None:
+        runtime.close()
 
 
 app = FastAPI(
@@ -429,6 +450,14 @@ app.add_middleware(
     verify_url=SC_VERIFY_URL,
     required_scope=SC_REQUIRED_SCOPE,
 )
+
+# Installed explicitly by the service bootstrap once queue admission/ownership
+# is configured. None preserves the deployed behaviour; no rollout is implied.
+inference_dispatcher = None
+inference_runtime = None
+# Trusted service launcher may bind this before ASGI startup. No environment
+# activation switch is exposed before the real capacity source is qualified.
+inference_startup = None
 
 
 # -- Request models --
@@ -748,6 +777,14 @@ async def status():
     if LOADED_COMMIT is not None:
         out["loaded_commit"] = LOADED_COMMIT
     out["loaded_modules"] = loaded_modules()
+    runtime = inference_runtime
+    handoff = getattr(runtime, 'shared_resource', None)
+    if handoff is not None:
+        state = handoff.snapshot()  # loop-owned journal, never in mgr.status's thread
+        out['resource_queue'] = {'resource':state['resource'], 'handoff':state['phase'],
+            'queued_behind':state['contender'] if state['phase'] != 'idle' else None,
+            'allocations':state['allocations'],
+            'capacity':runtime.capacity_source.last.get(state['resource'],{})}
     return out
 
 
@@ -1216,13 +1253,23 @@ def _pool_unavailable_503(e: Exception) -> HTTPException:
 
 
 @app.post("/models/load")
-async def load_model(req: LoadRequest):
+async def load_model(req: LoadRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.control('model_load', req, http_request)
+    return await _load_model_direct(req)
+
+
+async def _load_model_direct(req: LoadRequest, *, queue_owned=False):
+    async def local_call(function, *args, **kwargs):
+        if queue_owned:
+            return await asyncio.to_thread(function, *args, **kwargs)
+        return function(*args, **kwargs)
     try:
         # Only probe for a GGUF match when the backend could plausibly be
         # llama-server, so an explicit backend="ollama" still bypasses it.
         gguf_match = None
         if req.backend in ("auto", "llama-server"):
-            gguf_match = match_gguf_model(req.model, mgr.llama.available_models())
+            gguf_match = match_gguf_model(req.model, await local_call(mgr.llama.available_models))
 
         if req.backend == "exo" or (
             req.backend == "auto" and match_exo_tier(req.model)
@@ -1236,7 +1283,7 @@ async def load_model(req: LoadRequest):
         elif req.backend == "mlx-vlm" or (
             req.backend == "auto" and match_vlm_model(req.model)
         ):
-            mm = mgr.load_vlm_model(req.model)
+            mm = await local_call(mgr.load_vlm_model, req.model)
         elif req.backend == "llama-server" or gguf_match or (
             req.backend == "auto" and req.model.endswith(".gguf")
         ):
@@ -1248,14 +1295,14 @@ async def load_model(req: LoadRequest):
                 model_path = req.model
             else:
                 model_path = str(config.MODELS_DIR / req.model)
-            mm = mgr.load_llama_model(
+            mm = await local_call(mgr.load_llama_model,
                 model_path,
                 port=req.port,
                 ctx_size=req.ctx_size,
                 gpu_layers=req.gpu_layers,
             )
         else:
-            mm = mgr.load_ollama_model(req.model)
+            mm = await local_call(mgr.load_ollama_model, req.model)
 
         return {
             "status": "loaded",
@@ -1281,14 +1328,23 @@ async def load_model(req: LoadRequest):
 
 
 @app.post("/models/unload")
-async def unload_model(req: UnloadRequest):
+async def unload_model(req: UnloadRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.control('model_unload', req, http_request)
+    return await _unload_model_direct(req)
+
+
+async def _unload_model_direct(req: UnloadRequest, *, queue_owned=False):
     # Accept the same partial names as /models/load and inference: exact key
     # first, then case-insensitive substring match against loaded models.
     key = req.model
     if key not in mgr.models:
         lower = req.model.lower()
         key = next((n for n in mgr.models if lower in n.lower()), req.model)
-    result = mgr.unload(key, force=req.force)
+    if queue_owned:
+        result = await asyncio.to_thread(mgr.unload, key, force=req.force, require_confirmed=True)
+    else:
+        result = mgr.unload(key, force=req.force)
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=f"{req.model} not found")
     return result
@@ -1406,10 +1462,10 @@ def _openai_messages_to_ollama(messages: list[dict]) -> list[dict]:
     return converted
 
 
-async def _resolve_model(model_name: str):
+async def _resolve_model(model_name: str, *, queue_owned: bool = False):
     """Find a managed model, or auto-load it. Never returns None for known models.
 
-    Async only because of the pool. Resolving a tier reads exo's `/state` over
+    Legacy mode is async only because of the pool. Resolving a tier reads exo's `/state` over
     synchronous httpx with a 15s timeout, and this runs inside the request
     handlers — so on the happy path that was tens of milliseconds nobody
     noticed, and against a wedged or unreachable pool it froze the **entire**
@@ -1423,12 +1479,23 @@ async def _resolve_model(model_name: str):
     lease and loads nothing, so it is bounded and strands nothing if it outlives
     its caller. A generation is neither, which is why that path uses aiohttp.
 
-    Only the pool's calls are moved. The three local backends keep their
+    By default only the pool's calls are moved. The three local backends keep their
     existing behaviour deliberately — `load_ollama_model` and `load_vlm_model`
     block this loop today for as long as a model takes to load, which is a
     larger, pre-existing problem than this commit should quietly change. Making
     this function async is the seam that lets it be fixed separately.
+
+    A trusted queue-owned worker also offloads local health/list/load calls.
+    Admission must already be held before selecting this policy: making legacy
+    loads concurrent without shared admission could race two model loads. The
+    scheduler owns the worker, not its HTTP observer. If that scheduler is
+    cancelled, a load thread may survive; queue ownership remains uncertain,
+    never released on the assumption that cancellation stopped the load.
     """
+    async def local_call(function, *args):
+        if queue_owned:
+            return await asyncio.to_thread(function, *args)
+        return function(*args)
     # The pool first, and before the partial-match scan below. Two reasons it
     # cannot be folded in with the others: a tier is matched exactly (see
     # match_exo_tier) where every other backend matches on substrings, and
@@ -1468,8 +1535,13 @@ async def _resolve_model(model_name: str):
         if mm.backend == Backend.EXO:
             # Re-reads /state to pick up a swap; same blocking read as above.
             alive = await asyncio.to_thread(mgr.ensure_running, matched_name)
+        elif queue_owned:
+            # A residency check may reload dropped weights. Keep its existing
+            # model claimed for the actual thread lifetime, including after a
+            # cancelled scheduler observer, not only the later generation.
+            alive = await _run_claimed(matched_name, lambda: mgr.ensure_running(matched_name))
         else:
-            alive = mgr.ensure_running(matched_name)
+            alive = await local_call(mgr.ensure_running, matched_name)
         if not alive and mm.backend == Backend.EXO:
             # For local backends ensure_running() reloads and a False is worth
             # attempting anyway. For the pool there is nothing to reload: False
@@ -1489,23 +1561,37 @@ async def _resolve_model(model_name: str):
     if match_vlm_model(model_name):
         log.info(f"Auto-loading VLM (requested: {model_name})")
         try:
-            return mgr.load_vlm_model(model_name)
+            return await local_call(mgr.load_vlm_model, model_name)
         except Exception as e:
             log.error(f"VLM auto-load failed for {model_name}: {e}")
             return None
 
     # Check if it's a known Ollama model (already pulled).
     lower = model_name.lower()
-    for m in mgr.ollama.list_models():
+    for m in await local_call(mgr.ollama.list_models):
         ollama_name = m["name"]
         if lower in ollama_name.lower() or ollama_name.lower() in lower:
             log.info(f"Auto-loading {ollama_name} (requested: {model_name})")
             try:
-                mm = mgr.load_ollama_model(ollama_name)
+                mm = await local_call(mgr.load_ollama_model, ollama_name)
                 return mm
+            except CapacityDeferred:
+                if queue_owned:
+                    raise
+                # Durable-manager mode must not make an accidental legacy
+                # resolver bypass admission or collapse a known refusal to None.
+                raise HTTPException(503, 'Memory reservation is waiting for capacity') from None
             except capacity.DeviceInUse as e:
+                if queue_owned:
+                    # The manager's work-mode gate runs before pull/lease/load.
+                    # Preserve this affirmative no-start verdict, not HTTP prose.
+                    raise CapacityDeferred('work_mode') from None
                 raise _device_in_use_503(e)
             except capacity.InsufficientCapacity as e:
+                if queue_owned:
+                    # The Ollama fit refusal precedes provider mutation. A
+                    # transport/load error below is NOT safe to retry this way.
+                    raise CapacityDeferred('capacity_unavailable') from None
                 # Not a missing model — a capacity answer. Surface it, with the
                 # list of what does fit, instead of collapsing to "not pulled".
                 raise _capacity_503(e)
@@ -1514,11 +1600,11 @@ async def _resolve_model(model_name: str):
                 return None
 
     # Check GGUF files
-    for m in mgr.llama.available_models():
+    for m in await local_call(mgr.llama.available_models):
         if lower in m["name"].lower():
             log.info(f"Auto-loading {m['file']} (requested: {model_name})")
             try:
-                mm = mgr.load_llama_model(m["file"])
+                mm = await local_call(mgr.load_llama_model, m["file"])
                 return mm
             except capacity.DeviceInUse as e:
                 raise _device_in_use_503(e)
@@ -1853,7 +1939,13 @@ def _log_ollama_timings(model: str, chunk: dict, counted: Optional[int] = None):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, http_request: Request = None):
-    mm = await _resolve_model(req.model)
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.compat('chat', req, http_request)
+    return await _chat_completions_direct(req, http_request)
+
+
+async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved=None, queue_owned=False):
+    mm = resolved if resolved is not None else await _resolve_model(req.model)
     if not mm:
         raise HTTPException(status_code=404, detail=f"Model '{req.model}' not available (not pulled or no GGUF file)")
 
@@ -1928,7 +2020,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 try:
                     async for chunk in mgr.ollama.chat_stream(
                         mm.name, ollama_messages,
-                        prompt_tokens=n_prompt, **ollama_kwargs
+                        prompt_tokens=n_prompt, service_owned=queue_owned, **ollama_kwargs
                     ):
                         delta = {}
                         if "message" in chunk and chunk["message"].get("content"):
@@ -1942,6 +2034,16 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                             yield "data: " + json.dumps({
                                 "choices": [{"delta": {}, "finish_reason": finish}]
                             }) + "\n\n"
+                            if (req.stream_options or {}).get('include_usage') is True:
+                                prompt = chunk.get('prompt_eval_count')
+                                completion = chunk.get('eval_count')
+                                # Provider counts only; missing values stay unknown.
+                                if (type(prompt) is int and prompt>=0 and
+                                        type(completion) is int and completion>=0):
+                                    yield 'data: '+json.dumps({'model':mm.name,'choices':[],
+                                        'usage':{'prompt_tokens':prompt,
+                                                 'completion_tokens':completion,
+                                                 'total_tokens':prompt+completion}})+'\n\n'
                             yield "data: [DONE]\n\n"
                         elif delta:
                             yield "data: " + json.dumps({
@@ -1951,6 +2053,13 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 except asyncio.CancelledError:
                     log.info(f"Client disconnected during stream for {mm.name}")
                     raise
+                except OllamaRefused as e:
+                    if queue_owned:
+                        raise  # preserve typed evidence to the owning scheduler
+                    for frame in _failure_frames('provider_refused', e.result['detail'],
+                                                 {'status': e.result['status']}):
+                        yield 'data: ' + json.dumps(frame) + '\n\n'
+                    yield 'data: [DONE]\n\n'
                 # Everything below TELLS THE CALLER (#904). The headers went out
                 # with the first chunk, so none of this can be a 504 — but the
                 # alternative was worse than a wrong status code: this used to
@@ -1971,6 +2080,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 # fires first should be the one that reports best. Ours fires
                 # first and used to report worst.
                 except OllamaStalled as e:
+                    if queue_owned:
+                        raise  # scheduler records uncertainty, not a model delta
                     log.error(
                         f"Ollama STALLED mid-stream for {mm.name} on the "
                         f"{e.phase} deadline ({e.deadline:.0f}s): {e.tokens} "
@@ -1986,6 +2097,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                         yield "data: " + json.dumps(frame) + "\n\n"
                     yield "data: [DONE]\n\n"
                 except OllamaRequestTimeout as e:
+                    if queue_owned:
+                        raise
                     # Named apart from a stall because the caller's correct
                     # response is the opposite: a stall means the runner is
                     # stuck, this means the request was legitimately long and
@@ -2007,6 +2120,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                         yield "data: " + json.dumps(frame) + "\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
+                    if queue_owned:
+                        raise  # no raw exception text in queued output/log copy
                     # Also terminated now, for the same reason. `{e!r}` not
                     # `{e}`: a bare TimeoutError stringifies to the empty
                     # string, which is how 17 cut-off requests were logged as
@@ -2054,13 +2169,15 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
             # iteration moves. This is why `_held_sync` is not used here.
             def _collect():
                 content, calls, counts = "", None, {}
+                saw_done = False
                 for chunk in mgr.ollama.chat(
-                        mm.name, ollama_messages, **ollama_kwargs):
+                        mm.name, ollama_messages, service_owned=queue_owned, **ollama_kwargs):
                     if "message" in chunk:
                         content += chunk["message"].get("content", "")
                         if chunk["message"].get("tool_calls"):
                             calls = chunk["message"]["tool_calls"]
                     if chunk.get("done"):
+                        saw_done = True
                         _log_ollama_timings(mm.name, chunk, n_prompt)
                         counts = {
                             "prompt_tokens": chunk.get("prompt_eval_count", 0),
@@ -2068,6 +2185,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                             "total_tokens": (chunk.get("prompt_eval_count", 0) +
                                              chunk.get("eval_count", 0)),
                         }
+                if not saw_done:
+                    raise RuntimeError("Ollama chat ended without a terminal done frame")
                 return content, calls, counts
 
             full_content, tool_calls, usage = await _run_claimed(
@@ -2461,7 +2580,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                     resp = await client.post(
                         f"http://127.0.0.1:{mm.port}/v1/chat/completions",
                         json={**payload, "stream": False},
-                        timeout=300,
+                        timeout=None if queue_owned else 300,
                     )
                     data = resp.json()
                     content = data["choices"][0]["message"].get("content", "")
@@ -2499,7 +2618,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 resp = await client.post(
                     f"http://127.0.0.1:{mm.port}/v1/chat/completions",
                     json=payload,
-                    timeout=300,
+                    timeout=None if queue_owned else 300,
                 )
                 data = resp.json()
                 # Parse Gemma tool calls from content
@@ -2514,8 +2633,14 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
 
 
 @app.post("/v1/completions")
-async def completions(req: CompletionRequest):
-    mm = await _resolve_model(req.model)
+async def completions(req: CompletionRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.compat('completion', req, http_request)
+    return await _completions_direct(req)
+
+
+async def _completions_direct(req: CompletionRequest, resolved=None, queue_owned=False):
+    mm = resolved if resolved is not None else await _resolve_model(req.model)
     if not mm:
         raise HTTPException(status_code=404, detail=f"Model '{req.model}' not available (not pulled or no GGUF file)")
 
@@ -2539,7 +2664,7 @@ async def completions(req: CompletionRequest):
     if mm.backend == Backend.OLLAMA:
         if req.stream:
             def stream():
-                for chunk in mgr.ollama.generate(mm.name, req.prompt):
+                for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned):
                     yield json.dumps(chunk) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
@@ -2555,7 +2680,9 @@ async def completions(req: CompletionRequest):
             # alone. Same bug, same fix, one route later.
             chunks = await _run_claimed(
                 mm.name,
-                lambda: list(mgr.ollama.generate(mm.name, req.prompt)))
+                lambda: list(mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned)))
+            if not chunks or not chunks[-1].get('done'):
+                raise RuntimeError("Ollama completion ended without a terminal done frame")
             return chunks[-1] if chunks else {}
 
     elif mm.backend == Backend.LLAMA:
@@ -2814,6 +2941,7 @@ async def create_transcription(
     response_format: str = Form("json"),
     temperature: Optional[float] = Form(None),
     timestamp_granularities: Optional[list[str]] = Form(None, alias="timestamp_granularities[]"),
+    http_request: Request = None,
 ):
     """OpenAI-shaped speech to text. Multipart `file` + `model`, `{"text": ...}` back.
 
@@ -2870,6 +2998,11 @@ async def create_transcription(
     # and vtt be rendered without a granularity parameter. Word timings cost a
     # second DTW pass, so they are computed only when they will be returned.
     need_words = "word" in granularities
+
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.transcription(file,model,{
+            'language':language,'prompt':prompt,'temperature':temperature,
+            'format':fmt,'granularities':sorted(granularities)},http_request)
 
     # Resolve and claim under one lock, with no await between the claim and the
     # release — see `_whisper_gate`. The transcription itself runs outside it, so
@@ -2930,6 +3063,10 @@ async def create_transcription(
         except OSError as e:
             log.warning(f"could not remove {spooled}: {e}")
 
+    return _format_transcription_result(mm,result,fmt,granularities)
+
+
+def _format_transcription_result(mm, result, fmt, granularities):
     # No `mgr.touch()`: `load_whisper_model` has already counted this request on
     # both the fresh-load and the already-resident path, and touch() counts as
     # well as stamping. The stamp is in the finally above.

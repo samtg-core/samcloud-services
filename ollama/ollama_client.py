@@ -15,6 +15,33 @@ OLLAMA_BASE = config.OLLAMA_BASE
 log = logging.getLogger("ollama-client")
 
 
+class OllamaRefused(Exception):
+    """Complete 400/404 JSON refusal received BEFORE any generation frames.
+
+    Not a timeout, load error, 5xx or an in-stream error. Error bodies can contain
+    prompts/paths, so only status and fixed safe copy cross the queue boundary.
+    https://docs.ollama.com/api/errors
+    """
+    def __init__(self, status):
+        if status not in (400, 404):
+            raise ValueError('not a qualified Ollama refusal')
+        self.result = {'kind': 'error', 'status': status, 'code': 'ollama_refused',
+            'detail': 'Ollama rejected an invalid request before streaming' if status == 400
+                      else 'Ollama could not find the requested model'}
+        super().__init__(self.result['detail'])
+
+
+def _raise_complete_refusal(status, raw):
+    if status not in (400, 404):
+        return
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return
+    if isinstance(body, dict) and isinstance(body.get('error'), str) and body['error']:
+        raise OllamaRefused(status)
+
+
 class OllamaStalled(Exception):
     """A generation went silent past its deadline (#904).
 
@@ -263,7 +290,10 @@ class OllamaClient:
     def list_running(self) -> list[dict]:
         r = self._http.get("/api/ps")
         r.raise_for_status()
-        return r.json().get("models", [])
+        body = r.json()
+        if not isinstance(body,dict) or not isinstance(body.get('models'),list):
+            raise ValueError('Ollama inventory is unknown')
+        return body['models']
 
     def pull_model(self, model: str, stream: bool = True) -> Iterator[dict]:
         """Pull a model. Yields progress dicts if stream=True."""
@@ -276,7 +306,7 @@ class OllamaClient:
                     yield json.loads(line)
 
     def load_model(self, model: str, keep_alive: str | int = "1h",
-                   num_ctx: Optional[int] = None) -> dict:
+                   num_ctx: Optional[int] = None, *, service_owned=False) -> dict:
         """Load a model into memory without generating (warm-up).
         keep_alive: duration string ("1h", "30m") or -1 for indefinite.
 
@@ -291,16 +321,22 @@ class OllamaClient:
             payload["options"] = {"num_ctx": int(num_ctx)}
         else:
             payload = self._with_num_ctx(model, payload)
-        r = self._http.post("/api/generate", json=payload, timeout=300)
+        if service_owned:
+            payload['stream'] = False
+        r = self._http.post("/api/generate", json=payload,
+            timeout=self._owned_stream_timeout if service_owned else 300)
         r.raise_for_status()
         return r.json()
 
-    def unload_model(self, model: str) -> dict:
+    def unload_model(self, model: str, *, service_owned=False) -> dict:
         """Unload a model from memory by setting keep_alive to 0."""
+        payload = {"model": model, "prompt": "", "keep_alive": "0"}
+        if service_owned:
+            payload['stream'] = False
         r = self._http.post(
             "/api/generate",
-            json={"model": model, "prompt": "", "keep_alive": "0"},
-            timeout=60,
+            json=payload,
+            timeout=self._owned_stream_timeout if service_owned else 60,
         )
         r.raise_for_status()
         return r.json()
@@ -317,33 +353,42 @@ class OllamaClient:
     # and changing a correct line to look like the fix is how the next reader
     # loses track of which one was broken.
     _stream_timeout = httpx.Timeout(connect=10, read=300, write=10, pool=10)
+    # Only an admitted durable worker selects this. Its lifetime is independent
+    # of consumer sockets, with ambiguous termination quarantined by the queue.
+    _owned_stream_timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
 
-    def generate(self, model: str, prompt: str, **kwargs) -> Iterator[dict]:
+    def generate(self, model: str, prompt: str, *, service_owned=False, **kwargs) -> Iterator[dict]:
         """Generate completion, streaming."""
         payload = self._with_num_ctx(
             model, {"model": model, "prompt": prompt, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/generate", json=payload, timeout=self._stream_timeout
+            "POST", "/api/generate", json=payload,
+            timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
+            if resp.status_code in (400, 404):
+                _raise_complete_refusal(resp.status_code, resp.read())
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if line.strip():
                     yield json.loads(line)
 
-    def chat(self, model: str, messages: list[dict], **kwargs) -> Iterator[dict]:
+    def chat(self, model: str, messages: list[dict], *, service_owned=False, **kwargs) -> Iterator[dict]:
         """Chat completion, streaming (sync, for non-streaming collection)."""
         payload = self._with_num_ctx(
             model, {"model": model, "messages": messages, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/chat", json=payload, timeout=self._stream_timeout
+            "POST", "/api/chat", json=payload,
+            timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
+            if resp.status_code in (400, 404):
+                _raise_complete_refusal(resp.status_code, resp.read())
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if line.strip():
                     yield json.loads(line)
 
     async def _stream_with_deadlines(self, path: str, payload: dict,
-                                     prompt_tokens: Optional[int] = None):
+                                     prompt_tokens: Optional[int] = None, *, service_owned=False):
         """POST a streaming Ollama request under three separate deadlines (#904).
 
         WHY NOT aiohttp's own `total=`, which is what this used to be.
@@ -406,7 +451,20 @@ class OllamaClient:
                 # neither a stall nor a long generation.
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
             ) as resp:
+                if getattr(resp, 'status', None) in (400, 404):
+                    _raise_complete_refusal(resp.status, await resp.read())
                 resp.raise_for_status()
+                if service_owned:
+                    # This connection is owned by the durable scheduler, NOT
+                    # its HTTP observer. Silence or elapsed queue/generation
+                    # time does not establish failure. Real transport errors
+                    # still propagate for uncertainty/reconciliation; terminal
+                    # output is validated by the owning adapter before release.
+                    async for raw in resp.content:
+                        line = raw.decode(errors='replace').strip()
+                        if line:
+                            yield json.loads(line)
+                    return
                 stream = resp.content.__aiter__()
                 seen = 0
                 started = time.monotonic()
@@ -542,22 +600,22 @@ class OllamaClient:
             await session.close()
 
     async def chat_stream(self, model: str, messages: list[dict],
-                          prompt_tokens: Optional[int] = None, **kwargs):
+                          prompt_tokens: Optional[int] = None, *, service_owned=False, **kwargs):
         """Chat completion, async streaming. Kills connection on cancel."""
         payload = self._with_num_ctx(
             model, {"model": model, "messages": messages, "stream": True, **kwargs})
         async for chunk in self._stream_with_deadlines(
-            "/api/chat", payload, prompt_tokens
+            "/api/chat", payload, prompt_tokens, service_owned=service_owned
         ):
             yield chunk
 
     async def generate_stream(self, model: str, prompt: str,
-                              prompt_tokens: Optional[int] = None, **kwargs):
+                              prompt_tokens: Optional[int] = None, *, service_owned=False, **kwargs):
         """Generate completion, async streaming. Kills connection on cancel."""
         payload = self._with_num_ctx(
             model, {"model": model, "prompt": prompt, "stream": True, **kwargs})
         async for chunk in self._stream_with_deadlines(
-            "/api/generate", payload, prompt_tokens
+            "/api/generate", payload, prompt_tokens, service_owned=service_owned
         ):
             yield chunk
 

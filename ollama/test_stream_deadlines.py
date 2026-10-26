@@ -664,9 +664,9 @@ def main():
               f"{cause}: EVERY emitted frame is seen by at least one detector "
               f"— no frame is shape C or D")
 
-    check(ob.count("for frame in _failure_frames(") == 3,
-          f'all three branches go through the one emitter, so the two-frame '
-          f'sequence cannot be right in two places and wrong in the third '
+    check(ob.count("for frame in _failure_frames(") == 4,
+          f'all four branches (including pre-stream refusal) use the one emitter, '
+          f'so the terminal sequence does not diverge across error paths '
           f'({ob.count("for frame in _failure_frames(")})')
     check(ob.count('yield "data: [DONE]') == 4,
           f'and every terminal path still ends with [DONE] '
