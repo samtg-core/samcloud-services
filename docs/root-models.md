@@ -34,7 +34,14 @@ remains loading/unknown debt and cannot silently launch again. Vision keeps its
 owned process handle in manager inventory before health waiting and metadata
 publication, including when the metadata link fails. Reported post-load sizing
 is checked against the full-root budget; refusal preserves the model/lease link.
-A post-load loss is reconciliation, never a safe-to-repeat pre-provider deferral.
+A post-load ownership loss is reconciliation, never a safe-to-repeat
+pre-provider deferral. Routine heartbeat/status refresh withdraws new admission,
+but an already-started load may finish under its same retained root/member.
+Expired unsettled health under the frozen hold policy likewise retains ownership;
+it never permits another start. Completion records residency without publishing
+fresh permission. A terminal/released/settled claim or changed current holder
+still preserves unknown model debt. Do not reuse new-admission freshness as the
+completion condition of a provider operation that already owns its claim.
 VLM's configured/profile figure is not claimed as a measured peak.
 
 Strict unload records the exact model intent gone before dropping its manager

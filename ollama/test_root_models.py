@@ -185,7 +185,9 @@ def test_unqualified_backends_refuse_before_provider_work(env,entry,args):
 def test_admission_lost_after_provider_load_is_never_safe_to_repeat(env):
     e=env;load=e.m.ollama.load_model
     def lose_after_load(*args,**kwargs):
-        load(*args,**kwargs);e.a.withdraw_root(e.prep['id'])
+        load(*args,**kwargs)
+        released=deepcopy(e.body);released['state']='complete';released['lease']['status']='released'
+        e.store.record(e.prep['id'],'host/gpu',released)
     e.m.ollama.load_model=lose_after_load
     with pytest.raises(Conflict):e.m.load_ollama_model('text')
     assert e.m.models['text'].root_model_intent and e.binding._rows()[0]['state']=='unknown'
@@ -314,3 +316,78 @@ def test_profile_backend_must_be_explicit_enum_before_attachment(env):
     e=env;e.m.root_binding=None
     with pytest.raises(Conflict):
         RootModelBinding(e.m,e.a,e.client,resource='host/gpu',models={'text':'ollama'},confirm_cold=lambda:True)
+
+
+def test_normal_heartbeat_withdrawal_does_not_invalidate_successful_inflight_load(env):
+    e=env;load=e.m.ollama.load_model
+    def refresh_during_load(*args,**kwargs):
+        load(*args,**kwargs)
+        e.binding.withdraw()  # The normal first step of heartbeat/status refresh.
+    e.m.ollama.load_model=refresh_during_load
+    result=e.m.load_ollama_model('text')
+    assert result.lease_id=='root-lease' and e.binding._rows()[0]['state']=='resident'
+    assert e.a.preparation(e.prep['id'])['state']=='prepared'
+    # Completion of already-started work is not permission to start another call.
+    with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
+    assert e.m.ollama.loads==['text'];e.sc.release_lease.assert_not_called()
+
+
+def test_health_expiry_keeps_started_load_but_never_readmits_another(env):
+    e=env;load=e.m.ollama.load_model
+    def expire_during_load(*args,**kwargs):
+        load(*args,**kwargs)
+        expired=deepcopy(e.body);expired['lease'].update(status='expired',expiry_reason='ttl_expired',settled_at=None,
+            expires_at='2000-01-01T00:00:00+00:00')
+        e.store.record(e.prep['id'],'host/gpu',expired);e.binding.withdraw()
+    e.m.ollama.load_model=expire_during_load
+    result=e.m.load_ollama_model('text')
+    assert result.lease_id=='root-lease' and e.binding._rows()[0]['state']=='resident'
+    with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
+    assert e.m.ollama.loads==['text'];e.sc.request_lease.assert_not_called();e.sc.release_lease.assert_not_called()
+
+
+def test_changed_root_member_during_load_cannot_be_published_as_owned(env):
+    e=env;load=e.m.ollama.load_model
+    def transfer_during_load(*args,**kwargs):
+        load(*args,**kwargs)
+        changed=deepcopy(e.body);changed['current_lease_id']='child-lease'
+        changed['lease'].update(id='child-lease',agent_id='other-holder',service_id='image-service')
+        e.store.record(e.prep['id'],'host/gpu',changed)
+    e.m.ollama.load_model=transfer_during_load
+    with pytest.raises(Conflict):e.m.load_ollama_model('text')
+    assert e.m.models['text'].root_model_intent and e.binding._rows()[0]['state']=='unknown'
+    e.sc.release_lease.assert_not_called()
+
+
+def test_provider_finishes_while_real_heartbeat_observation_is_in_flight(env):
+    e=env;load=e.m.ollama.load_model;observe=e.client.observe
+    loaded=threading.Event();finish_load=threading.Event();observing=threading.Event();finish_observe=threading.Event()
+    def long_load(*args,**kwargs):
+        load(*args,**kwargs);loaded.set()
+        if not finish_load.wait(5):raise AssertionError('fixture load was not released')
+    def slow_observe(*args,**kwargs):
+        observing.set()
+        if not finish_observe.wait(5):raise AssertionError('fixture observation was not released')
+        return observe(*args,**kwargs)
+    e.m.ollama.load_model=long_load;e.client.observe=slow_observe
+    async def scenario():
+        provider=asyncio.create_task(asyncio.to_thread(e.m.load_ollama_model,'text'))
+        heartbeat=None
+        try:
+            assert await asyncio.to_thread(loaded.wait,3)
+            heartbeat=asyncio.create_task(e.m.renew_model_leases())
+            assert await asyncio.to_thread(observing.wait,3)
+            assert e.a.preparation(e.prep['id'])['state']=='prepared'
+            finish_load.set()
+            result=await provider
+            assert result.lease_id=='root-lease' and e.binding._rows()[0]['state']=='resident'
+            with pytest.raises(CapacityDeferred):e.m.load_ollama_model('text')
+            finish_observe.set();await heartbeat
+            assert e.a.preparation(e.prep['id'])['state']=='admitted'
+            assert e.m.load_ollama_model('text') is result
+        finally:
+            finish_load.set();finish_observe.set()
+            await provider
+            if heartbeat is not None:await heartbeat
+    asyncio.run(scenario())
+    assert e.m.ollama.loads==['text'];e.sc.request_lease.assert_not_called();e.sc.release_lease.assert_not_called()

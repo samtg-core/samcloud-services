@@ -1,3 +1,13 @@
+# Retain started model loads across heartbeat observation — 27 October 2026
+
+Separate new-dispatch admission from retained ownership at model-load completion.
+Normal heartbeat/status withdrawal and expired-unsettled health cannot relabel a
+successful started provider load uncertain while the same root/member remains
+held. New calls still require fresh active admission. Released/settled or changed
+ownership remains reconciliation debt, never a pre-provider retry. Add failing-
+before, threaded heartbeat and actual registry/client overlap regressions.
+No source/controller/bootstrap activation, physical claims or native core changes.
+
 # Staged whole-root model accounting — 27 October 2026
 
 Add an explicitly attached RootModelBinding for the actual ModelManager's

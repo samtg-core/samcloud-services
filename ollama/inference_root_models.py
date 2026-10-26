@@ -221,8 +221,8 @@ class RootModelBinding:
     def loaded(self,mm):
         self.bind_handle(mm)
         row=self._owned(mm)
-        try:ident,receipt=self._admission()
-        except CapacityDeferred:
+        try:ident,receipt=self._retained_owner(row)
+        except Conflict:
             with self.store._transaction() as conn:
                 conn.execute("UPDATE root_model_intents SET state='unknown' WHERE id=?",(row['id'],))
             # Provider mutation has happened. Never describe this as a safe
@@ -238,6 +238,33 @@ class RootModelBinding:
                          ('resident' if valid else 'unknown',mm.memory_mb,row['id']))
         if not valid:raise Conflict('Loaded model exceeds or differs from confirmed root')
         return mm.lease_id
+
+    def _retained_owner(self,row):
+        """Already-started load may finish during admission withdrawal/health loss.
+
+        This never permits a new backend start. The exact physical root/member
+        must still be held, including expired unsettled health under the frozen
+        hold policy. Released/changed/settled ownership is reconciliation.
+        """
+        saved=self.store.prepare(row['preparation_id'],self.resource)
+        receipt=json.loads(saved['receipt']) if saved['receipt'] else {}
+        lease=receipt.get('lease')
+        conn=sqlite3.connect('file:'+str(self.scheduler.path)+'?mode=ro',uri=True)
+        conn.row_factory=sqlite3.Row
+        try:prep=conn.execute('SELECT * FROM requester_root_preparations WHERE id=?',(row['preparation_id'],)).fetchone()
+        finally:conn.close()
+        if (prep is None or prep['state'] not in ('prepared','admitted','ending')
+            or prep['root_id']!=saved['root_id'] or prep['initial_lease_id']!=saved['initial_lease_id']
+            or prep['current_lease_id']!=row['lease_id'] or receipt.get('root_id')!=saved['root_id']
+            or receipt.get('state') not in ('open','ending') or receipt.get('resource_id')!=self.resource
+            or receipt.get('current_lease_id')!=row['lease_id'] or not isinstance(lease,dict)
+            or lease.get('id')!=row['lease_id'] or lease.get('resource_id')!=self.resource
+            or lease.get('agent_id')!=self.store.actor or lease.get('service_id')!=self.store.service
+            or lease.get('exclusive')!=1 or type(lease.get('memory_mb')) is not int or lease['memory_mb']<=0
+            or not (lease.get('status')=='active' or lease.get('status')=='expired'
+                    and lease.get('expiry_reason')=='ttl_expired' and not lease.get('settled_at'))):
+            raise Conflict('Exact started-load root ownership requires reconciliation')
+        return row['preparation_id'],receipt
 
     def model_gone(self,mm):
         """Called only after strict manager unload verified actual absence."""
