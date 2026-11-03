@@ -1,5 +1,9 @@
 # Changelog & Working Notes
 
+## Unreleased — capability playground
+
+Version useful agent jobs, independent checks, immutable model/client/compute/identity manifests and comparison reports. Configured native/rail clients retain their existing service-owned queue lifecycle; no inference or allocator change.
+
 Project history and current state. This is a living document.
 
 ## 2026-10-09 — A short ring is not an outage: the tier declines through the capacity model (#870, #33)
