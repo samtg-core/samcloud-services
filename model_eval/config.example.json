@@ -1,0 +1,26 @@
+{
+  "execution_path": "native-service",
+  "model": {"name":"MODEL_TAG", "digest":"INSTALLED_DIGEST", "context_length":65536},
+  "compute": {"device_id":"HOST_ID", "hardware":"MEASURED_HARDWARE"},
+  "client": {"kind":"hermes", "revision":"EXACT_NATIVE_REVISION", "queue_client_revision":"EXACT_CLIENT_REVISION"},
+  "identity": {"owner_id":"user:ID", "username":"WORKER_NAME"},
+  "service_id":"HOST_ID/model-service",
+  "resource_id":"HOST_ID/MEMORY_POOL",
+  "gateway_revision":"EXACT_DEPLOYED_RELEASE",
+  "backend_revision":"EXACT_BACKEND_REVISION",
+  "tool_permissions":["terminal","file"],
+  "registry_url":"https://PLANE/api/v1",
+  "model_inventory_url":"http://127.0.0.1:11434/api/tags",
+  "token_file":"/PRIVATE/worker.token",
+  "profile_template":"/PRIVATE/verified-profile",
+  "command":["/NATIVE/venv/bin/hermes","chat","-t","terminal,file","--query-file","{request}"],
+  "environment": {
+    "HERMES_HOME":"{profile}",
+    "PYTHONPATH":"/PINNED/shared-queue-client",
+    "OPENAI_BASE_URL":"http://127.0.0.1:8800/v1",
+    "SAMCLOUD_QUEUE_BASE_URL":"http://127.0.0.1:8800/v1",
+    "HERMES_MODEL":"MODEL_TAG"
+  },
+  "token_environment":["OPENAI_API_KEY","SAMCLOUD_QUEUE_API_KEY"],
+  "tasks":["csv-rollup","repair-windows","evidence-audit"]
+}
