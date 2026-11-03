@@ -1,5 +1,9 @@
 # Add explicit operational root-runtime launcher — 27 October 2026
 
+## Unreleased — terminal stream payloads
+
+Preserve content and tool calls attached to an Ollama terminal done frame before emitting the OpenAI finish frame. Previously these payloads were discarded, producing an empty successful response for some tool callers.
+
 Add a separate versioned root config and single-process launcher, leaving the
 existing launcher and defaults unchanged. Validate exact queue models/backends,
 own registry/service/resource, distinct durable journal and explicit permission.

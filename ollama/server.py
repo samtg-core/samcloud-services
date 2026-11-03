@@ -2032,6 +2032,11 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                         if "message" in chunk and chunk["message"].get("tool_calls"):
                             delta["tool_calls"] = _fix_tool_calls(chunk["message"]["tool_calls"])
                             saw_tool_calls = True
+                        if delta:
+                            yield "data: " + json.dumps({
+                                "choices": [{"delta": delta, "finish_reason": None}],
+                                "model": mm.name,
+                            }) + "\n\n"
                         if chunk.get("done"):
                             _log_ollama_timings(mm.name, chunk, n_prompt)
                             finish = "tool_calls" if saw_tool_calls else "stop"
@@ -2049,11 +2054,6 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                                                  'completion_tokens':completion,
                                                  'total_tokens':prompt+completion}})+'\n\n'
                             yield "data: [DONE]\n\n"
-                        elif delta:
-                            yield "data: " + json.dumps({
-                                "choices": [{"delta": delta, "finish_reason": None}],
-                                "model": mm.name,
-                            }) + "\n\n"
                 except asyncio.CancelledError:
                     log.info(f"Client disconnected during stream for {mm.name}")
                     raise
