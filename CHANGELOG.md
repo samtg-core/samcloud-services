@@ -2,6 +2,8 @@
 
 ## Unreleased — capability playground
 
+PR81 review repairs: allowlisted agent/checker environments, secret-bearing evidence redaction and failure, source-bound resume, refusal of unimplemented rail delivery, explicit comparison cohorts and unknown/attested assistance. Audit checker accepts valid source subsets and reports unchecked requirements.
+
 Version useful agent jobs, independent checks, immutable model/client/compute/identity manifests and comparison reports. Configured native/rail clients retain their existing service-owned queue lifecycle; no inference or allocator change.
 
 Project history and current state. This is a living document.

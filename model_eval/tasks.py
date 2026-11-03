@@ -1,5 +1,6 @@
 """Small useful-job baseline; checkers are never copied into agent workspaces."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -43,7 +44,9 @@ TASKS = {
 
 def _run(argv, cwd):
     # Only the independent acceptance subprocess has a bound. No inference/workload deadline.
-    return subprocess.run(argv, cwd=cwd, capture_output=True, timeout=10)
+    with tempfile.TemporaryDirectory() as home:
+        env={'PATH':os.defpath,'LANG':'C','HOME':home,'TMPDIR':home,'PYTHONNOUSERSITE':'1','PYTHONUTF8':'1'}
+        return subprocess.run(argv, cwd=cwd, capture_output=True, timeout=10,env=env)
 
 def verify(task_id, workspace):
     workspace = Path(workspace)
@@ -81,9 +84,10 @@ print(json.dumps(out))
             checks['classification']=answer.get('ready')==['alpha'] and answer.get('retain')==['beta','delta','gamma']
             checks['schema']=set(answer)=={'ready','retain','reasons'}
             reasons=answer.get('reasons',{})
-            checks['source_citations']=set(reasons)=={'alpha','beta','gamma','delta'} and all(isinstance(v,list) and {'policy.md','jobs.json','observations.json'} <= set(v) for v in reasons.values())
+            checks['source_citations']=set(reasons)=={'alpha','beta','gamma','delta'} and all(isinstance(v,list) and bool(v) and all(isinstance(name,str) and name in TASKS['evidence-audit']['files'] for name in v) for v in reasons.values())
             checks['handback_present']=(workspace/'handback.md').is_file() and bool((workspace/'handback.md').read_text().strip())
     except Exception as error:
         return {'state':'failed','checks':checks,'checker_error_type':type(error).__name__}
     return {'state':'passed' if checks and all(v is True for v in checks.values()) else 'failed', 'checks':checks,
-            'human_review':'required for qualitative handback quality; automated presence is not prose-quality approval'}
+            'human_review':'required for qualitative handback quality; automated presence is not prose-quality approval',
+            'unchecked':['whether agent authored and ran meaningful tests','handback prose quality','adversarial tampering']}

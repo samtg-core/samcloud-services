@@ -5,6 +5,7 @@ No physical allocator, queue transport, rail fork or automatic replacement job.
 import fcntl
 import hashlib
 import json
+import inspect
 import os
 from pathlib import Path
 import shutil
@@ -12,7 +13,8 @@ import subprocess
 import time
 import uuid
 from .core import SCHEMA,digest,write_json
-from .tasks import REVISION,TASKS,verify
+from . import tasks
+from .tasks import REVISION,TASKS
 
 REQUIRED=('model','compute','client','identity','service_id','resource_id','command','environment','profile_template','token_file','registry_url','model_inventory_url')
 
@@ -21,8 +23,30 @@ def load_config(path):
     if any(not cfg.get(k) for k in REQUIRED):raise ValueError('explicit model/compute/client/identity/command configuration required')
     if not isinstance(cfg['command'],list) or any(not isinstance(x,str) for x in cfg['command']):raise ValueError('command must be argv, never shell text')
     if not cfg['model'].get('digest'):raise ValueError('model digest pin required')
-    if cfg.get('execution_path') not in ('native-service','rail-service'):raise ValueError('unsupported execution path')
+    if cfg.get('execution_path') != 'native-service':raise ValueError('unsupported execution path')
     return cfg
+
+
+def minimal_environment():
+    return {k:os.environ[k] for k in ('PATH','LANG','LC_ALL','TMPDIR') if k in os.environ}
+
+def source_hashes():
+    result={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(__file__).parent.glob('*.py')}
+    result['active_checker']=hashlib.sha256(inspect.getsource(tasks.verify).encode()).hexdigest()
+    return result
+
+def redact_evidence(root,bearer):
+    needle=bearer.encode();found=[]
+    if not needle:raise ValueError('empty bearer cannot be scanned')
+    for path in Path(root).rglob('*'):
+        if path.is_file() and not path.is_symlink():
+            data=path.read_bytes()
+            if needle in data:
+                found.append(str(path.relative_to(root)))
+                # Keep the safe evidence only; raw secret-bearing bytes are not archived.
+                with path.open('wb') as f:
+                    f.write(data.replace(needle,b'[REDACTED]'));f.flush();os.fsync(f.fileno())
+    return found
 
 def public_config(cfg):
     return {k:v for k,v in cfg.items() if k not in ('token_file','environment','profile_template')}
@@ -63,14 +87,15 @@ def prepare(directory,cfg,observed):
     snapshot={name:hashlib.sha256(p.read_bytes()).hexdigest() for name,p in sources.items()}
     # Bind environment without values in reports (it may contain credential references).
     public=public_config(cfg)
-    binding=digest({'configuration':public,'environment':cfg['environment'],'profile_hashes':snapshot,'tasks':TASKS})
+    hashes=source_hashes()
+    binding=digest({'configuration':public,'environment':cfg['environment'],'profile_hashes':snapshot,'tasks':TASKS,'source_hashes':hashes})
     if (directory/'state.json').exists():
         state=json.loads((directory/'state.json').read_text())
         if state['binding']!=binding:raise ValueError('configuration/profile/fixtures changed; resume refused')
         return state,sources
     manifest={'schema':SCHEMA,'fixture_revision':REVISION,'fixture_hash':digest(TASKS),
               'configuration':public,'profile_hashes':snapshot,'observed':observed,
-              'source_hashes':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(__file__).parent.glob('*.py')},
+              'source_hashes':hashes,'provenance':'executed',
               'assistance_policy':'No operator repair of submitted task; interventions invalidate unattended success',
               'limits':['Three small useful jobs, not a broad model ranking','Agent elapsed time includes queue/tool work',
                         'No memory peak, token efficiency or health score inferred from task pass','Qualitative handbacks require human review']}
@@ -82,6 +107,7 @@ def prepare(directory,cfg,observed):
     return state,sources
 
 def run(cfg,directory,*,verified=None):
+    if cfg.get('execution_path') != 'native-service':raise ValueError('rail adapter with delivery receipts is not implemented')
     directory=Path(directory).resolve();directory.mkdir(parents=True,exist_ok=True,mode=0o700)
     with (directory/'observer.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -105,17 +131,25 @@ def run(cfg,directory,*,verified=None):
                 for key,value in substitutions.items():text=text.replace('{'+key+'}',value)
                 return text
             argv=[render(s) for s in cfg['command']]
-            env={k:v for k,v in os.environ.items() if k not in ('SC_TOKEN','SC_TOKEN_FILE','OPENAI_API_KEY','SAMCLOUD_QUEUE_API_KEY','HERMES_HOME')}
+            env=minimal_environment()
             env.update({k:render(v) for k,v in cfg['environment'].items()})
             for key in cfg.get('token_environment',[]):env[key]=bearer
-            row={'state':'launch_intent','argv':argv,'workspace':str(work),'started_at':time.time(),'operator_interventions':0}
+            row={'state':'launch_intent','argv':argv,'workspace':str(work),'started_at':time.time(),'operator_interventions':None}
             state['tasks'][name]=row;state['state']='running';write_json(directory/'state.json',state)
             with (root/'agent.log').open('ab') as log:
                 child=subprocess.Popen(argv,cwd=work,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
                 row.update(state='running',pid=child.pid);write_json(directory/'state.json',state)
                 rc=child.wait()  # no inference timeout or automatic replacement
             row['returncode']=rc;row['elapsed_s']=time.time()-row['started_at']
-            result=verify(name,work);result['unattended_process_completion']=rc==0
+            leaked=redact_evidence(root,bearer)
+            result=({'state':'failed','failure':'secret_in_evidence','checks':{},'redacted_files':leaked}
+                    if leaked else tasks.verify(name,work))
+            result['process_completed']=rc==0
+            result['unattended']=None
+            # Generated checker code is untrusted evidence too. Scan after verification.
+            leaked_after=redact_evidence(root,bearer)
+            if leaked_after:
+                result.update(state='failed',failure='secret_in_evidence',redacted_files=sorted(set(leaked+leaked_after)))
             row['result']=result
             row['artifact_hashes']={str(p.relative_to(work)):hashlib.sha256(p.read_bytes()).hexdigest() for p in work.rglob('*') if p.is_file() and '__pycache__' not in p.parts and not p.is_symlink()}
             row['state']='passed' if rc==0 and result['state']=='passed' else 'failed'

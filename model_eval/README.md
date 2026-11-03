@@ -44,9 +44,8 @@ stay outside Git. Tokens come from an explicit private file into named process-e
 variables; no token fallback. Do not put secrets in command/environment configuration.
 The argv is executed directly, never through an implicit shell.
 
-`native-service` and `rail-service` describe the operator-configured delivery adapter;
-the CLI does not commission a rail or silently convert a local run into a rail result.
-A rail comparison requires a real configured client/delivery command and its receipts.
+V1 accepts only `native-service`. `rail-service` is refused until a real rail
+adapter records delivery receipts. A configuration label cannot create a rail result.
 Obelisk validates the native-service baseline first; then match tasks/tools/assistance
 policy on the earlier 35B and v1 Hermes rail configurations. Preserve old CSV outcomes
 as historical evidence, not fresh passes for this expanded suite.
@@ -75,3 +74,32 @@ Task pass means the stated automated checks passed without operator intervention
 Review agent logs for tool/test discipline and handback quality; source-file citation
 and a nonempty handback alone do not prove sound prose. Keep infrastructure/client
 failures distinct from wrong task answers. Keep original failures when fixing adapters.
+
+
+## Review hardening and comparison cohorts
+
+Agent processes inherit only PATH/LANG/LC_ALL/TMPDIR plus explicitly configured
+values and named bearer variables. Checker subprocesses get a separate minimal
+environment and empty temporary HOME, never the observer's credentials.
+After each task and checker pass the controller scans task evidence for the exact
+bearer; a match fails as `secret_in_evidence` and only redacted bytes are retained.
+This is evidence hygiene, not isolation from a malicious same-OS-account process.
+
+Resume binds harness and active checker source hashes as well as config/profile/task
+inputs. Comparisons group by fixture hash, harness/checker sources, allowed tools and
+assistance policy. The first run is the reference; mismatches or missing cohort fields
+are explicitly not comparable. Missing provenance is `unknown`, never `fresh`.
+
+Intervention count and unattended status default to unknown. After inspecting the
+trace, record an operator intervention or attest zero; recorded interventions cannot
+be erased with a zero attestation. These commands refuse an active observer lock:
+
+```sh
+python -m model_eval assistance --run-dir /PRIVATE/run --task csv-rollup --note 'Operator repaired the submitted code'
+python -m model_eval assistance --run-dir /PRIVATE/run --task csv-rollup --attest-zero --note 'Reviewed trace; no task assistance'
+```
+
+Check results list unchecked requirements explicitly. Source citations may be a valid
+subset of the fixture files; requiring every filename in every reason was an overly
+strict first checker. Preserve the old run's failed result and checker version rather
+than silently replacing it. Compare a fresh repaired-baseline cohort separately.
