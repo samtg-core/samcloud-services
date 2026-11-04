@@ -63,21 +63,38 @@ def verify(task_id, workspace):
                     p=_run([sys.executable,str(workspace/'rollup.py'),str(a),str(b)],workspace)
                     checks[name]=p.returncode==0 and json.loads(b.read_text())==expected
         elif task_id == 'repair-windows':
-            probe = '''import copy,json
+            cases = [('empty',[],[]),('touching',[[3,5],[1,3]],[[1,5]]),('nested',[[1,10],[2,3]],[[1,10]]),('negative',[[-4,-2],[-2,1]], [[-4,1]]),('separate',[[7,9],[1,2]],[[1,2],[7,9]])]
+            invalid = [[[2,2]],[[3,1]],[[True,3]],[[1.5,3]],[[1]],[[1,2,3]]]
+            # Agent code runs in this child. It returns observations, never a
+            # verdict that the parent would trust as independent acceptance.
+            probe = '''import json,sys
 from windows import merge_windows as f
 out={}
-for name, value, expected in [('empty',[],[]),('touching',[[3,5],[1,3]],[[1,5]]),('nested',[[1,10],[2,3]],[[1,10]]),('negative',[[-4,-2],[-2,1]], [[-4,1]]),('separate',[[7,9],[1,2]],[[1,2],[7,9]])]:
- original=copy.deepcopy(value)
- try:out[name]=f(value)==expected and value==original
- except Exception:out[name]=False
-for i,bad in enumerate([[[2,2]],[[3,1]],[[True,3]],[[1.5,3]],[[1]],[[1,2,3]]]):
- try:f(bad);out['invalid'+str(i)]=False
- except ValueError:out['invalid'+str(i)]=True
- except Exception:out['invalid'+str(i)]=False
+for name,value in json.loads(sys.argv[1]):
+ try:
+  result=f(value)
+  out[name]={'output':result,'input_after':value,'output_type':type(result).__name__,
+             'row_types':[type(row).__name__ for row in result] if isinstance(result,(list,tuple)) else None}
+ except Exception as error:out[name]={'exception':type(error).__name__}
+for i,bad in enumerate(json.loads(sys.argv[2])):
+ try:out['invalid'+str(i)]={'output':f(bad)}
+ except ValueError:out['invalid'+str(i)]={'exception':'ValueError'}
+ except Exception as error:out['invalid'+str(i)]={'exception':type(error).__name__}
 print(json.dumps(out))
 '''
-            p=_run([sys.executable,'-c',probe],workspace)
-            checks=json.loads(p.stdout) if p.returncode==0 else {'checker_execution':False}
+            p=_run([sys.executable,'-c',probe,json.dumps([(name,value) for name,value,_ in cases]),json.dumps(invalid)],workspace)
+            observations=json.loads(p.stdout) if p.returncode==0 else {}
+            if not isinstance(observations,dict):
+                observations={}
+            for name,value,expected in cases:
+                observed=observations.get(name)
+                checks[name]=(isinstance(observed,dict)
+                    and observed.get('output_type')=='list'
+                    and observed.get('row_types')==['list']*len(expected)
+                    and json.dumps(observed.get('output'))==json.dumps(expected)
+                    and json.dumps(observed.get('input_after'))==json.dumps(value))
+            for i in range(len(invalid)):
+                checks['invalid'+str(i)]=observations.get('invalid'+str(i))=={'exception':'ValueError'}
             checks['handback_present']=(workspace/'CHANGELOG.md').is_file() and bool((workspace/'CHANGELOG.md').read_text().strip())
         elif task_id == 'evidence-audit':
             answer=json.loads((workspace/'audit.json').read_text())

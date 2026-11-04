@@ -78,6 +78,13 @@ failures distinct from wrong task answers. Keep original failures when fixing ad
 
 ## Review hardening and comparison cohorts
 
+The repair probe runs agent code in a child with the minimal checker environment.
+It returns raw outputs, input-after-call values, result types and exceptions. The
+parent compares these with its own expectations; an all-true JSON verdict printed
+by agent code is not accepted. This closes the simple verdict-spoofing case, while
+the adversarial-sandbox limitation above still applies. The changed checker source
+creates a separate comparison cohort; do not regrade historical runs in place.
+
 Agent processes inherit only PATH/LANG/LC_ALL/TMPDIR plus explicitly configured
 values and named bearer variables. Checker subprocesses get a separate minimal
 environment and empty temporary HOME, never the observer's credentials.
