@@ -274,6 +274,33 @@ class CaseEndGrantReturn(unittest.TestCase):
   s=self.go(self.agent({'repair-windows':'none','csv-rollup':'g-csv'}),self.root/'run')
   self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertEqual(self.gw.calls,[])
   self.assertIn('identity store missing',s['tasks']['repair-windows']['grant_return']['reason'])
+ def test_missing_or_empty_binding_stays_stopped_across_resumes(self):
+  import sqlite3
+  for label in ('missing-store','empty-table'):
+   with self.subTest(label):
+    self.gw=FakeGateway(self.log);self.log.unlink(missing_ok=True);d=self.root/('run-'+label)
+    cfg=self.agent({'repair-windows':'none','csv-rollup':'g-csv'})
+    s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed')
+    if label=='empty-table':
+     store=d/'repair-windows/profile/samcloud-queue/identity.sqlite';store.parent.mkdir(parents=True)
+     db=sqlite3.connect(store);db.execute('CREATE TABLE grant_binding(key TEXT PRIMARY KEY,grant_id TEXT NOT NULL,owner TEXT NOT NULL,resource TEXT NOT NULL,model TEXT NOT NULL,lifetime TEXT NOT NULL)');db.commit();db.close()
+    for attempt in (1,2):
+     s=self.go(cfg,d);saved=json.loads((d/'state.json').read_text())
+     self.assertEqual((s['state'],saved['state']),('grant_return_unconfirmed','grant_return_unconfirmed'))
+     self.assertEqual(saved['tasks']['repair-windows']['grant_return']['state'],'unbound')
+     self.assertNotIn('grants',saved['tasks']['repair-windows']['grant_return'])
+     self.assertEqual(list(saved['tasks']),['repair-windows'])
+    self.assertEqual(self.gw.calls,[]);self.assertEqual(self.order(),['launch repair-windows'])
+ def test_store_behind_a_symlinked_parent_is_out_of_scope(self):
+  import os
+  outside=self.root/'elsewhere';cfg=self.agent({'repair-windows':'none','csv-rollup':'g-csv'});d=self.root/'run'
+  s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed')
+  real=outside/'samcloud-queue';real.mkdir(parents=True)
+  import sqlite3;db=sqlite3.connect(real/'identity.sqlite');db.execute('CREATE TABLE grant_binding(key TEXT PRIMARY KEY,grant_id TEXT NOT NULL,owner TEXT NOT NULL,resource TEXT NOT NULL,model TEXT NOT NULL,lifetime TEXT NOT NULL)')
+  db.execute("INSERT INTO grant_binding VALUES('key-g-win','g-win','hermes-obelisk','gpu','fixture','work_session')");db.commit();db.close()
+  os.symlink(real,d/'repair-windows/profile/samcloud-queue')
+  s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertEqual(self.gw.calls,[])
+  self.assertIn('outside the case profile',s['tasks']['repair-windows']['grant_return']['reason'])
  def test_grant_return_configuration_is_explicit(self):
   for bad in ({'identity_store':'../x','gateway_url':'http://g/v1'},{'identity_store':'/abs','gateway_url':'http://g/v1'},
               {'identity_store':'s.sqlite','gateway_url':'file:///x'},{'identity_store':'s.sqlite'}):

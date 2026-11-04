@@ -51,9 +51,12 @@ def grant_return_config(cfg):
 
 def case_grant_bindings(profile,store):
     """Exact grants this case's own profile bound; no discovery outside it."""
-    path=Path(profile)/store
+    base=Path(profile).resolve();path=Path(profile)/store
     if not path.is_file() or path.is_symlink():raise GrantReturnUnconfirmed('case identity store missing')
-    db=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+    real=path.resolve()
+    # Source scope: the store must resolve inside this case's own profile.
+    if real==base or base not in real.parents:raise GrantReturnUnconfirmed('case identity store resolves outside the case profile')
+    db=sqlite3.connect(real.as_uri()+'?mode=ro',uri=True)
     try:rows=db.execute('SELECT key,grant_id,owner,resource,model,lifetime FROM grant_binding ORDER BY rowid').fetchall()
     except sqlite3.Error as error:raise GrantReturnUnconfirmed('case identity store has no grant binding ('+type(error).__name__+')')
     finally:db.close()
@@ -81,7 +84,8 @@ def return_case_grants(cfg,bearer,row,profile,save):
     """Logical return of a passed case's exact idle grants; not proof of unloaded residency."""
     g=grant_return_config(cfg);username=cfg['identity']['username'];base=g['gateway_url'].rstrip('/')+'/inference/grants/'
     ret=row.get('grant_return')
-    if ret is None:
+    if ret is None or not ret.get('grants'):
+        # No durable intent yet, or an unbound record: (re)read the exact, nonempty binding set.
         ret=row['grant_return']={'state':'intent','at':time.time(),'grants':[{'binding':b} for b in case_grant_bindings(profile,g['identity_store'])]}
         save()  # durable intent and exact ids before any release request
     ret['state']='intent';ret.pop('reason',None)
@@ -98,6 +102,7 @@ def return_case_grants(cfg,bearer,row,profile,save):
         if after['release_requested'] not in (1,True) or after['active_execution'] or after['state']!=RETURN_ACK[before['state']]:
             item['reply']=after;save();raise GrantReturnUnconfirmed('release reply is not a completed return')
         item['ack']={**after,'observed':'release_reply'};save()
+    if not ret['grants'] or not all(item.get('ack') for item in ret['grants']):raise GrantReturnUnconfirmed('return intent has no acknowledged grant')
     ret['state']='returned';save()
 
 def settle_grant_return(cfg,bearer,state,directory,name,row):
@@ -107,7 +112,9 @@ def settle_grant_return(cfg,bearer,state,directory,name,row):
     try:
         return_case_grants(cfg,bearer,row,directory/name/'profile',save);return True
     except GrantReturnUnconfirmed as error:
-        ret=row.setdefault('grant_return',{'grants':[]});ret.update(state='unconfirmed',reason=str(error))
+        ret=row.get('grant_return')
+        if ret and ret.get('grants'):ret.update(state='unconfirmed',reason=str(error))
+        else:row['grant_return']={'state':'unbound','reason':str(error)}  # never an intent; resume re-reads the store
         state['state']='grant_return_unconfirmed';save();return False
 
 
