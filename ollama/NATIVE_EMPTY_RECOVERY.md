@@ -20,10 +20,20 @@ Reopening the same source reuses the same call; a new API intention is distinct,
 and the existing request digest rejects changed input for the same boundary.
 Ordinary persisted-only sources retain their existing boundary and keys.
 
+The qualified native contract also requires stable per-call API IDs. At
+818c13be, `conversation_loop` assigns the turn/API counter identity before its
+retry loop; redirected, compressed and rebuilt restarts refund that counter.
+Only a new logical call advances it. Requalify this property as well as the
+nudge shape when changing Hermes versions: an uncertain call must not receive
+a new identity merely because observation or transport was retried.
+
 This does not reconstruct a cold native turn from an incomplete transcript.
 Reopen evidence supplies the same held history explicitly. Authentication,
 foreground/job ownership, accepted-intake fences, compaction lineage and physical
 admission policies are unchanged. No fallback is added around a source refusal.
+Providers that expose captured reasoning on the empty assistant row still
+refuse; today's qualified Ollama stream exposes only content and tool calls.
+Reasoning-bearing recovery needs a separate rule and qualification.
 
 `test_native_empty_recovery` checks middle placement, process reopen, mutation
 refusal, ordinary-key compatibility and malformed shapes. The native client test
