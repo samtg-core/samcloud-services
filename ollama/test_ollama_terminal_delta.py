@@ -1,4 +1,4 @@
-import ast,asyncio,json,sys,types,unittest
+import ast,asyncio,json,sys,types,unittest,time
 from pathlib import Path
 SOURCE=(Path(__file__).parent/'server.py').read_text()
 tree=ast.parse(SOURCE)
@@ -8,7 +8,7 @@ class Cases(unittest.IsolatedAsyncioTestCase):
  async def frames(self,chunks):
   async def chat_stream(*a,**kw):
    for chunk in chunks:yield chunk
-  ns=dict(json=json,asyncio=asyncio,mgr=types.SimpleNamespace(ollama=types.SimpleNamespace(chat_stream=chat_stream)),mm=types.SimpleNamespace(name='fixture'),ollama_messages=[],n_prompt=0,queue_owned=True,ollama_kwargs={},req=types.SimpleNamespace(stream_options={'include_usage':True}),_log_ollama_timings=lambda *a:None)
+  ns=dict(json=json,asyncio=asyncio,time=time,mgr=types.SimpleNamespace(ollama=types.SimpleNamespace(chat_stream=chat_stream)),mm=types.SimpleNamespace(name='fixture'),ollama_messages=[],n_prompt=0,queue_owned=True,ollama_kwargs={},req=types.SimpleNamespace(stream_options={'include_usage':True}),_log_ollama_timings=lambda *a:None)
   exec(compile(ast.Module(body=[fix,node],type_ignores=[]),'exact-server-stream','exec'),ns)
   return [json.loads(x[6:]) for x in [v async for v in ns['stream']()] if x!='data: [DONE]\n\n']
  async def test_terminal_tool_call_preserved(self):
