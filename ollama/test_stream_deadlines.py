@@ -463,16 +463,32 @@ def main():
           f"ollama one and at least one sibling, so the assertion below is "
           f"not vacuous")
 
-    # EVERY terminal path emits [DONE], per generator, except a cancelled
-    # client — there is nobody left to send it to, which is why
-    # asyncio.CancelledError is the one legitimate silence.
+    # Every SSE terminal path emits [DONE], except a cancelled client.
+    # The generate passthrough uses NDJSON and needs its own explicit error
+    # record with done:true instead of an SSE delimiter.
     for _ln, (_fn, _hs) in sorted(_streams.items()):
+        _ndjson = any(isinstance(n, _ast.Call)
+                      and _ast.unparse(n.func) == "mgr.ollama.generate"
+                      for n in _ast.walk(_fn))
         for _h in _hs:
             _typ = _ast.unparse(_h.type) if _h.type else "bare except"
             _done = sum(1 for _y in _ast.walk(_h)
                         if isinstance(_y, _ast.Yield) and _y.value is not None
                         and "[DONE]" in _ast.unparse(_y.value))
-            if _typ == "asyncio.CancelledError":
+            if _ndjson:
+                _terminal_errors = []
+                for _y in _ast.walk(_h):
+                    if (isinstance(_y, _ast.Dict)
+                            and all(isinstance(k, _ast.Constant) for k in _y.keys)):
+                        _fields = {k.value: v for k, v in zip(_y.keys, _y.values)}
+                        _terminal_errors.append(
+                            isinstance(_fields.get("error"), _ast.Constant)
+                            and _fields["error"].value == "backend_error"
+                            and isinstance(_fields.get("done"), _ast.Constant)
+                            and _fields["done"].value is True)
+                check(_done == 0 and any(_terminal_errors),
+                      f"stream@{_ln}: NDJSON {_typ} ends with an explicit error and done:true")
+            elif _typ == "asyncio.CancelledError":
                 check(_done == 0,
                       f"stream@{_ln}: {_typ} stays silent — the caller is gone")
             else:

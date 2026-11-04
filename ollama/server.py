@@ -2550,8 +2550,14 @@ async def completions(req: CompletionRequest):
     if mm.backend == Backend.OLLAMA:
         if req.stream:
             def stream():
-                for chunk in mgr.ollama.generate(mm.name, req.prompt):
-                    yield json.dumps(chunk) + "\n"
+                try:
+                    for chunk in mgr.ollama.generate(mm.name, req.prompt):
+                        yield json.dumps(chunk) + "\n"
+                except OllamaBackendError as e:
+                    # Headers may already be sent. Close NDJSON explicitly as
+                    # a failure; done is transport closure, not backend absence.
+                    yield json.dumps({"error": "backend_error",
+                                      "diagnostics": e.diagnostics(), "done": True}) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
             # In a thread, for the reason the chat route carries in full

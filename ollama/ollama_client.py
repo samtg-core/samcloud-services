@@ -20,6 +20,7 @@ ERROR_BODY_TIMEOUT = 2.0
 # These literal prefixes are present in the installed 0.33.0 backend. Anything
 # else remains unclassified; model-generated text is never a diagnostic tag.
 _ERROR_PREFIXES = (
+    ("model runner has unexpectedly stopped", "runner_stopped"),
     ("error parsing tool call", "tool_parse"),
     ("an error was encountered while running the model", "model_runtime"),
     ("context canceled", "context_cancelled"),

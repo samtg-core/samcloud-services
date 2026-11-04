@@ -115,6 +115,13 @@ class Diagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["subtype"],"unclassified")
         self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
 
+    async def test_runner_crash_prefix_is_safe(self):
+        with self.assertLogs(level="WARNING") as logs:
+            frames, error = await self.frames(Response(500,json.dumps({
+                "error":"model runner has unexpectedly stopped: "+CANARY}).encode()))
+        self.assertEqual(error["subtype"],"runner_stopped")
+        self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
+
     async def test_inband_error_after_content_is_failure(self):
         with self.assertLogs(level="WARNING") as logs:
             frames, error = await self.frames(Response(chunks=[
@@ -167,6 +174,58 @@ class SyncDiagnostics(unittest.TestCase):
             with self.assertRaises(client.OllamaBackendError) as raised:
                 next(stream)
             self.assertEqual(raised.exception.chunks_before,1)
+
+
+class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
+    async def frames(self, status, body):
+        """Run the exact completions route and its real sync client iterator."""
+        tree = ast.parse((Path(__file__).parent/"server.py").read_text())
+        route = next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                     and n.name=="completions")
+        route.decorator_list = []
+        value = bare_client()
+        async def resolve(model):
+            return types.SimpleNamespace(name=model,backend="ollama")
+        namespace = dict(json=json,CompletionRequest=types.SimpleNamespace,
+                         _resolve_model=resolve,Backend=types.SimpleNamespace(EXO="exo",OLLAMA="ollama"),
+                         mgr=types.SimpleNamespace(ollama=value),
+                         OllamaBackendError=client.OllamaBackendError,
+                         StreamingResponse=lambda iterator,**kwargs:iterator)
+        exec(compile(ast.Module(body=[route],type_ignores=[]),"exact-completions-route","exec"),namespace)
+        with httpx.Client(base_url="http://offline",transport=httpx.MockTransport(
+                lambda request:httpx.Response(status,content=body))) as http:
+            value._http=http
+            response = await namespace["completions"](
+                types.SimpleNamespace(model="fixture",prompt="fixture",stream=True))
+            return [json.loads(line) for line in response]
+
+    async def test_inband_error_ends_ndjson_with_safe_failure(self):
+        partial = {"response":"partial","done":False}
+        body = (json.dumps(partial)+"\n"+json.dumps({"error":
+                "an error was encountered while running the model: "+CANARY})+"\n").encode()
+        with self.assertLogs(level="WARNING") as logs:
+            frames = await self.frames(200,body)
+        self.assertEqual(frames[0],partial)
+        self.assertEqual(len(frames),2)
+        self.assertEqual(frames[-1]["error"],"backend_error")
+        self.assertTrue(frames[-1]["done"])
+        self.assertEqual(frames[-1]["diagnostics"]["chunks_before"],1)
+        self.assertEqual(frames[-1]["diagnostics"]["phase"],"in_stream")
+        self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
+
+    async def test_status_error_has_a_final_safe_ndjson_line(self):
+        with self.assertLogs(level="WARNING") as logs:
+            frames = await self.frames(500,json.dumps({"error":CANARY}).encode())
+        self.assertEqual(len(frames),1)
+        self.assertEqual(frames[0]["error"],"backend_error")
+        self.assertTrue(frames[0]["done"])
+        self.assertEqual(frames[0]["diagnostics"]["phase"],"status")
+        self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
+
+    async def test_successful_ndjson_stays_unchanged(self):
+        chunks = [{"response":"partial","done":False},{"done":True}]
+        frames = await self.frames(200,("\n".join(json.dumps(v) for v in chunks)+"\n").encode())
+        self.assertEqual(frames,chunks)
 
 if __name__=="__main__":
     unittest.main()

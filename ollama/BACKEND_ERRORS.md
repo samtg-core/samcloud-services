@@ -14,7 +14,8 @@ and error-only JSON records inside an HTTP 200 stream. Synchronous `chat` and
 | `detail_sha256` | First 12 hex characters of the SHA-256 of at most 4096 detail bytes |
 | `detail_truncated` | Capture was incomplete or reached the byte limit |
 
-Recognized prefixes are `error parsing tool call` (`tool_parse`),
+Recognized prefixes are `model runner has unexpectedly stopped` (`runner_stopped`),
+`error parsing tool call` (`tool_parse`),
 `an error was encountered while running the model` (`model_runtime`), and
 `context canceled` (`context_cancelled`). These literal strings were checked
 against Ollama 0.33.0. A tag identifies a message family, not its root cause.
@@ -32,16 +33,24 @@ The client logs safe fields so direct iterator consumers have diagnostics;
 the OpenAI streaming route also logs those fields with elapsed seconds.
 This can produce two diagnostic lines for one streaming failure.
 
-The OpenAI stream emits a `backend_error` failure and `[DONE]`, preserving
+The OpenAI chat stream emits a `backend_error` failure and `[DONE]`, preserving
 any earlier content. `[DONE]` closes the response; it does not turn the failure
 into a successful result. Consumers must inspect the error frame.
+
+The Ollama-backed `/v1/completions` stream retains its NDJSON format. On a typed
+backend error it emits a final safe line with `error: "backend_error"`,
+`diagnostics`, and `done: true`. The error remains explicit even after partial
+output; `done` closes the transport and does not acknowledge compute cleanup.
 
 Neither an HTTP error, a subtype nor `[DONE]` proves backend termination,
 process absence or returned capacity. Durable execution adapters must retain
 uncertainty and ownership until their existing reconciliation rules establish
 otherwise. This change adds no automatic retry, lease release or admission
-policy. Non-streaming collection propagates the typed error rather than
-manufacturing a result.
+policy. Non-streaming chat and completions collection propagate the typed error
+as HTTP 500 rather than manufacturing a result. Previously an in-band error could
+be returned as truncated successful chat content or a raw error dictionary with
+HTTP 200. These non-streaming routes do not yet return the safe diagnostic fields
+in their HTTP error body; those fields are available in the client log.
 
 Run the offline client-to-SSE tests with:
 
