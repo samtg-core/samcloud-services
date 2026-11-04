@@ -1,5 +1,9 @@
 # Changelog & Working Notes
 
+## Unreleased — terminal stream payloads
+
+Preserve content and tool calls attached to an Ollama terminal done frame before emitting the OpenAI finish frame. Previously these payloads were discarded, producing an empty successful response for some tool callers.
+
 ## Unreleased — capability playground
 
 PR81 review repairs: allowlisted agent/checker environments, secret-bearing evidence redaction and failure, source-bound resume, refusal of unimplemented rail delivery, explicit comparison cohorts and unknown/attested assistance. Audit checker accepts valid source subsets and reports unchecked requirements.
