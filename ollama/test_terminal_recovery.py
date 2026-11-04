@@ -158,4 +158,28 @@ class TerminalRecovery(unittest.TestCase):
                     self.assertEqual(len(requests),2)
             asyncio.run(run())
 
+
+class LinkedTerminalRecovery(unittest.TestCase):
+    def test_failed_child_advances_requested_parent_finish_without_dispatch(self):
+        from ollama.inference_arbiter import StintPolicy
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'queue.sqlite';a=Arbiter(path,stint_policy=StintPolicy())
+            grant=a.submit('dev','main','gpu','qwen','work_session')
+            child=a.enqueue(grant['id'],'dev','child',{'prompt':'fixture'},job_key='parent')
+            a.dispatch_next('gpu')
+            other=a.submit('other','other','gpu','qwen');waiter=a.enqueue(other['id'],'other','other',{'prompt':'other'})
+            a.end_job('dev','parent',finish=True);a.uncertain(child['id']);a.close()
+            recovery=OfflineRecovery(path)
+            try:
+                p=BackendProcess(12345,502,'fixture-birth','/fixture/ollama')
+                proof=StoppedLocalBackend(child['id'],'gpu','fixture-host','3c17741b-ea8f-4430-b3b3-39b4964574d1',(p,),(p,),True,True,True,'a'*64)
+                recovery.fail_dead_attempt(recovery.inspect(child['id']),proof=proof,operator='fixture',code='backend_attempt_dead')
+                self.assertEqual(recovery.journal.execution(child['id'],'dev')['state'],'failed')
+                parent=recovery.journal.db.execute('SELECT state FROM requester_jobs WHERE id=?',(child['job_id'],)).fetchone()
+                self.assertEqual(parent['state'],'closed')
+                self.assertFalse(recovery.journal.owns_job('gpu'))
+                self.assertEqual(recovery.journal.execution(waiter['id'],'other')['state'],'queued')
+                self.assertEqual(recovery.journal.dispatch_next('gpu')['execution']['id'],waiter['id'])
+            finally:recovery.close()
+
 if __name__=='__main__':unittest.main()

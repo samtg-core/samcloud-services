@@ -29,8 +29,9 @@ One transaction writes a separate `backend_attempt_terminations` audit row,
 the failed execution and the grant transition. The audit binds the prior
 lifecycle sequence, request hash, operator and proof. Existing retry audit rows
 retain their meaning. An execution-lifetime grant becomes released; a work-session
-grant retains idle affinity with no active execution. Physical registry claims
-and residency records have their own exact settlement receipts.
+grant retains idle affinity with no active execution. The job-aware branch also advances any requested parent finish/yield inside
+that transaction, matching its own `Arbiter.finish`. It still dispatches no work.
+Physical registry claims and residency records have their own exact settlement receipts.
 
 The saved body is a fixed, sanitized `kind:error`, `status:502`,
 `type:provider_error`, `code:backend_attempt_dead` result with the audit ID.
@@ -67,6 +68,13 @@ measurements remain incomplete.
 The same-boot proof baseline is the previously reviewed operator module SHA256
 `0ea7f4e78974fed823a0e42436b71e43b11473f70ea3a0bd1cea3c4a1a2edc10`.
 The terminal operator preserves those proof classes and the retry method.
+The branch module keeps its qualified `StintPolicy` journal and job-advance hook.
+The earlier pinned-runtime operator is the immutable blob
+`82fb1f8:ollama/inference_recovery.py` (SHA256
+`c31b04ed29551fe458e58f8d7bddb599615879bd1b0dfb12b155b5145331b115`).
+That selected blob is qualified with the pinned pre-requester-job runtime;
+it is separate from the branch module.
+
 Use the selected module with the exact reviewed runtime dependency manifest;
 source publication of this operator branch is separate from a gateway upgrade.
 

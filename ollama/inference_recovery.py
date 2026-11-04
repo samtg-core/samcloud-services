@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 import uuid
 
-from .inference_arbiter import Arbiter, Conflict, NotFound, encoded, required
+from .inference_arbiter import Arbiter, Conflict, NotFound, StintPolicy, encoded, required
 
 
 @dataclass(frozen=True)
@@ -120,7 +120,9 @@ class OfflineRecovery:
             if os.fstat(self._lock).st_mode & 0o077:
                 raise PermissionError('supervisor lock must be private')
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.journal = Arbiter(path)
+            # This operator uses the job-aware journal implementation, never an
+            # older/non-atomic scheduler. It does not pump or run providers.
+            self.journal = Arbiter(path, stint_policy=StintPolicy())
             self.journal.db.execute('''CREATE TABLE IF NOT EXISTS backend_attempt_recoveries (
                 id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions(id),
                 previous_lifecycle_seq INTEGER NOT NULL, at REAL NOT NULL,
@@ -175,8 +177,7 @@ class OfflineRecovery:
             now = time.time(); recovery_id = uuid.uuid4().hex
             self.journal.db.execute('INSERT INTO backend_attempt_recoveries VALUES(?,?,?,?,?,?,?)',
                 (recovery_id,current['execution_id'],current['lifecycle_seq'],now,
-                 current['request_sha256'],operator,
-                 encoded({'attestation_type': type(proof).__name__, **asdict(proof)})))
+                 current['request_sha256'],operator,encoded({'attestation_type': type(proof).__name__, **asdict(proof)})))
             self.journal.db.execute("UPDATE executions SET state='queued',updated=?,wait_reason=NULL WHERE id=?",
                                     (now,current['execution_id']))
             self.journal.db.execute("UPDATE grants SET state='queued',active_execution=NULL,updated=?,"
@@ -207,6 +208,8 @@ class OfflineRecovery:
                     current['active_execution'] != current['execution_id'] or
                     current['has_result'] or current['output_events'] or current['release_requested']):
                 raise Conflict('only owned, unreleased, output-free uncertain work may terminate')
+            call = self.journal.db.execute('SELECT * FROM executions WHERE id=?',
+                                           (current['execution_id'],)).fetchone()
             grant = self.journal.db.execute('SELECT * FROM grants WHERE id=?',
                                             (current['grant_id'],)).fetchone()
             now = time.time(); termination_id = uuid.uuid4().hex
@@ -226,6 +229,7 @@ class OfflineRecovery:
                                     'idle_since=? WHERE id=?',
                                     ('released' if released else 'granted',now,
                                      None if released else now,current['grant_id']))
+            self.journal._advance_call_job(call)
         return termination_id
 
     def close(self):
