@@ -39,7 +39,7 @@ into a successful result. Consumers must inspect the error frame.
 
 The Ollama-backed `/v1/completions` stream retains its NDJSON format. On a typed
 backend error it emits a final safe line with `error: "backend_error"`,
-`diagnostics`, and `done: true`. The error remains explicit even after partial
+`diagnostics`, `done: true`, and `done_reason: "error"`. The error remains explicit even after partial
 output; `done` closes the transport and does not acknowledge compute cleanup.
 
 Neither an HTTP error, a subtype nor `[DONE]` proves backend termination,

@@ -209,6 +209,7 @@ class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(frames),2)
         self.assertEqual(frames[-1]["error"],"backend_error")
         self.assertTrue(frames[-1]["done"])
+        self.assertEqual(frames[-1]["done_reason"],"error")
         self.assertEqual(frames[-1]["diagnostics"]["chunks_before"],1)
         self.assertEqual(frames[-1]["diagnostics"]["phase"],"in_stream")
         self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
@@ -219,6 +220,7 @@ class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(frames),1)
         self.assertEqual(frames[0]["error"],"backend_error")
         self.assertTrue(frames[0]["done"])
+        self.assertEqual(frames[0]["done_reason"],"error")
         self.assertEqual(frames[0]["diagnostics"]["phase"],"status")
         self.assertNotIn(CANARY,json.dumps(frames)+" ".join(logs.output))
 

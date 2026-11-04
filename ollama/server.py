@@ -2557,7 +2557,8 @@ async def completions(req: CompletionRequest):
                     # Headers may already be sent. Close NDJSON explicitly as
                     # a failure; done is transport closure, not backend absence.
                     yield json.dumps({"error": "backend_error",
-                                      "diagnostics": e.diagnostics(), "done": True}) + "\n"
+                                      "diagnostics": e.diagnostics(), "done": True,
+                                      "done_reason": "error"}) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
             # In a thread, for the reason the chat route carries in full
