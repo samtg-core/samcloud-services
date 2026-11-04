@@ -58,7 +58,7 @@ from .manager import (
 )
 from .manager import TranscriberBusy
 from .exo_client import ExoUnavailable, ExoRequestFailed, ExoStalled
-from .ollama_client import OllamaStalled, OllamaRequestTimeout
+from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaBackendError
 from .samcloud import SamcloudClient
 from .ollama_client import OllamaClient
 from .llama_client import LlamaServerClient
@@ -1925,6 +1925,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
         if req.stream:
             async def stream():
                 saw_tool_calls = False
+                diagnostic_started = time.monotonic()
                 try:
                     async for chunk in mgr.ollama.chat_stream(
                         mm.name, ollama_messages,
@@ -1970,6 +1971,16 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 # relative to every other timeout on the path, and the one that
                 # fires first should be the one that reports best. Ours fires
                 # first and used to report worst.
+                except OllamaBackendError as e:
+                    detail = e.diagnostics()
+                    detail["elapsed_s"] = round(time.monotonic() - diagnostic_started, 3)
+                    log.warning("Ollama backend_error %s", json.dumps(detail, sort_keys=True))
+                    for frame in _failure_frames(
+                        "backend_error", "Ollama backend reported an error; execution needs reconciliation",
+                        detail,
+                    ):
+                        yield "data: " + json.dumps(frame) + "\n\n"
+                    yield "data: [DONE]\n\n"
                 except OllamaStalled as e:
                     log.error(
                         f"Ollama STALLED mid-stream for {mm.name} on the "
@@ -2539,8 +2550,15 @@ async def completions(req: CompletionRequest):
     if mm.backend == Backend.OLLAMA:
         if req.stream:
             def stream():
-                for chunk in mgr.ollama.generate(mm.name, req.prompt):
-                    yield json.dumps(chunk) + "\n"
+                try:
+                    for chunk in mgr.ollama.generate(mm.name, req.prompt):
+                        yield json.dumps(chunk) + "\n"
+                except OllamaBackendError as e:
+                    # Headers may already be sent. Close NDJSON explicitly as
+                    # a failure; done is transport closure, not backend absence.
+                    yield json.dumps({"error": "backend_error",
+                                      "diagnostics": e.diagnostics(), "done": True,
+                                      "done_reason": "error"}) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
             # In a thread, for the reason the chat route carries in full

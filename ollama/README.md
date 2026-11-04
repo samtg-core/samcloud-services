@@ -3,6 +3,10 @@
 The core inference gateway. Manages multiple model backends behind a single OpenAI-compatible API
 with SAMcloud resource leasing for GPU memory.
 
+[Backend error diagnostics](BACKEND_ERRORS.md) describes safe cause tags,
+failure framing and the boundary between a failed response and confirmed
+backend termination.
+
 ## Modules
 
 | Module | Responsibility |

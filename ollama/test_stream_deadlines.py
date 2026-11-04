@@ -95,6 +95,7 @@ class FakeContent:
 
 
 class FakeResp:
+    status = 200
     def __init__(self, content):
         self.content = content
 
@@ -462,16 +463,32 @@ def main():
           f"ollama one and at least one sibling, so the assertion below is "
           f"not vacuous")
 
-    # EVERY terminal path emits [DONE], per generator, except a cancelled
-    # client — there is nobody left to send it to, which is why
-    # asyncio.CancelledError is the one legitimate silence.
+    # Every SSE terminal path emits [DONE], except a cancelled client.
+    # The generate passthrough uses NDJSON and needs its own explicit error
+    # record with done:true instead of an SSE delimiter.
     for _ln, (_fn, _hs) in sorted(_streams.items()):
+        _ndjson = any(isinstance(n, _ast.Call)
+                      and _ast.unparse(n.func) == "mgr.ollama.generate"
+                      for n in _ast.walk(_fn))
         for _h in _hs:
             _typ = _ast.unparse(_h.type) if _h.type else "bare except"
             _done = sum(1 for _y in _ast.walk(_h)
                         if isinstance(_y, _ast.Yield) and _y.value is not None
                         and "[DONE]" in _ast.unparse(_y.value))
-            if _typ == "asyncio.CancelledError":
+            if _ndjson:
+                _terminal_errors = []
+                for _y in _ast.walk(_h):
+                    if (isinstance(_y, _ast.Dict)
+                            and all(isinstance(k, _ast.Constant) for k in _y.keys)):
+                        _fields = {k.value: v for k, v in zip(_y.keys, _y.values)}
+                        _terminal_errors.append(
+                            isinstance(_fields.get("error"), _ast.Constant)
+                            and _fields["error"].value == "backend_error"
+                            and isinstance(_fields.get("done"), _ast.Constant)
+                            and _fields["done"].value is True)
+                check(_done == 0 and any(_terminal_errors),
+                      f"stream@{_ln}: NDJSON {_typ} ends with an explicit error and done:true")
+            elif _typ == "asyncio.CancelledError":
                 check(_done == 0,
                       f"stream@{_ln}: {_typ} stays silent — the caller is gone")
             else:
@@ -484,15 +501,16 @@ def main():
     body = _ast.get_source_segment(srv, _streams[_ollama][0]) or ""
     check("OllamaStalled" in body,
           "the first such generator is the ollama one, located structurally")
-    for exc in ("OllamaStalled", "OllamaRequestTimeout"):
+    for exc in ("OllamaStalled", "OllamaRequestTimeout", "OllamaBackendError"):
         check(f"except {exc} as e:" in body,
               f"the ollama stream handler catches {exc}")
     # The ollama generator's own count, on a slice that is now actually its
-    # body: a normal finish plus three error paths. Counted rather than merely
+    # body: a normal finish plus four error paths. Counted rather than merely
     # present, because a presence check passes on a duplicate.
-    check(body.count('yield "data: [DONE]\\n\\n"') == 4,
-          f"exactly 4 [DONE] in the OLLAMA generator: finish, stall, timeout, "
-          f"error (got {body.count(chr(34).join([chr(121)+chr(105)+chr(101)+chr(108)+chr(100)+chr(32), chr(100)+chr(97)+chr(116)+chr(97)+chr(58)+chr(32)]))})")
+    done_count = body.count('yield "data: [DONE]\\n\\n"')
+    check(done_count == 5,
+          f"exactly 5 [DONE] in the OLLAMA generator: finish, backend error, stall, timeout, "
+          f"generic error (got {done_count})")
     # The three causes are now passed to the one emitter rather than spelled
     # out per branch, so assert the CALLS, not the literals.
     check(body.count('"model_stalled", e.detail') == 1
@@ -664,11 +682,11 @@ def main():
               f"{cause}: EVERY emitted frame is seen by at least one detector "
               f"— no frame is shape C or D")
 
-    check(ob.count("for frame in _failure_frames(") == 3,
-          f'all three branches go through the one emitter, so the two-frame '
+    check(ob.count("for frame in _failure_frames(") == 4,
+          f'all four branches go through the one emitter, so the two-frame '
           f'sequence cannot be right in two places and wrong in the third '
           f'({ob.count("for frame in _failure_frames(")})')
-    check(ob.count('yield "data: [DONE]') == 4,
+    check(ob.count('yield "data: [DONE]') == 5,
           f'and every terminal path still ends with [DONE] '
           f'({ob.count(chr(34) + "data: [DONE]")})')
     check('"finish_reason": finish' in ob,

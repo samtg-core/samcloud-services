@@ -1,5 +1,9 @@
 # Changelog & Working Notes
 
+## Unreleased — safe Ollama error diagnostics
+
+Capture bounded HTTP error details and detect error-only records inside accepted streams. Log fixed cause tags, captured lengths and hashes without raw backend text. Chat streaming callers receive a failure frame and `[DONE]`; the NDJSON completions stream gets a final safe error line. Synchronous generation uses the same typed error. Non-streaming routes now raise HTTP 500 for in-band errors rather than returning truncated successful chat content or a raw error dictionary with HTTP 200. Existing generation deadlines, retry, admission and cleanup policies are unchanged; a backend error remains uncertainty, not evidence of returned capacity. See `ollama/BACKEND_ERRORS.md` for timeout and truncation limits.
+
 ## Unreleased — independent repair scoring
 
 The capability repair checker now compares raw function outputs, input preservation and exception observations in the parent process. Agent code printing an all-true verdict and exiting no longer passes. Output type metadata preserves the list contract across JSON serialization. Parse the probe's final JSON line so debug prints do not fail a correct function. This is a new checker-source cohort; existing run results remain unchanged, and this is still not an adversarial sandbox.

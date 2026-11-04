@@ -5,6 +5,7 @@ import time
 import httpx
 import json
 import logging
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Iterator
 
@@ -13,6 +14,96 @@ from . import config
 OLLAMA_BASE = config.OLLAMA_BASE
 
 log = logging.getLogger("ollama-client")
+
+ERROR_BODY_LIMIT = 4096
+ERROR_BODY_TIMEOUT = 2.0
+# These literal prefixes are present in the installed 0.33.0 backend. Anything
+# else remains unclassified; model-generated text is never a diagnostic tag.
+_ERROR_PREFIXES = (
+    ("model runner has unexpectedly stopped", "runner_stopped"),
+    ("error parsing tool call", "tool_parse"),
+    ("an error was encountered while running the model", "model_runtime"),
+    ("context canceled", "context_cancelled"),
+)
+
+
+class OllamaBackendError(Exception):
+    """Safe provider diagnostics, NOT evidence that execution/compute ended."""
+    def __init__(self, status, phase, chunks_before, detail=b"", *, truncated=False):
+        raw = detail.encode("utf-8", errors="replace") if isinstance(detail, str) else bytes(detail)
+        self.status, self.phase, self.chunks_before = status, phase, chunks_before
+        self.detail_len = len(raw)
+        self.detail_truncated = truncated or len(raw) > ERROR_BODY_LIMIT
+        bounded = raw[:ERROR_BODY_LIMIT]
+        self.detail_sha256 = hashlib.sha256(bounded).hexdigest()
+        self.subtype = "unclassified"
+        if isinstance(detail, str) and not self.detail_truncated:
+            self.subtype = next((tag for prefix, tag in _ERROR_PREFIXES
+                                 if detail.lower().startswith(prefix)), "unclassified")
+        super().__init__(f"Ollama backend error: status={status} phase={phase} "
+                         f"subtype={self.subtype} chunks_before={chunks_before}")
+
+    def diagnostics(self):
+        return dict(status=self.status, phase=self.phase, subtype=self.subtype,
+                    chunks_before=self.chunks_before, detail_len=self.detail_len,
+                    detail_sha256=self.detail_sha256[:12], detail_truncated=self.detail_truncated)
+
+
+def _backend_error(status, phase, chunks_before, body, *, truncated=False, parsed=False):
+    detail = body
+    if not parsed:
+        try:
+            value = json.loads(body)
+            if isinstance(value, dict) and isinstance(value.get("error"), str):
+                detail = value["error"]
+        except (ValueError, TypeError):
+            pass
+    if not isinstance(detail, (str, bytes, bytearray)):
+        detail = b""
+    error = OllamaBackendError(status, phase, chunks_before, detail, truncated=truncated)
+    # The durable queue may bypass server.stream's compatibility framing.
+    # Keep the same safe diagnostic available on that path as well.
+    log.warning("Ollama backend_error %s", json.dumps(error.diagnostics(), sort_keys=True))
+    return error
+
+
+async def _async_status_error(resp):
+    import asyncio
+    body = bytearray()
+    async def read_bounded():
+        while len(body) < ERROR_BODY_LIMIT:
+            part = await resp.content.read(ERROR_BODY_LIMIT - len(body))
+            if not part:
+                break
+            body.extend(part)
+    incomplete = False
+    try:
+        await asyncio.wait_for(read_bounded(), timeout=ERROR_BODY_TIMEOUT)
+    except Exception:
+        incomplete = True
+    return _backend_error(resp.status, "status", 0, bytes(body),
+                          truncated=incomplete or len(body) >= ERROR_BODY_LIMIT)
+
+
+def _sync_status_error(resp):
+    # Preserve the existing httpx per-read timeout. Bound retained bytes; unlike
+    # the async path, this read uses the synchronous request's configured timeout.
+    body = bytearray()
+    try:
+        for part in resp.iter_bytes(chunk_size=1024):
+            body.extend(part[:ERROR_BODY_LIMIT-len(body)])
+            if len(body) >= ERROR_BODY_LIMIT:
+                break
+    except Exception:
+        return _backend_error(resp.status_code, "status", 0, bytes(body), truncated=True)
+    return _backend_error(resp.status_code, "status", 0, bytes(body),
+                          truncated=len(body) >= ERROR_BODY_LIMIT)
+
+
+def _checked_chunk(chunk, seen):
+    if isinstance(chunk, dict) and "error" in chunk and "message" not in chunk and "done" not in chunk:
+        raise _backend_error(200, "in_stream", seen, chunk["error"], parsed=True)
+    return chunk
 
 
 class OllamaStalled(Exception):
@@ -325,10 +416,14 @@ class OllamaClient:
         with self._http.stream(
             "POST", "/api/generate", json=payload, timeout=self._stream_timeout
         ) as resp:
+            if resp.status_code >= 400:
+                raise _sync_status_error(resp)
             resp.raise_for_status()
+            seen = 0
             for line in resp.iter_lines():
                 if line.strip():
-                    yield json.loads(line)
+                    yield _checked_chunk(json.loads(line), seen)
+                    seen += 1
 
     def chat(self, model: str, messages: list[dict], **kwargs) -> Iterator[dict]:
         """Chat completion, streaming (sync, for non-streaming collection)."""
@@ -337,10 +432,14 @@ class OllamaClient:
         with self._http.stream(
             "POST", "/api/chat", json=payload, timeout=self._stream_timeout
         ) as resp:
+            if resp.status_code >= 400:
+                raise _sync_status_error(resp)
             resp.raise_for_status()
+            seen = 0
             for line in resp.iter_lines():
                 if line.strip():
-                    yield json.loads(line)
+                    yield _checked_chunk(json.loads(line), seen)
+                    seen += 1
 
     async def _stream_with_deadlines(self, path: str, payload: dict,
                                      prompt_tokens: Optional[int] = None):
@@ -406,6 +505,8 @@ class OllamaClient:
                 # neither a stall nor a long generation.
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
             ) as resp:
+                if resp.status >= 400:
+                    raise await _async_status_error(resp)
                 resp.raise_for_status()
                 stream = resp.content.__aiter__()
                 seen = 0
@@ -535,9 +636,10 @@ class OllamaClient:
                         )
                     line = raw.decode(errors="replace").strip()
                     if line:
+                        chunk = _checked_chunk(json.loads(line), seen)
                         seen += 1
                         last = time.monotonic()
-                        yield json.loads(line)
+                        yield chunk
         finally:
             await session.close()
 
