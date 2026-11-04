@@ -80,7 +80,7 @@ for i,bad in enumerate(json.loads(sys.argv[2])):
  try:out['invalid'+str(i)]={'output':f(bad)}
  except ValueError:out['invalid'+str(i)]={'exception':'ValueError'}
  except Exception as error:out['invalid'+str(i)]={'exception':type(error).__name__}
-print(json.dumps(out))
+print('\\n'+json.dumps(out))
 '''
             p=_run([sys.executable,'-c',probe,json.dumps([(name,value) for name,value,_ in cases]),json.dumps(invalid)],workspace)
             lines=p.stdout.splitlines()

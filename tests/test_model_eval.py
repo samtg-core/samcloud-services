@@ -94,16 +94,20 @@ class Playground(unittest.TestCase):
     self.assertEqual(verify('repair-windows',w)['state'],'failed')
  def test_correct_repair_may_print_debug_output(self):
   w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('fixed and checked')
-  (w/'windows.py').write_text('''def merge_windows(windows):
- print('debug: merging windows')
+  source='''def merge_windows(windows):
+ EMIT
  if any(len(x)!=2 or any(type(n)!=int for n in x) or x[0]>=x[1] for x in windows):raise ValueError()
  out=[]
  for start,end in sorted(windows):
   if out and start<=out[-1][1]:out[-1][1]=max(out[-1][1],end)
   else:out.append([start,end])
  return out
-''')
-  self.assertEqual(verify('repair-windows',w)['state'],'passed')
+'''
+  for emit in ("print('debug: merging windows')","__import__('sys').stdout.write('.')",
+               "print('.',end='')","print('debug',file=__import__('sys').stderr)"):
+   with self.subTest(emit=emit):
+    (w/'windows.py').write_text(source.replace('EMIT',emit))
+    self.assertEqual(verify('repair-windows',w)['state'],'passed')
  def test_repair_needs_input_immutability_and_type_validation(self):
   w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('fixed')
   (w/'windows.py').write_text('''def merge_windows(windows):
