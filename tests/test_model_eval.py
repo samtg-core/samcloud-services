@@ -161,4 +161,151 @@ class Playground(unittest.TestCase):
   self.assertEqual(row['configuration']['model']['digest'],'fixture');self.assertNotIn('token_file',row['configuration'])
   self.assertNotIn('memory_peak_bytes',row['result'])
 
+AGENT="""import csv,json,re,sqlite3,subprocess,sys
+from pathlib import Path
+profile,grant,log=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
+task='csv-rollup' if Path('ledger.csv').exists() else 'repair-windows'
+open(log,'a').write('launch '+task+'\\n')
+if task=='csv-rollup':
+ Path('rollup.py').write_text(ROLLUP)
+ subprocess.check_call([sys.executable,'rollup.py','ledger.csv','result.json'])
+else:
+ Path('windows.py').write_text(WINDOWS)
+ Path('CHANGELOG.md').write_text('fixed and checked')
+if grant!='none':
+ store=profile/'samcloud-queue'/'identity.sqlite';store.parent.mkdir(parents=True,exist_ok=True)
+ db=sqlite3.connect(store);db.execute('CREATE TABLE grant_binding(key TEXT PRIMARY KEY,grant_id TEXT NOT NULL,owner TEXT NOT NULL,resource TEXT NOT NULL,model TEXT NOT NULL,lifetime TEXT NOT NULL)')
+ db.execute('INSERT INTO grant_binding VALUES(?,?,?,?,?,?)',('key-'+grant,grant,'hermes-obelisk','gpu','fixture','work_session'));db.commit();db.close()
+"""
+ROLLUP="""import csv,json,re,sys
+def main(src,dst):
+ totals={};bad=0
+ with open(src,newline='') as f:
+  for row in csv.DictReader(f):
+   a,s,c=((row.get(k) or '').strip() for k in ('account','status','cents'))
+   if not a or s not in ('posted','void') or not re.fullmatch('[+-]?[0-9]+',c,re.ASCII):bad+=1;continue
+   if s=='posted':totals[a]=totals.get(a,0)+int(c)
+ json.dump({'totals':totals,'invalid_rows':bad},open(dst,'w'))
+main(sys.argv[1],sys.argv[2])
+"""
+WINDOWS="def merge_windows(windows):\n if any(len(x)!=2 or any(type(n)!=int for n in x) or x[0]>=x[1] for x in windows):raise ValueError()\n out=[]\n for a,b in sorted(windows):\n  if out and a<=out[-1][1]:out[-1][1]=max(b,out[-1][1])\n  else:out.append([list(x) for x in [[a,b]]][0])\n return out\n"
+
+class FakeGateway:
+ """Supported grant GET/release only. It has no submit: the harness cannot make a claim."""
+ def __init__(self,log):
+  self.log,self.calls,self.lose_release,self.reply_override={},[],set(),{}
+  self.log=log
+  self.grants={g:{'id':g,'owner':'hermes-obelisk','client_key':'key-'+g,'resource':'gpu','model':'fixture','state':st,
+   'release_requested':0,'active_execution':None} for g,st in (('g-win','granted'),('g-csv','queued'),('g-other','granted'))}
+ def __call__(self,method,url,bearer):
+  from model_eval.playground import GrantReturnUnconfirmed
+  assert bearer=='inert'
+  path=url.split('/inference/grants/',1)[1];self.calls.append((method,path))
+  gid=path.split('/')[0];grant=self.grants[gid]
+  if method=='GET':return dict(grant)
+  assert method=='POST' and path==gid+'/release'
+  open(self.log,'a').write('release '+gid+'\n')
+  grant.update(release_requested=1,state={'queued':'cancelled','granted':'released'}.get(grant['state'],grant['state']))
+  if gid in self.lose_release:self.lose_release.discard(gid);raise GrantReturnUnconfirmed('POST grant reply unknown (ReadError)')
+  return {**grant,**self.reply_override.get(gid,{})}
+
+class CaseEndGrantReturn(unittest.TestCase):
+ setUp_base=Playground.setUp;tearDown=Playground.tearDown
+ def setUp(self):
+  self.setUp_base();self.log=self.root/'order.log';self.gw=FakeGateway(self.log)
+  self.script=self.root/'bind-agent.py';self.script.write_text('ROLLUP='+repr(ROLLUP)+'\nWINDOWS='+repr(WINDOWS)+'\n'+AGENT)
+  self.cfg={**self.cfg,'identity':{'owner_id':'user:test','username':'hermes-obelisk'},'tasks':['repair-windows','csv-rollup'],
+   'grant_return':{'identity_store':'samcloud-queue/identity.sqlite','gateway_url':'http://gateway.invalid/v1'}}
+ def agent(self,grants):
+  # Map each case to the grant id its fake client binds ('none' binds nothing).
+  wrapper=self.root/'pick.py'
+  wrapper.write_text('import os,sys,subprocess\ng=%r\ntask="csv-rollup" if os.path.exists("ledger.csv") else "repair-windows"\nsys.exit(subprocess.call([sys.executable,%r,sys.argv[1],g[task],%r]))\n'%(grants,str(self.script),str(self.log)))
+  return {**self.cfg,'command':[sys.executable,str(wrapper),'{profile}']}
+ def go(self,cfg,d):
+  with patch('model_eval.playground.gateway',self.gw):return run(cfg,d,verified=('inert',{}))
+ def order(self):return self.log.read_text().split('\n')[:-1] if self.log.exists() else []
+ def test_passed_case_returns_its_exact_grant_before_next_dispatch(self):
+  s=self.go(self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'}),self.root/'run')
+  self.assertEqual(s['state'],'complete')
+  self.assertEqual(self.order(),['launch repair-windows','release g-win','launch csv-rollup','release g-csv'])
+  self.assertEqual((self.gw.grants['g-win']['state'],self.gw.grants['g-csv']['state']),('released','cancelled'))
+  self.assertEqual(self.gw.grants['g-other']['state'],'granted');self.assertNotIn('g-other',str(self.gw.calls))
+  ret=s['tasks']['repair-windows']['grant_return'];self.assertEqual(ret['state'],'returned')
+  self.assertEqual(ret['grants'][0]['ack']['observed'],'release_reply')
+ def test_failed_case_keeps_its_grant_as_debt(self):
+  cfg=self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'});self.script.write_text(self.script.read_text().replace("Path('windows.py').write_text(WINDOWS)",'pass'))
+  s=self.go(cfg,self.root/'run')
+  self.assertEqual(s['state'],'failed');self.assertEqual(self.gw.calls,[]);self.assertNotIn('grant_return',s['tasks']['repair-windows'])
+  self.assertEqual(self.gw.grants['g-win']['state'],'granted')
+ def test_lost_release_reply_resumes_the_same_grant_without_a_new_claim(self):
+  cfg=self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'});d=self.root/'run';self.gw.lose_release.add('g-win')
+  s=self.go(cfg,d)
+  self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertNotIn('csv-rollup',s['tasks'])
+  self.assertEqual(json.loads((d/'state.json').read_text())['tasks']['repair-windows']['grant_return']['grants'][0]['binding']['grant_id'],'g-win')
+  s=self.go(cfg,d)
+  self.assertEqual(s['state'],'complete')
+  self.assertEqual([c for c in self.gw.calls if c[0]=='POST'],[('POST','g-win/release'),('POST','g-csv/release')])
+  self.assertEqual(s['tasks']['repair-windows']['grant_return']['grants'][0]['ack']['observed'],'terminal_without_new_request')
+  self.assertEqual(self.order().count('launch repair-windows'),1)
+ def test_crash_after_pass_before_intent_reads_the_same_binding_on_resume(self):
+  cfg=self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'});d=self.root/'run'
+  def lost(method,url,bearer):
+   from model_eval.playground import GrantReturnUnconfirmed
+   raise GrantReturnUnconfirmed('GET grant reply unknown (URLError)')
+  with patch('model_eval.playground.gateway',lost):run(cfg,d,verified=('inert',{}))
+  state=json.loads((d/'state.json').read_text());state['tasks']['repair-windows'].pop('grant_return');(d/'state.json').write_text(json.dumps(state))
+  s=self.go(cfg,d);self.assertEqual(s['state'],'complete');self.assertEqual(self.gw.grants['g-win']['state'],'released')
+ def test_unreturnable_grants_stop_later_dispatch_without_release(self):
+  for label,change in (('active',{'active_execution':'e1'}),('owner',{'owner':'someone-else'}),('model',{'model':'other'}),
+                       ('key',{'client_key':'key-other'}),('state',{'state':'uncertain'})):
+   with self.subTest(label):
+    self.gw=FakeGateway(self.log);self.log.unlink(missing_ok=True);self.gw.grants['g-win'].update(change)
+    s=self.go(self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'}),self.root/('run-'+label))
+    self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertNotIn('csv-rollup',s['tasks'])
+    self.assertFalse([c for c in self.gw.calls if c[0]=='POST'])
+    self.assertEqual(s['tasks']['repair-windows']['grant_return']['state'],'unconfirmed')
+ def test_release_reply_that_is_not_a_completed_return_stops(self):
+  for label,override in (('still-granted',{'state':'granted'}),('active',{'active_execution':'e2'}),('not-requested',{'release_requested':0}),('other-id',{'id':'g-other'})):
+   with self.subTest(label):
+    self.gw=FakeGateway(self.log);self.gw.reply_override['g-win']=override
+    s=self.go(self.agent({'repair-windows':'g-win','csv-rollup':'g-csv'}),self.root/('run-'+label))
+    self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertNotIn('csv-rollup',s['tasks'])
+ def test_passed_case_without_a_binding_stops(self):
+  s=self.go(self.agent({'repair-windows':'none','csv-rollup':'g-csv'}),self.root/'run')
+  self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertEqual(self.gw.calls,[])
+  self.assertIn('identity store missing',s['tasks']['repair-windows']['grant_return']['reason'])
+ def test_missing_or_empty_binding_stays_stopped_across_resumes(self):
+  import sqlite3
+  for label in ('missing-store','empty-table'):
+   with self.subTest(label):
+    self.gw=FakeGateway(self.log);self.log.unlink(missing_ok=True);d=self.root/('run-'+label)
+    cfg=self.agent({'repair-windows':'none','csv-rollup':'g-csv'})
+    s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed')
+    if label=='empty-table':
+     store=d/'repair-windows/profile/samcloud-queue/identity.sqlite';store.parent.mkdir(parents=True)
+     db=sqlite3.connect(store);db.execute('CREATE TABLE grant_binding(key TEXT PRIMARY KEY,grant_id TEXT NOT NULL,owner TEXT NOT NULL,resource TEXT NOT NULL,model TEXT NOT NULL,lifetime TEXT NOT NULL)');db.commit();db.close()
+    for attempt in (1,2):
+     s=self.go(cfg,d);saved=json.loads((d/'state.json').read_text())
+     self.assertEqual((s['state'],saved['state']),('grant_return_unconfirmed','grant_return_unconfirmed'))
+     self.assertEqual(saved['tasks']['repair-windows']['grant_return']['state'],'unbound')
+     self.assertNotIn('grants',saved['tasks']['repair-windows']['grant_return'])
+     self.assertEqual(list(saved['tasks']),['repair-windows'])
+    self.assertEqual(self.gw.calls,[]);self.assertEqual(self.order(),['launch repair-windows'])
+ def test_store_behind_a_symlinked_parent_is_out_of_scope(self):
+  import os
+  outside=self.root/'elsewhere';cfg=self.agent({'repair-windows':'none','csv-rollup':'g-csv'});d=self.root/'run'
+  s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed')
+  real=outside/'samcloud-queue';real.mkdir(parents=True)
+  import sqlite3;db=sqlite3.connect(real/'identity.sqlite');db.execute('CREATE TABLE grant_binding(key TEXT PRIMARY KEY,grant_id TEXT NOT NULL,owner TEXT NOT NULL,resource TEXT NOT NULL,model TEXT NOT NULL,lifetime TEXT NOT NULL)')
+  db.execute("INSERT INTO grant_binding VALUES('key-g-win','g-win','hermes-obelisk','gpu','fixture','work_session')");db.commit();db.close()
+  os.symlink(real,d/'repair-windows/profile/samcloud-queue')
+  s=self.go(cfg,d);self.assertEqual(s['state'],'grant_return_unconfirmed');self.assertEqual(self.gw.calls,[])
+  self.assertIn('outside the case profile',s['tasks']['repair-windows']['grant_return']['reason'])
+ def test_grant_return_configuration_is_explicit(self):
+  for bad in ({'identity_store':'../x','gateway_url':'http://g/v1'},{'identity_store':'/abs','gateway_url':'http://g/v1'},
+              {'identity_store':'s.sqlite','gateway_url':'file:///x'},{'identity_store':'s.sqlite'}):
+   p=self.root/'c.json';p.write_text(json.dumps({**self.cfg,'grant_return':bad,'model_inventory_url':'http://fixture','environment':{'X':'1'}}))
+   with self.subTest(bad),self.assertRaises(ValueError):load_config(p)
+  p.write_text(json.dumps({**self.cfg,'model_inventory_url':'http://fixture','environment':{'X':'1'}}));self.assertIn('grant_return',load_config(p))
+
 if __name__=='__main__':unittest.main()
