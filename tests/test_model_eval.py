@@ -71,6 +71,43 @@ class Playground(unittest.TestCase):
  def test_original_repair_is_rejected(self):
   w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('claim fixed')
   self.assertEqual(verify('repair-windows',w)['state'],'failed')
+ def test_repair_cannot_pass_by_printing_checker_verdicts_and_exiting(self):
+  w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('claim fixed')
+  keys=['empty','touching','nested','negative','separate']+['invalid'+str(i) for i in range(6)]
+  (w/'windows.py').write_text('import os,json\nprint('+repr(json.dumps(dict.fromkeys(keys,True)))+',flush=True)\nos._exit(0)\n')
+  result=verify('repair-windows',w)
+  self.assertEqual(result['state'],'failed')
+  self.assertTrue(all(result['checks'][name] is False for name in keys))
+ def test_repair_raw_json_does_not_hide_tuple_outputs(self):
+  w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('claim fixed')
+  source='''def merge_windows(windows):
+ if any(len(x)!=2 or any(type(n)!=int for n in x) or x[0]>=x[1] for x in windows):raise ValueError()
+ out=[]
+ for start,end in sorted(windows):
+  if out and start<=out[-1][1]:out[-1][1]=max(out[-1][1],end)
+  else:out.append([start,end])
+ RETURN
+'''
+  for result_code in ('return tuple(out)','return [tuple(row) for row in out]'):
+   with self.subTest(result_code=result_code):
+    (w/'windows.py').write_text(source.replace('RETURN',result_code))
+    self.assertEqual(verify('repair-windows',w)['state'],'failed')
+ def test_correct_repair_may_print_debug_output(self):
+  w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('fixed and checked')
+  source='''def merge_windows(windows):
+ EMIT
+ if any(len(x)!=2 or any(type(n)!=int for n in x) or x[0]>=x[1] for x in windows):raise ValueError()
+ out=[]
+ for start,end in sorted(windows):
+  if out and start<=out[-1][1]:out[-1][1]=max(out[-1][1],end)
+  else:out.append([start,end])
+ return out
+'''
+  for emit in ("print('debug: merging windows')","__import__('sys').stdout.write('.')",
+               "print('.',end='')","print('debug',file=__import__('sys').stderr)"):
+   with self.subTest(emit=emit):
+    (w/'windows.py').write_text(source.replace('EMIT',emit))
+    self.assertEqual(verify('repair-windows',w)['state'],'passed')
  def test_repair_needs_input_immutability_and_type_validation(self):
   w=self.workspace('repair-windows');(w/'CHANGELOG.md').write_text('fixed')
   (w/'windows.py').write_text('''def merge_windows(windows):

@@ -1,5 +1,9 @@
 # Changelog & Working Notes
 
+## Unreleased — independent repair scoring
+
+The capability repair checker now compares raw function outputs, input preservation and exception observations in the parent process. Agent code printing an all-true verdict and exiting no longer passes. Output type metadata preserves the list contract across JSON serialization. Parse the probe's final JSON line so debug prints do not fail a correct function. This is a new checker-source cohort; existing run results remain unchanged, and this is still not an adversarial sandbox.
+
 ## Unreleased — terminal stream payloads
 
 Preserve content and tool calls attached to an Ollama terminal done frame before emitting the OpenAI finish frame. Previously these payloads were discarded, producing an empty successful response for some tool callers.
