@@ -14,6 +14,7 @@ from pathlib import Path
 from .inference_arbiter import encoded, required
 from .inference_identity import IdentityStore, LocalSourceRefused
 from .hermes_queue_source import CompactionSource, owner_scope
+from .hermes_queue_recovery import NATIVE_EMPTY_MARKER, native_empty_pair
 
 
 def intake_callback(path, scope, turn_id, keys, api_request_id=''):
@@ -38,6 +39,7 @@ class HeldSource:
     rows: tuple[int, ...]
     turn_id: str = ''
     api_request_id: str = ''
+    recovery_after: int | None = None
 
     def __post_init__(self):
         required(self.scope)
@@ -49,6 +51,10 @@ class HeldSource:
         if not isinstance(self.rows, tuple) or not self.rows or any(
                 type(row) is not int or row <= 0 for row in self.rows):
             raise ValueError('held source requires persisted positive row IDs')
+        if self.recovery_after is not None and (
+                type(self.recovery_after) is not int or not 0 < self.recovery_after <= len(self.rows)
+                or self.purpose != 'main' or not self.turn_id or not self.api_request_id):
+            raise ValueError('native recovery requires an exact foreground API boundary')
 
     @classmethod
     def capture(cls, profile_scope, session_id, purpose, messages, *, turn_id='', api_request_id=''):
@@ -56,25 +62,44 @@ class HeldSource:
             required(identifier)
         if not isinstance(messages, list):
             raise ValueError('held transcript must be a list')
-        rows = []
-        for message in messages:
+        rows, recovery_after, index = [], None, 0
+        while index < len(messages):
+            message = messages[index]
+            index += 1
             if not isinstance(message, dict):
                 raise ValueError('held transcript has an invalid message')
             if message.get('role') == 'system':
                 continue
             row = message.get('_row_id')
             if row is None:
+                if (purpose == 'main' and turn_id and api_request_id and recovery_after is None
+                        and native_empty_pair(messages, index - 1)):
+                    recovery_after = len(rows)
+                    index += 1
+                    continue
                 raise UnpersistedSource('held transcript contains an unpersisted message')
+            if message.get('_empty_recovery_synthetic'):
+                raise UnpersistedSource('native recovery cannot claim a persisted row ID')
             if type(row) is not int or row <= 0:
                 raise ValueError('held transcript contains an invalid persisted row ID')
             rows.append(row)
         if not rows:
             raise ValueError('held transcript has no persisted source rows')
         scope = 'hermes:' + hashlib.sha256(encoded([profile_scope, session_id]).encode()).hexdigest()
-        return cls(scope, purpose, tuple(rows), turn_id, api_request_id)
+        return cls(scope, purpose, tuple(rows), turn_id, api_request_id, recovery_after)
+
+    def call_boundary(self):
+        if self.recovery_after is None:
+            return 'rows:' + hashlib.sha256(encoded(self.rows).encode()).hexdigest()
+        parts = list(self.rows)
+        parts.insert(self.recovery_after, (*NATIVE_EMPTY_MARKER, self.rows[self.recovery_after - 1]))
+        # A native retry reuses its API identity; a later explicit API intention
+        # must not replay a cached empty response merely because no DB row grew.
+        return 'native-empty:' + hashlib.sha256(encoded(
+            [self.turn_id, self.api_request_id, parts]).encode()).hexdigest()
 
     def bind(self, path, request, *, job_turn=''):
-        boundary = 'rows:' + hashlib.sha256(encoded(self.rows).encode()).hexdigest()
+        boundary = self.call_boundary()
         store = IdentityStore(path)
         try:
             return store.bind_execution(self.scope, self.purpose, boundary, request, job_turn=job_turn)
@@ -93,7 +118,7 @@ class HeldSource:
             raise ValueError('conversation stints require an owning main source')
         model = required(request.get('model'))
         work = 'conversation-stint:' + hashlib.sha256(encoded([self.purpose, model]).encode()).hexdigest()
-        boundary = 'rows:' + hashlib.sha256(encoded(self.rows).encode()).hexdigest()
+        boundary = self.call_boundary()
         store = IdentityStore(path)
         try:
             keys = store.bind(self.scope, work, boundary, request, job_turn=job_turn)

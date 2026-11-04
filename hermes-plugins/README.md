@@ -20,6 +20,10 @@ path and matching native Hermes hook/provider interfaces. Configure credentials
 through the registered provider's own binding. Do not substitute another seat's
 identity or bypass the durable SDK with an anonymous custom transport.
 
+The narrowly qualified [native empty-response recovery](../ollama/NATIVE_EMPTY_RECOVERY.md)
+retains the request-only pair in source identity without persisting synthetic
+transcript rows. It is not a general allowance for unpersisted foreground input.
+
 ## Parent job opt-in
 
 The explicit owning profile's config.yaml can contain:
