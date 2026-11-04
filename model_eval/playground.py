@@ -1,6 +1,8 @@
 """Configured agent jobs, held-out checks, immutable comparison records.
 
 No physical allocator, queue transport, rail fork or automatic replacement job.
+Optional case-end grant return releases only the exact grants a passed case's own
+profile bound, through the supported release endpoint, before the next dispatch.
 """
 import fcntl
 import hashlib
@@ -9,8 +11,12 @@ import inspect
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from .core import SCHEMA,digest,write_json
 from . import tasks
@@ -24,7 +30,85 @@ def load_config(path):
     if not isinstance(cfg['command'],list) or any(not isinstance(x,str) for x in cfg['command']):raise ValueError('command must be argv, never shell text')
     if not cfg['model'].get('digest'):raise ValueError('model digest pin required')
     if cfg.get('execution_path') != 'native-service':raise ValueError('unsupported execution path')
+    if 'grant_return' in cfg:grant_return_config(cfg)
     return cfg
+
+class GrantReturnUnconfirmed(Exception):
+    """A passed case's grant could not be shown returned; later dispatch stops."""
+
+RETURN_ACK={'queued':'cancelled','granted':'released'}
+BINDING_FIELDS={'id':'grant_id','owner':'owner','client_key':'key','resource':'resource','model':'model'}
+
+def grant_return_config(cfg):
+    g=cfg['grant_return']
+    if not isinstance(g,dict) or set(g)!={'identity_store','gateway_url'}:raise ValueError('grant_return needs exactly identity_store and gateway_url')
+    store=Path(g['identity_store'])
+    if store.is_absolute() or '..' in store.parts or not store.parts:raise ValueError('grant_return identity_store must be relative to the case profile')
+    url=urllib.parse.urlsplit(g['gateway_url'])
+    if url.scheme not in ('http','https') or not url.netloc:raise ValueError('grant_return gateway_url must be an http(s) URL')
+    if not cfg.get('identity',{}).get('username'):raise ValueError('grant_return requires the requester username')
+    return g
+
+def case_grant_bindings(profile,store):
+    """Exact grants this case's own profile bound; no discovery outside it."""
+    path=Path(profile)/store
+    if not path.is_file() or path.is_symlink():raise GrantReturnUnconfirmed('case identity store missing')
+    db=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+    try:rows=db.execute('SELECT key,grant_id,owner,resource,model,lifetime FROM grant_binding ORDER BY rowid').fetchall()
+    except sqlite3.Error as error:raise GrantReturnUnconfirmed('case identity store has no grant binding ('+type(error).__name__+')')
+    finally:db.close()
+    if not rows:raise GrantReturnUnconfirmed('passed case bound no grant')
+    return [dict(zip(('key','grant_id','owner','resource','model','lifetime'),row)) for row in rows]
+
+def gateway(method,url,bearer):
+    request=urllib.request.Request(url,data=b'' if method=='POST' else None,method=method,headers={'Authorization':'Bearer '+bearer})
+    try:
+        with urllib.request.urlopen(request,timeout=30) as f:return json.load(f)
+    except urllib.error.HTTPError as error:
+        raise GrantReturnUnconfirmed(method+' grant refused (HTTP '+str(error.code)+')')
+    except (urllib.error.URLError,OSError,ValueError) as error:
+        # A lost reply is unknown, not a failure: the same id is retried on resume.
+        raise GrantReturnUnconfirmed(method+' grant reply unknown ('+type(error).__name__+')')
+
+def observed_grant(reply,binding,username):
+    if not isinstance(reply,dict):raise GrantReturnUnconfirmed('grant reply is not an object')
+    for field,key in BINDING_FIELDS.items():
+        if reply.get(field)!=binding[key]:raise GrantReturnUnconfirmed('grant '+field+' does not match the case binding')
+    if binding['owner']!=username:raise GrantReturnUnconfirmed('bound grant owner is not the requester')
+    return {k:reply.get(k) for k in ('id','owner','client_key','resource','model','state','release_requested','active_execution')}
+
+def return_case_grants(cfg,bearer,row,profile,save):
+    """Logical return of a passed case's exact idle grants; not proof of unloaded residency."""
+    g=grant_return_config(cfg);username=cfg['identity']['username'];base=g['gateway_url'].rstrip('/')+'/inference/grants/'
+    ret=row.get('grant_return')
+    if ret is None:
+        ret=row['grant_return']={'state':'intent','at':time.time(),'grants':[{'binding':b} for b in case_grant_bindings(profile,g['identity_store'])]}
+        save()  # durable intent and exact ids before any release request
+    ret['state']='intent';ret.pop('reason',None)
+    for item in ret['grants']:
+        if item.get('ack'):continue
+        b=item['binding'];url=base+urllib.parse.quote(b['grant_id'],safe='')
+        before=observed_grant(gateway('GET',url,bearer),b,username);item['before']=before
+        if before['state'] in RETURN_ACK.values() and not before['active_execution']:
+            item['ack']={**before,'observed':'terminal_without_new_request'};save();continue
+        if before['state'] not in RETURN_ACK:raise GrantReturnUnconfirmed('grant state '+str(before['state'])+' is not returnable')
+        if before['active_execution']:raise GrantReturnUnconfirmed('grant still has active work')
+        item['release_requested_at']=time.time();save()
+        after=observed_grant(gateway('POST',url+'/release',bearer),b,username)
+        if after['release_requested'] not in (1,True) or after['active_execution'] or after['state']!=RETURN_ACK[before['state']]:
+            item['reply']=after;save();raise GrantReturnUnconfirmed('release reply is not a completed return')
+        item['ack']={**after,'observed':'release_reply'};save()
+    ret['state']='returned';save()
+
+def settle_grant_return(cfg,bearer,state,directory,name,row):
+    """True when later dispatch may proceed. Unconfirmed returns stop the cohort."""
+    if 'grant_return' not in cfg or (row.get('grant_return') or {}).get('state')=='returned':return True
+    save=lambda:write_json(directory/'state.json',state)
+    try:
+        return_case_grants(cfg,bearer,row,directory/name/'profile',save);return True
+    except GrantReturnUnconfirmed as error:
+        ret=row.setdefault('grant_return',{'grants':[]});ret.update(state='unconfirmed',reason=str(error))
+        state['state']='grant_return_unconfirmed';save();return False
 
 
 def minimal_environment():
@@ -117,7 +201,10 @@ def run(cfg,directory,*,verified=None):
             if name not in TASKS:raise ValueError('unknown fixture')
             if name in state['tasks']:
                 row=state['tasks'][name]
-                if row['state']=='passed':continue
+                if row['state']=='passed':
+                    # An outstanding return intent is settled BEFORE skipping the passed case.
+                    if not settle_grant_return(cfg,bearer,state,directory,name,row):return state
+                    continue
                 # Even launch_intent may mean a running child. Never relaunch on uncertainty.
                 return state
             task=TASKS[name];root=directory/name;work=root/'workspace';profile=root/'profile'
@@ -154,6 +241,8 @@ def run(cfg,directory,*,verified=None):
             row['artifact_hashes']={str(p.relative_to(work)):hashlib.sha256(p.read_bytes()).hexdigest() for p in work.rglob('*') if p.is_file() and '__pycache__' not in p.parts and not p.is_symlink()}
             row['state']='passed' if rc==0 and result['state']=='passed' else 'failed'
             if row['state']=='failed':
+                # Failed or interrupted work keeps its grant: retained debt, never a return.
                 state['state']='failed';write_json(directory/'state.json',state);return state
             write_json(directory/'state.json',state)
+            if not settle_grant_return(cfg,bearer,state,directory,name,row):return state
         state['state']='complete';write_json(directory/'state.json',state);return state
