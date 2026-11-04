@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import shutil
+import socket
 
 import httpx
 
@@ -11,6 +12,10 @@ from .test_inference_sdk import QueueFixture
 
 
 def test_native_nudge_survives_a_later_real_tool_round(tmp_path, monkeypatch, queued_profile):
+    def no_network(*args, **kwargs):
+        raise AssertionError('Native fixture must use its fake HTTP service')
+    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    monkeypatch.setattr(socket.socket, 'connect_ex', no_network)
     from hermes_state import SessionDB
     from run_agent import AIAgent
     from hermes_cli import plugins
