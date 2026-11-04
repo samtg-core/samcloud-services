@@ -83,7 +83,8 @@ for i,bad in enumerate(json.loads(sys.argv[2])):
 print(json.dumps(out))
 '''
             p=_run([sys.executable,'-c',probe,json.dumps([(name,value) for name,value,_ in cases]),json.dumps(invalid)],workspace)
-            observations=json.loads(p.stdout) if p.returncode==0 else {}
+            lines=p.stdout.splitlines()
+            observations=json.loads(lines[-1]) if p.returncode==0 and lines else {}
             if not isinstance(observations,dict):
                 observations={}
             for name,value,expected in cases:
