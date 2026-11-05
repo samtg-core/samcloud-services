@@ -146,6 +146,14 @@ class Arbiter(JobScheduling):
                 reason TEXT NOT NULL,
                 since REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS dependency_continuations (
+                execution_id TEXT PRIMARY KEY REFERENCES executions(id),
+                parent_grant_id TEXT NOT NULL REFERENCES grants(id),
+                parent_queue_order INTEGER NOT NULL,
+                phase TEXT NOT NULL CHECK(phase IN ('pending','active','returned','closed'))
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_parent_continuation
+                ON dependency_continuations(parent_grant_id) WHERE phase!='closed';
             CREATE INDEX IF NOT EXISTS lifecycle_execution
                 ON execution_lifecycle(execution_id,seq);
             CREATE TRIGGER IF NOT EXISTS lifecycle_insert AFTER INSERT ON executions
@@ -260,9 +268,88 @@ class Arbiter(JobScheduling):
         """Yield scheduling preference, not residency, saved results or executions."""
         if grant['active_execution'] or grant['state'] != 'granted':
             raise Conflict('cannot hand off running or uncertain work')
+        self._close_parent_continuations(grant['id'])
         self.db.execute("""UPDATE grants SET state='queued',queue_order=?,
             stint_started=NULL,idle_since=NULL,yield_requested=0,handoff_reason=?,updated=?
             WHERE id=?""", (self._next_order(), reason, now, grant['id']))
+
+    def _close_parent_continuations(self, parent_id):
+        self.db.execute("UPDATE dependency_continuations SET phase='closed' "
+                        "WHERE parent_grant_id=? AND phase!='closed'", (parent_id,))
+
+    def _dispatch_dependency(self, parent, permitted_model, now):
+        """Transfer an incumbent's scheduling position, never its backend claim.
+
+        Called only after the parent has no running/uncertain execution. The
+        immutable saved execution owns the relationship across reconnects.
+        """
+        link = self.db.execute("SELECT h.*,e.grant_id FROM dependency_continuations h "
+            "JOIN executions e ON e.id=h.execution_id WHERE h.parent_grant_id=? "
+            "AND h.phase='pending' AND e.state='queued'", (parent['id'],)).fetchone()
+        if link is None:
+            return None
+        child = self.db.execute('SELECT * FROM grants WHERE id=?', (link['grant_id'],)).fetchone()
+        if child['state'] != 'queued' or child['release_requested']:
+            return None
+        permission = True if permitted_model is None else permitted_model(child['resource'], child['model'])
+        if permission is not True:
+            if permission is False:
+                self._close_parent_continuations(parent['id'])
+                return None
+            return False
+        self.db.execute("UPDATE grants SET state='queued',yield_requested=0,idle_since=NULL,"
+                        "handoff_reason='dependency_wait',updated=? WHERE id=?", (now, parent['id']))
+        self.db.execute('UPDATE grants SET queue_order=? WHERE id=?',
+                        (link['parent_queue_order'], child['id']))
+        self.db.execute("UPDATE dependency_continuations SET phase='active' WHERE execution_id=?",
+                        (link['execution_id'],))
+        return self.db.execute('SELECT * FROM grants WHERE id=?', (child['id'],)).fetchone()
+
+    def _return_dependency(self, execution_id, now):
+        """Hand an ended execution's position back before the next client POST."""
+        link = self.db.execute('SELECT * FROM dependency_continuations WHERE execution_id=?',
+                               (execution_id,)).fetchone()
+        if link is None or link['phase'] not in ('pending', 'active'):
+            return
+        parent = self.db.execute('SELECT * FROM grants WHERE id=?', (link['parent_grant_id'],)).fetchone()
+        if parent['release_requested'] or parent['state'] not in ('queued', 'granted'):
+            self._close_parent_continuations(parent['id'])
+            return
+        if link['phase'] == 'pending':
+            # A cancelled, never-dispatched child never displaced the parent.
+            if parent['state'] == 'granted':
+                self.db.execute('UPDATE grants SET yield_requested=0 WHERE id=?', (parent['id'],))
+            self._close_parent_continuations(parent['id'])
+            return
+        if parent['state'] != 'queued' or parent['handoff_reason'] != 'dependency_wait':
+            self._close_parent_continuations(parent['id'])
+            return
+        if self.db.execute("SELECT 1 FROM grants WHERE resource=? "
+                           "AND state IN ('granted','uncertain')", (parent['resource'],)).fetchone():
+            # Capacity may have allowed unrelated work while a pre-provider
+            # child was deferred. Cancelling that child cannot preempt it.
+            self._close_parent_continuations(parent['id'])
+            return
+        self.db.execute("UPDATE grants SET state='granted',queue_order=?,yield_requested=0,"
+            "handoff_reason='dependency_return',idle_since=?,updated=? WHERE id=?",
+            (link['parent_queue_order'], now, now, parent['id']))
+        self.db.execute("UPDATE dependency_continuations SET phase='returned' WHERE execution_id=?",
+                        (execution_id,))
+
+    def _restore_ended_dependencies(self, resource, now):
+        # A separately audited recovery may have terminalized the child while
+        # this supervisor was fenced. Terminal state AND an ended grant are
+        # required; an uncertain child never reaches this path.
+        links = self.db.execute("SELECT h.execution_id FROM dependency_continuations h "
+            "JOIN executions e ON e.id=h.execution_id JOIN grants g ON g.id=e.grant_id "
+            "WHERE h.phase='active' AND g.resource=? AND g.active_execution IS NULL "
+            "AND g.state IN ('released','cancelled') "
+            "AND e.state IN ('complete','failed','cancelled')", (resource,)).fetchall()
+        for link in links:
+            if self.db.execute("SELECT 1 FROM grants WHERE resource=? "
+                               "AND state IN ('granted','uncertain')", (resource,)).fetchone():
+                break
+            self._return_dependency(link['execution_id'], now)
 
     def next_handoff_at(self, resource):
         """Advisory scheduler wake-up; dispatch rechecks authority transactionally."""
@@ -276,9 +363,12 @@ class Arbiter(JobScheduling):
         if (row is None or row['active_execution'] or row['release_requested'] or
                 row['lifetime'] != 'work_session' or self._ready_grant(resource, row['id']) is None):
             return None
+        returning = self.db.execute("SELECT 1 FROM dependency_continuations "
+            "WHERE parent_grant_id=? AND phase='returned'", (row['id'],)).fetchone()
         bounds = [stamp + interval for stamp, interval in (
             (row['idle_since'], policy.idle_grace_seconds),
-            (row['stint_started'], policy.fairness_seconds)) if stamp is not None and interval is not None]
+            (row['stint_started'], None if returning else policy.fairness_seconds))
+            if stamp is not None and interval is not None]
         return min(bounds) if bounds else None
 
     def submit(self, owner, client_key, resource, model, lifetime='work_session'):
@@ -436,6 +526,15 @@ class Arbiter(JobScheduling):
             # saved call returns above and cannot yield a later foreground stint.
             for parent in parents:
                 if parent['state'] == 'granted' and not parent['release_requested']:
+                    if grant['lifetime'] == 'execution':
+                        # One admitted parent position can fund one dependency.
+                        # Concurrent additional dependencies retain ordinary FIFO.
+                        self.db.execute("UPDATE dependency_continuations SET phase='closed' "
+                            "WHERE parent_grant_id=? AND phase='returned'", (parent['id'],))
+                        if self.db.execute("SELECT 1 FROM dependency_continuations "
+                                "WHERE parent_grant_id=? AND phase!='closed'", (parent['id'],)).fetchone() is None:
+                            self.db.execute('INSERT INTO dependency_continuations VALUES(?,?,?,?)',
+                                (execution_id, parent['id'], parent['queue_order'], 'pending'))
                     self.db.execute('UPDATE grants SET yield_requested=1 WHERE id=?', (parent['id'],))
             return self.execution(execution_id, owner)
 
@@ -454,12 +553,20 @@ class Arbiter(JobScheduling):
             if owned:
                 return item
             now = time.time()
+            self._restore_ended_dependencies(resource, now)
             grant = self.db.execute("SELECT * FROM grants WHERE resource=? "
                                     "AND state IN ('granted','uncertain')", (resource,)).fetchone()
             if grant is not None and (grant['state'] == 'uncertain' or
                                       grant['active_execution'] or grant['release_requested']):
                 return None
+            dependency_selected = False
             if grant is not None:
+                dependent = self._dispatch_dependency(grant, permitted_model, now)
+                if dependent is False:
+                    return None
+                if dependent is not None:
+                    grant, dependency_selected = dependent, True
+            if grant is not None and not dependency_selected:
                 reason = 'explicit_yield' if grant['yield_requested'] else None
                 model_permission = (True if permitted_model is None else
                                     permitted_model(resource,grant['model']))
@@ -474,7 +581,9 @@ class Arbiter(JobScheduling):
                     if (policy.idle_grace_seconds is not None and grant['idle_since'] is not None
                             and now - grant['idle_since'] >= policy.idle_grace_seconds):
                         reason = 'idle_grace'
-                    elif (policy.fairness_seconds is not None and grant['stint_started'] is not None
+                    elif (not self.db.execute("SELECT 1 FROM dependency_continuations "
+                            "WHERE parent_grant_id=? AND phase='returned'", (grant['id'],)).fetchone()
+                            and policy.fairness_seconds is not None and grant['stint_started'] is not None
                             and now - grant['stint_started'] >= policy.fairness_seconds):
                         reason = 'fair_share'
                 if reason is not None:
@@ -501,6 +610,9 @@ class Arbiter(JobScheduling):
             stint_started=?,idle_since=NULL WHERE id=?""",
                         (call['id'], now, started if started is not None else now, grant['id']))
         self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
+        # The shared dispatch helper also serves job-aware calls; preserve it.
+        self.db.execute("UPDATE dependency_continuations SET phase='closed' "
+                        "WHERE parent_grant_id=? AND phase='returned'", (grant['id'],))
         return {'grant': dict(self._owned(grant['id'], grant['owner'])),
                 'execution': self.execution(call['id'], grant['owner'])}
 
@@ -563,6 +675,7 @@ class Arbiter(JobScheduling):
         """Release idle/queued grants; active work drains without admitting another."""
         with self.transaction():
             row = self._owned(grant_id, owner)
+            self._close_parent_continuations(grant_id)
             if row['state'] == 'queued':
                 state = 'cancelled'
             elif row['active_execution']:
@@ -579,6 +692,10 @@ class Arbiter(JobScheduling):
                             "WHERE grant_id=? AND state='queued'", (time.time(), grant_id))
             for job in jobs:
                 self._advance_job(job['job_id'])
+            for call in self.db.execute("SELECT id FROM executions WHERE grant_id=? AND state='cancelled'",
+                                        (grant_id,)).fetchall():
+                self._return_dependency(call['id'], time.time())
+
             return dict(self._owned(grant_id, owner))
 
     def yield_by_key(self, owner, grant_key, expected_call_key):
@@ -613,6 +730,7 @@ class Arbiter(JobScheduling):
     def _request_yield(self, row):
         if row['lifetime'] != 'work_session':
             raise Conflict('only work-session grants can yield')
+        self._close_parent_continuations(row['id'])
         if row['state'] in ('released', 'cancelled', 'queued') or row['release_requested']:
             return dict(row)
         if row['active_execution'] or row['state'] == 'uncertain':
@@ -647,6 +765,8 @@ class Arbiter(JobScheduling):
                             ('released' if released else 'granted', now,
                              None if released else now, grant['id']))
             self._advance_call_job(row)
+            self._return_dependency(execution_id, now)
+
 
     def defer_capacity(self, execution_id, reason):
         """Put the SAME logical request back in queue, atomically blocking retry.
@@ -666,14 +786,17 @@ class Arbiter(JobScheduling):
                                     (execution_id,)).fetchone()):
                 raise Conflict('only pre-provider, output-free owned work can wait for capacity')
             now = time.time()
+            self._close_parent_continuations(grant['id'])
             self.db.execute('INSERT INTO resource_waits VALUES(?,?,?) ON CONFLICT(resource) '
                 'DO UPDATE SET reason=excluded.reason,since=excluded.since',
                 (grant['resource'],reason,now))
             self.db.execute("UPDATE executions SET state='queued',wait_reason=?,updated=? WHERE id=?",
                             (reason,now,execution_id))
+            link = self.db.execute("SELECT parent_queue_order FROM dependency_continuations "
+                                   "WHERE execution_id=? AND phase='active'", (execution_id,)).fetchone()
             self.db.execute("UPDATE grants SET state='queued',active_execution=NULL,updated=?,"
                 'queue_order=?,stint_started=NULL,idle_since=NULL WHERE id=?',
-                (now,self._next_order(),grant['id']))
+                (now,link['parent_queue_order'] if link else self._next_order(),grant['id']))
 
     def capacity_available(self, resource):
         """Trusted fresh permission only; never exposed as an owner API write."""
