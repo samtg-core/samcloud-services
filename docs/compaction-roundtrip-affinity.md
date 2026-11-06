@@ -89,3 +89,13 @@ normal journal ownership. Existing historical dependency calls are not retroacti
 relinked. No live queue, process, model, physical claim or profile is changed by
 these tests. Rolling back to code that ignores the table would lose continuation
 semantics; do not do so with an open continuation without an explicit plan.
+
+## Capacity-return extension
+
+The additive follow-up preserves returned queue order and the original stint clock
+across physical capacity waits, without overriding model permission or preempting
+admitted work. An available other model can proceed. Existing idle grace bounds
+an empty handback gap; explicit yield drops the saved order. The first resumed
+call consumes the credit. Seven additional offline cases cover this behavior.
+This source is not installed on Slice; its job-aware dispatch/advancement helpers
+remain intact.
