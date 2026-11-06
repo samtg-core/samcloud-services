@@ -1,7 +1,7 @@
 # Keep an incumbent's queue position through compaction
 
-An accepted auxiliary request with `yield_grant_keys` currently yields its parent
-as ordinary FIFO work. A competitor can run before the summary, and again before
+Before this change, an accepted auxiliary request with `yield_grant_keys` yielded
+its parent as ordinary FIFO work. A competitor can run before the summary, and again before
 the parent submits its next call. Compaction therefore adds two queue waits to
 one ongoing conversation.
 
@@ -11,11 +11,36 @@ before its next POST, so a short handback gap does not lose its position. This
 uses the existing authenticated dependency keys; no rail, routing or prompt
 change is involved.
 
+## Installed state (read-only recheck 6 November 2026, 02:10 UTC)
+
+Slice serves the pinned overlay `7da881b`, arbiter SHA256
+`631cfbaf8147d534e7075f7ac124a82e2ffcada8688bbc85c125d89304ff2373`, from
+`~/.local/share/codex-reviews/compaction-return-7da881b/release`.
+Gateway PID33439, born6November12:12:40local, has that cwd and answers health200.
+The launcher hash is `7aa1c59103b09a9b200248967ca2188deace28f3b672dda834f55e2b77137c81`;
+its fence marker is absent. Original backend59832 was not restarted. All114Python
+hashes matched the candidate at cutover; the latest check rechecked the arbiter,
+launcher, process generation, cwd, fence absence and health. The separate job-aware
+branch is not installed on Slice; its source port is `d5b60c4`.
+
+The exact accepted foreground call survived the gateway switch with its ID,
+key, creation time and request hash unchanged. The initial natural compaction
+proved entry and atomic return, then exposed the capacity-return gap corrected
+by `7da881b`. A future natural round trip must still qualify the complete revised
+behavior; installation and offline tests are not that proof. Historical links
+were not retrospectively repaired. Receipts are on Samcloud doc551 and under the
+host overlay's `cutover/` directory. Completed operator actions must not be replayed.
+
+Guarded qualification:132 checks against pinned source and a copy of the actual
+release,71 targeted checks on Slice's Python3.14.7,239 on the separate job-aware
+lineage; zero IP attempts in the guarded runs. These checks create no live claim
+or model request.
+
 ## Exact source lineage
 
 Base commit: `8d977e7`. Its `ollama/inference_arbiter.py` has SHA256
 `510efff7a795cecf73367b764f64def3696780663bd77ef19be071cc92dcac52`,
-matching the inspected Slice runtime. This is a pinned-source patch, not an
+matching the pre-overlay Slice runtime. This is a pinned-source patch, not an
 instruction to replace the runtime with this entire historical checkout. Newer
 job-aware branches need an additive port preserving their job advancement and
 qualified `StintPolicy` opening behavior.
@@ -77,8 +102,8 @@ python -m unittest ollama.test_compaction_continuity ollama.test_inference_stint
   ollama.test_inference_events ollama.test_inference_api ollama.test_inference_recovery
 ```
 
-The initial 92e08f0 overlay is deployed on Slice. The capacity-return extension
-below is source-only and has not been activated. A further rollout must use a pinned overlay on the actual
+The pinned source at `7da881b` is deployed as recorded above. A later rollout
+must use a pinned overlay on the actual
 release, preserve existing saved executions, and add the table under the service's
 normal journal ownership. Existing historical dependency calls are not retroactively
 relinked. No live queue, process, model, physical claim or profile is changed by
