@@ -251,10 +251,21 @@ class Arbiter:
         """Yield scheduling preference, not residency, saved results or executions."""
         if grant['active_execution'] or grant['state'] != 'granted':
             raise Conflict('cannot hand off running or uncertain work')
+        if (reason == 'capacity_changed' and not grant['yield_requested']
+                and self._has_return_credit(grant['id'])):
+            # Physical admission may disappear during handback. Let available
+            # work proceed without spending the parent's logical queue place.
+            self.db.execute("UPDATE grants SET state='queued',yield_requested=0,"
+                "handoff_reason=?,updated=? WHERE id=?", (reason, now, grant['id']))
+            return
         self._close_parent_continuations(grant['id'])
         self.db.execute("""UPDATE grants SET state='queued',queue_order=?,
             stint_started=NULL,idle_since=NULL,yield_requested=0,handoff_reason=?,updated=?
             WHERE id=?""", (self._next_order(), reason, now, grant['id']))
+
+    def _has_return_credit(self, parent_id):
+        return self.db.execute("SELECT 1 FROM dependency_continuations "
+            "WHERE parent_grant_id=? AND phase='returned'", (parent_id,)).fetchone() is not None
 
     def _close_parent_continuations(self, parent_id):
         self.db.execute("UPDATE dependency_continuations SET phase='closed' "
@@ -488,8 +499,17 @@ class Arbiter:
             if self.stint_policy is not None and grant['state'] == 'queued':
                 # Empty grants don't bank a place while their tools run. A
                 # returning conversation joins when it actually has ready work.
-                self.db.execute('UPDATE grants SET queue_order=? WHERE id=?',
-                                (self._next_order(), grant_id))
+                returning = self._has_return_credit(grant_id)
+                grace = self.stint_policy.idle_grace_seconds
+                if (returning and grace is not None and grant['idle_since'] is not None
+                        and now - grant['idle_since'] >= grace):
+                    # A capacity wait cannot bank an unused continuation forever.
+                    # Once a call is accepted in time, its admission wait is unbounded.
+                    self._close_parent_continuations(grant_id)
+                    returning = False
+                if not returning:
+                    self.db.execute('UPDATE grants SET queue_order=? WHERE id=?',
+                                    (self._next_order(), grant_id))
             # Commit dependency intent and parent yield together. Replaying a
             # saved call returns above and cannot yield a later foreground stint.
             for parent in parents:
@@ -566,7 +586,8 @@ class Arbiter:
                                    (grant['id'],)).fetchone()
             if call is None:
                 return None
-            started = grant['stint_started'] if grant['state'] == 'granted' else now
+            started = (grant['stint_started'] if grant['state'] == 'granted'
+                       or self._has_return_credit(grant['id']) else now)
             self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,
                 stint_started=?,idle_since=NULL WHERE id=?""",
                             (call['id'], now, started if started is not None else now, grant['id']))
@@ -687,7 +708,13 @@ class Arbiter:
     def _request_yield(self, row):
         if row['lifetime'] != 'work_session':
             raise Conflict('only work-session grants can yield')
+        returning = self._has_return_credit(row['id'])
         self._close_parent_continuations(row['id'])
+        if returning and row['state'] == 'queued' and not row['release_requested']:
+            self.db.execute("UPDATE grants SET queue_order=?,stint_started=NULL,"
+                "idle_since=NULL,handoff_reason='explicit_yield',updated=? WHERE id=?",
+                (self._next_order(), time.time(), row['id']))
+            return dict(self._owned(row['id'], row['owner']))
         if row['state'] in ('released', 'cancelled', 'queued') or row['release_requested']:
             return dict(row)
         if row['active_execution'] or row['state'] == 'uncertain':

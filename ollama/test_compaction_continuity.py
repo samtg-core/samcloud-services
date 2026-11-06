@@ -289,6 +289,99 @@ class CompactionContinuity(unittest.TestCase):
         _, summary = self.summary(p)
         self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], summary['id'])
 
+    def test_return_keeps_order_through_physical_capacity_loss(self):
+        p = self.initial_parent()
+        _, summary = self.summary(p)
+        self.a.dispatch_next('gpu')
+        _, other = self.competitor()
+        self.a.finish(summary['id'], {})
+        before = self.a.get(p['id'], 'hs')
+        resume = self.a.enqueue(p['id'], 'hs', 'resume', {})
+        self.assertIsNone(self.a.dispatch_next('gpu', permitted_model=lambda *args: False))
+        waiting = self.a.get(p['id'], 'hs')
+        self.assertEqual(waiting['queue_order'], before['queue_order'])
+        self.assertEqual(waiting['stint_started'], before['stint_started'])
+        self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], resume['id'])
+
+    def test_return_gap_survives_capacity_loss_before_parent_post(self):
+        p = self.initial_parent()
+        _, summary = self.summary(p)
+        self.a.dispatch_next('gpu')
+        self.competitor()
+        self.a.finish(summary['id'], {})
+        before = self.a.get(p['id'], 'hs')
+        self.assertIsNone(self.a.dispatch_next('gpu', permitted_model=lambda *args: False))
+        resume = self.a.enqueue(p['id'], 'hs', 'resume', {})
+        self.assertEqual(self.a.get(p['id'], 'hs')['queue_order'], before['queue_order'])
+        self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], resume['id'])
+
+    def test_capacity_wait_can_run_available_other_model_without_preemption(self):
+        p = self.initial_parent()
+        _, summary = self.summary(p)
+        self.a.dispatch_next('gpu')
+        other = self.a.submit('producer', 'other-turn', 'gpu', 'other-model', 'execution')
+        other_call = self.a.enqueue(other['id'], 'producer', 'other-call', {})
+        self.a.finish(summary['id'], {})
+        resume = self.a.enqueue(p['id'], 'hs', 'resume', {})
+        self.assertEqual(self.a.dispatch_next('gpu', permitted_model=lambda r,m: m == 'other-model')['execution']['id'], other_call['id'])
+        self.assertIsNone(self.a.dispatch_next('gpu'))
+        self.a.finish(other_call['id'], {})
+        self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], resume['id'])
+
+    def test_capacity_gap_without_ready_call_does_not_extend_idle_grace(self):
+        now = [1000.0]
+        with patch.object(arbiter.time, 'time', side_effect=lambda: now[0]):
+            self.a.stint_policy = arbiter.StintPolicy(idle_grace_seconds=10)
+            p = self.initial_parent()
+            _, summary = self.summary(p)
+            self.a.dispatch_next('gpu')
+            _, other = self.competitor()
+            self.a.finish(summary['id'], {})
+            self.a.dispatch_next('gpu', permitted_model=lambda *args: False)
+            now[0] += 11
+            self.a.enqueue(p['id'], 'hs', 'late-resume', {})
+            self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], other['id'])
+
+    def test_ready_return_wait_does_not_reset_fairness_clock(self):
+        now = [1000.0]
+        with patch.object(arbiter.time, 'time', side_effect=lambda: now[0]):
+            self.a.stint_policy = arbiter.StintPolicy(fairness_seconds=10)
+            p = self.initial_parent()
+            _, summary = self.summary(p)
+            self.a.dispatch_next('gpu')
+            _, other = self.competitor()
+            self.a.finish(summary['id'], {})
+            resume = self.a.enqueue(p['id'], 'hs', 'resume', {})
+            self.a.dispatch_next('gpu', permitted_model=lambda *args: False)
+            now[0] += 100
+            self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], resume['id'])
+            self.a.finish(resume['id'], {})
+            self.a.enqueue(p['id'], 'hs', 'after-tool', {})
+            self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], other['id'])
+
+    def test_capacity_wait_return_survives_reopen(self):
+        p = self.initial_parent()
+        _, summary = self.summary(p)
+        self.a.dispatch_next('gpu')
+        self.competitor()
+        self.a.finish(summary['id'], {})
+        self.a.dispatch_next('gpu', permitted_model=lambda *args: False)
+        self.a.close()
+        self.a = arbiter.Arbiter(self.path, stint_policy=arbiter.StintPolicy())
+        resume = self.a.enqueue(p['id'], 'hs', 'resume', {})
+        self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], resume['id'])
+
+    def test_explicit_yield_waives_capacity_wait_return_position(self):
+        p = self.initial_parent()
+        _, summary = self.summary(p)
+        self.a.dispatch_next('gpu')
+        _, other = self.competitor()
+        self.a.finish(summary['id'], {})
+        self.a.enqueue(p['id'], 'hs', 'resume', {})
+        self.a.dispatch_next('gpu', permitted_model=lambda *args: False)
+        self.a.request_yield(p['id'], 'hs')
+        self.assertEqual(self.a.dispatch_next('gpu')['execution']['id'], other['id'])
+
 
 if __name__ == "__main__":
     unittest.main()

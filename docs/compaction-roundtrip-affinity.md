@@ -32,7 +32,7 @@ qualified `StintPolicy` opening behavior.
 3. **returned**: after terminal child completion and release, restore the parent
    as granted/idle in the same transaction. This survives a journal reopen.
 4. **closed**: consume the credit on the first resumed parent dispatch, or waive
-   it on explicit yield, release or a normal capacity/idle handoff.
+   it on explicit yield, release or an expired unused idle return.
 
 The parent's original stint clock is retained. One resumed call is protected
 from an already-elapsed fairness boundary; subsequent calls use the existing
@@ -64,7 +64,7 @@ repeated wakeups on an expired deadline.
 
 The four original offline regressions against the pinned runtime give three
 assertion failures (entry, return gap, resumed call) and one passing ordinary
-voluntary-yield control. The candidate includes 23 targeted cases covering those
+voluntary-yield control. The candidate includes 30 targeted cases covering those
 paths plus restart, two journal connections, uncertainty, cancellation, release,
 replay, capacity deferral, migration, terminal-recovery projection and fairness.
 
@@ -77,9 +77,32 @@ python -m unittest ollama.test_compaction_continuity ollama.test_inference_stint
   ollama.test_inference_events ollama.test_inference_api ollama.test_inference_recovery
 ```
 
-This candidate is not deployed. Rollout must use a pinned overlay on the actual
+The initial 92e08f0 overlay is deployed on Slice. The capacity-return extension
+below is source-only and has not been activated. A further rollout must use a pinned overlay on the actual
 release, preserve existing saved executions, and add the table under the service's
 normal journal ownership. Existing historical dependency calls are not retroactively
 relinked. No live queue, process, model, physical claim or profile is changed by
 these tests. Rolling back to code that ignores the table would lose continuation
 semantics; do not do so with an open continuation without an explicit plan.
+
+## Physical capacity loss during return
+
+The first live natural return restored the parent correctly, then a registry
+handoff made its model unavailable before the resumed call ran. The ordinary
+capacity handoff requeued it at a new order and closed its return credit.
+
+The additive correction retains the saved queue order, original stint clock and
+return credit when physical capacity is unavailable. It leaves the parent queued,
+so available work on another model may run. Nothing overrides model permission,
+preempts admitted work or retains a physical lease. The first resumed call spends
+the credit; normal fairness follows using the original stint clock.
+
+When capacity disappears before the next parent POST, the existing idle grace
+still bounds that empty return gap. A call accepted within grace can wait for
+physical admission without a deadline. Explicit yield while queued drops the
+saved order as well as the credit. Reopen preserves the same behavior.
+
+Seven additional regressions cover ready-call and pre-POST capacity loss,
+available other-model work without preemption, expired unused grace, original
+fairness accounting, reopen and explicit yield. On the initial overlay the three
+order/fairness regressions fail; on the extension all thirty cases pass.
