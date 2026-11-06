@@ -1,7 +1,7 @@
 # Keep an incumbent's queue position through compaction
 
-An accepted auxiliary request with `yield_grant_keys` currently yields its parent
-as ordinary FIFO work. A competitor can run before the summary, and again before
+Before this change, an accepted auxiliary request with `yield_grant_keys` yielded
+its parent as ordinary FIFO work. A competitor can run before the summary, and again before
 the parent submits its next call. Compaction therefore adds two queue waits to
 one ongoing conversation.
 
@@ -11,17 +11,42 @@ before its next POST, so a short handback gap does not lose its position. This
 uses the existing authenticated dependency keys; no rail, routing or prompt
 change is involved.
 
+## Installed state (read-only recheck 6 November 2026, 02:10 UTC)
+
+Slice serves the pinned overlay `7da881b`, arbiter SHA256
+`631cfbaf8147d534e7075f7ac124a82e2ffcada8688bbc85c125d89304ff2373`, from
+`~/.local/share/codex-reviews/compaction-return-7da881b/release`.
+Gateway PID33439, born6November12:12:40local, has that cwd and answers health200.
+The launcher hash is `7aa1c59103b09a9b200248967ca2188deace28f3b672dda834f55e2b77137c81`;
+its fence marker is absent. Original backend59832 was not restarted. All114Python
+hashes matched the candidate at cutover; the latest check rechecked the arbiter,
+launcher, process generation, cwd, fence absence and health. The separate job-aware
+branch is not installed on Slice; its source port is `d5b60c4`.
+
+The exact accepted foreground call survived the gateway switch with its ID,
+key, creation time and request hash unchanged. The initial natural compaction
+proved entry and atomic return, then exposed the capacity-return gap corrected
+by `7da881b`. A future natural round trip must still qualify the complete revised
+behavior; installation and offline tests are not that proof. Historical links
+were not retrospectively repaired. Receipts are on Samcloud doc551 and under the
+host overlay's `cutover/` directory. Completed operator actions must not be replayed.
+
+Guarded qualification:132 checks against pinned source and a copy of the actual
+release,71 targeted checks on Slice's Python3.14.7,239 on the separate job-aware
+lineage; zero IP attempts in the guarded runs. These checks create no live claim
+or model request.
+
 ## Exact source lineage
 
 This branch is the additive job-aware port on `4ee1356`. It preserves
 `_own_call_job`, `_start_queued_call`, `_advance_call_job`, cancellation job
 advancement and qualified journal opening. The inherited dependency fix is
-`92e08f0` on the pinned Slice lineage described below. This branch is not
+`92e08f0` plus capacity-return follow-up `7da881b` on the pinned lineage below. This branch is not
 the module selected for the installed Slice overlay.
 
 Base commit: `8d977e7`. Its `ollama/inference_arbiter.py` has SHA256
 `510efff7a795cecf73367b764f64def3696780663bd77ef19be071cc92dcac52`,
-matching the inspected Slice runtime. This is a pinned-source patch, not an
+matching the pre-overlay Slice runtime. This is a pinned-source patch, not an
 instruction to replace the runtime with this entire historical checkout. Newer
 job-aware branches need an additive port preserving their job advancement and
 qualified `StintPolicy` opening behavior.
@@ -38,7 +63,7 @@ qualified `StintPolicy` opening behavior.
 3. **returned**: after terminal child completion and release, restore the parent
    as granted/idle in the same transaction. This survives a journal reopen.
 4. **closed**: consume the credit on the first resumed parent dispatch, or waive
-   it on explicit yield, release or a normal capacity/idle handoff.
+   it on explicit yield, release or an expired unused idle return.
 
 The parent's original stint clock is retained. One resumed call is protected
 from an already-elapsed fairness boundary; subsequent calls use the existing
@@ -70,7 +95,7 @@ repeated wakeups on an expired deadline.
 
 The four original offline regressions against the pinned runtime give three
 assertion failures (entry, return gap, resumed call) and one passing ordinary
-voluntary-yield control. The candidate includes 23 targeted cases covering those
+voluntary-yield control. The candidate includes 30 targeted cases covering those
 paths plus restart, two journal connections, uncertainty, cancellation, release,
 replay, capacity deferral, migration, terminal-recovery projection and fairness.
 
@@ -83,7 +108,7 @@ python -m unittest ollama.test_compaction_continuity ollama.test_inference_stint
   ollama.test_inference_events ollama.test_inference_api ollama.test_inference_recovery
 ```
 
-This candidate is not deployed. Rollout must use a pinned overlay on the actual
+This job-aware candidate is not deployed. A later rollout must use a pinned overlay on the actual
 release, preserve existing saved executions, and add the table under the service's
 normal journal ownership. Existing historical dependency calls are not retroactively
 relinked. No live queue, process, model, physical claim or profile is changed by
