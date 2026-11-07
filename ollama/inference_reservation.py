@@ -252,7 +252,11 @@ class InitialReservations:
             raise ValueError('exact configured allocation and positive size/TTL required')
         with self._owned() as db:
             row = db.execute('SELECT * FROM initial_reservations WHERE model=?', (model,)).fetchone()
-            if row is not None:
+            # Refused or positively retired allocations already permit a new
+            # intent. Their former dimensions must not pin later qualified
+            # budgets forever; unfinished ownership still requires an exact
+            # dimension match and its existing reconciliation path.
+            if row is not None and row['state'] not in ('refused', 'retired'):
                 if (row['resource'], row['memory_mb'], row['ttl_seconds']) != (
                         resource, memory_mb, ttl_seconds):
                     raise Conflict('reservation dimensions changed; reconcile saved allocation')
@@ -261,10 +265,9 @@ class InitialReservations:
                     if consume:
                         db.execute("UPDATE initial_reservations SET state='handed_off' WHERE model=?", (model,))
                     return lease
-                if row['state'] not in ('refused', 'retired'):
-                    # Unknown and already handed-off receipts need recovery.
-                    # Never guess which identity-wide lease belonged to this call.
-                    raise Conflict('initial reservation requires exact lease reconciliation')
+                # Unknown and already handed-off receipts need recovery.
+                # Never guess which identity-wide lease belonged to this call.
+                raise Conflict('initial reservation requires exact lease reconciliation')
             intent = uuid.uuid4().hex
             db.execute('INSERT OR REPLACE INTO initial_reservations VALUES(?,?,?,?,?,?,NULL,NULL)',
                        (model, resource, memory_mb, ttl_seconds, intent, 'unknown'))
