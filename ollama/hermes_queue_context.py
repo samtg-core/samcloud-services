@@ -48,6 +48,16 @@ class QueuedContextCompressor(ContextCompressor):
         # Never deepcopy a bound native SessionDB or any mutable session state.
         return type(self)(**deepcopy(self._queue_constructor_options))
 
+    def on_turn_complete(self, messages, usage=None, **kwargs):
+        # post_llm_call is an output hook: native interrupted/empty turns skip
+        # it. The unconditional finalization seam still owes an exact lifecycle
+        # event. Persist identifiers only; the existing relay owns delivery and
+        # the arbiter fences stale events and retains running/uncertain compute.
+        turn_id = kwargs.get('turn_id')
+        if self.provider == 'samcloud-queue-stint' and self._session_id and turn_id:
+            host_for_home(self._queue_home).finish_turn(self._session_id, turn_id)
+        return super().on_turn_complete(messages, usage=usage, **kwargs)
+
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         host = host_for_home(self._queue_home)
         # Relay is bound by the native turn facade, not an observer hook worker.
