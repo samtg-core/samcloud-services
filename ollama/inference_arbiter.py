@@ -28,6 +28,13 @@ class Conflict(Exception):
     pass
 
 
+class GrantBusy(Conflict):
+    """No intake occurred: this owner's open session has an exact predecessor."""
+    def __init__(self, grant_id, execution_id):
+        self.grant_id, self.execution_id = grant_id, execution_id
+        super().__init__('grant cannot accept another execution')
+
+
 class LifecycleStale(Conflict):
     """The event names older work, not the current scheduling boundary."""
 
@@ -486,8 +493,15 @@ class Arbiter:
                     raise Conflict('dependency parent must be another work session')
                 if parent['resource'] == grant['resource']:
                     parents.append(parent)
-            pending = self.db.execute("SELECT 1 FROM executions WHERE grant_id=? "
-                                      "AND state='queued'", (grant_id,)).fetchone()
+            pending = self.db.execute("SELECT id,state FROM executions WHERE grant_id=? "
+                "AND state IN ('queued','running','uncertain')", (grant_id,)).fetchall()
+            if (grant['lifetime'] == 'work_session' and not grant['release_requested']
+                    and grant['state'] in ('queued', 'granted', 'uncertain') and len(pending) == 1):
+                predecessor = pending[0]
+                if ((predecessor['state'] == 'queued' and not grant['active_execution']) or
+                        (predecessor['state'] in ('running', 'uncertain')
+                         and grant['active_execution'] == predecessor['id'])):
+                    raise GrantBusy(grant_id, predecessor['id'])
             if (grant['state'] not in ('queued', 'granted') or
                     grant['release_requested'] or grant['active_execution'] or pending):
                 raise Conflict("grant cannot accept another execution")

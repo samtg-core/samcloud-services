@@ -14,6 +14,7 @@ explicit service reconciliation, never resubmit it or infer failure from age.
 import asyncio
 from dataclasses import asdict, dataclass
 import inspect
+import json
 import math
 
 import httpx
@@ -101,12 +102,50 @@ class DurableConsumer:
             raise ValueError('persisted logical grant and call keys are required')
         if lifetime not in ('work_session', 'execution'):
             raise ValueError('invalid grant lifetime')
-        grant = await self._request('POST', '/grants', json={
-            'model': model, 'key': grant_key, 'lifetime': lifetime})
+        # Freeze this new logical input before any await. Waiting or a lost reply
+        # must not turn caller mutation into a different payload under this key.
         body = {'key': call_key, 'request': request}
         if yield_grant_keys:
             body['yield_grant_keys'] = list(yield_grant_keys)
-        call = await self._request('POST', '/grants/' + grant['id'] + '/executions', json=body)
+        body = json.loads(json.dumps(body, allow_nan=False))
+        grant = await self._request('POST', '/grants', json={
+            'model': model, 'key': grant_key, 'lifetime': lifetime})
+        ended_predecessors = set()
+        while True:
+            try:
+                call = await self._request('POST', '/grants/' + grant['id'] + '/executions', json=body)
+                break
+            except httpx.HTTPStatusError as error:
+                # Only a typed, owner-scoped refusal identifies work to observe.
+                # Ordinary conflicts (including old servers) remain actionable.
+                if error.response.status_code != 409 or lifetime != 'work_session':
+                    raise
+                try:
+                    detail = error.response.json()['detail']
+                    predecessor = detail['execution_id']
+                    valid = (detail['code'] == 'grant_busy' and detail['grant_id'] == grant['id']
+                        and isinstance(predecessor, str) and len(predecessor) == 32
+                        and all(c in '0123456789abcdef' for c in predecessor))
+                except (ValueError, TypeError, KeyError):
+                    valid = False
+                if not valid:
+                    raise
+                if predecessor in ended_predecessors:
+                    raise ValueError('busy predecessor was already terminal')
+                await self._progress('waiting_for_predecessor')
+                while True:
+                    previous = await self._request('GET', '/executions/' + predecessor)
+                    if (previous.get('id') != predecessor or previous.get('grant_id') != grant['id']
+                            or previous.get('state') not in
+                            ('queued', 'running', 'uncertain', 'complete', 'failed', 'cancelled')):
+                        raise ValueError('busy predecessor receipt does not match the service')
+                    if previous['state'] in ('complete', 'failed', 'cancelled'):
+                        ended_predecessors.add(predecessor)
+                        break
+                    await asyncio.sleep(self.poll_interval)
+                # The predecessor's output is NOT this request's result. Offer
+                # the same unaccepted intake again, under the same stable keys.
+                # A release/race is checked afresh by the journal transaction.
         return Job(grant['id'], call['id'])
 
     async def reattach(self, grant_id, execution_id):

@@ -10,7 +10,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from .inference_arbiter import Conflict, NotFound, LifecycleStale
+from .inference_arbiter import Conflict, GrantBusy, NotFound, LifecycleStale
 
 
 class GrantRequest(BaseModel):
@@ -66,6 +66,9 @@ def build_router(supervisor, resolve_model, validate_call):
             raise HTTPException(404, 'Not found') from None
         except LifecycleStale:
             raise HTTPException(409, {'code': 'stale_lifecycle_event'}) from None
+        except GrantBusy as exc:
+            raise HTTPException(409, {'code': 'grant_busy', 'grant_id': exc.grant_id,
+                                      'execution_id': exc.execution_id}) from None
         except Conflict as exc:
             raise HTTPException(409, str(exc)) from None
         except ValueError:

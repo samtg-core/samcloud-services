@@ -2,6 +2,15 @@
 
 Project history and current state. This is a living document.
 
+## 2026-11-12 — Observe a busy work session before offering a distinct new call
+
+- Return a typed owner-scoped `grant_busy` refusal naming the existing execution.
+  The consumer waits for that exact predecessor, then offers its unchanged new
+  input with the same keys. Running/uncertain work and ordinary conflicts retain
+  their guards; no queue deadline, overlap, yield or replacement is introduced.
+- Freeze intake JSON across waits; reject mismatched or contradictory receipts.
+  See [the protocol and release limits](docs/busy-session-intake.md).
+
 ## 2026-10-09 — A short ring is not an outage: the tier declines through the capacity model (#870, #33)
 
 - **`think` was advertised as resident for 22 hours with nothing placed.** Measured
