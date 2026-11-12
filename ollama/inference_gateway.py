@@ -338,9 +338,16 @@ class GatewayQueue:
                 for event in page['events']:
                     yield event['data']
                 cursor = page['next_cursor']
+                pending = page['state'] in ('queued', 'running', 'uncertain')
+                if pending and self.supervisor.observers_closed:
+                    detail = {'error': {'type': 'service_restarting',
+                        'message': 'Resume observation of the saved execution',
+                        'execution_id': execution['id']}}
+                    yield ('data: ' if operation == 'chat' else '') + json.dumps(detail) + '\n\n'
+                    return  # no model finish or successful [DONE] is invented
                 if page['has_more']:
                     continue
-                if page['state'] not in ('queued', 'running', 'uncertain'):
+                if not pending:
                     break
                 now = asyncio.get_running_loop().time()
                 if now >= heartbeat_at:

@@ -3090,4 +3090,8 @@ def _format_transcription_result(mm, result, fmt, granularities):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=SERVICE_PORT)
+    from .inference_http_server import QueueServer, observer_closed_response
+    from .inference_supervisor import ObserverClosed
+    app.add_exception_handler(ObserverClosed, observer_closed_response)
+    QueueServer(uvicorn.Config(app, host="0.0.0.0", port=SERVICE_PORT),
+                get_runtime=lambda: inference_runtime).run()

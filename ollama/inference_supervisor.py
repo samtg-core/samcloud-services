@@ -26,6 +26,13 @@ class BackendEnded(Exception):
         super().__init__('backend ended')
 
 
+class ObserverClosed(Exception):
+    """The service is stopping observation; the saved execution is unchanged."""
+    def __init__(self, execution_id):
+        self.execution_id = execution_id
+        super().__init__('service observation closed')
+
+
 class Supervisor:
     def __init__(self, path, execute, permitted, on_finished=None, *, stint_policy=None):
         """One scheduler per journal; execute/permitted are trusted service code.
@@ -56,6 +63,7 @@ class Supervisor:
         self.workers = {}
         self.preparations = set()
         self.wakeups = {}
+        self.observers_closed = False
 
     def prepare(self, operation):
         """Own a captured-input handoff even when its HTTP waiter disconnects.
@@ -129,10 +137,13 @@ class Supervisor:
             except Exception:
                 self.journal.uncertain(execution_id)
             return
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
             # Includes uncertain delivery, broken transport, and shutdown.
             # Do not cache raw exceptions, retry inference, or release a grant.
             self.journal.uncertain(execution_id)
+            logging.getLogger(__name__).warning(
+                'Backend execution uncertain execution_id=%s error_type=%s',
+                execution_id, type(exc).__name__)
             return
         else:
             self.journal.finish(execution_id, result, failed=failed)
@@ -170,6 +181,8 @@ class Supervisor:
             row = self.journal.execution(execution_id, owner)
             if row['state'] not in ('queued', 'running'):
                 return row
+            if self.observers_closed:
+                raise ObserverClosed(execution_id)
             await asyncio.sleep(interval)
 
     def close(self):
