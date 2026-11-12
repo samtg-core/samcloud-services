@@ -24,6 +24,12 @@ class SamcloudClient:
 
     # -- Resources --
 
+    def api_index(self) -> dict:
+        """Read the registry's advertised contract without creating a lease."""
+        r = self._http.get('/')
+        r.raise_for_status()
+        return r.json()
+
     def list_resources(self, **filters) -> list[dict]:
         r = self._http.get("/resources", params=filters)
         r.raise_for_status()
@@ -54,6 +60,8 @@ class SamcloudClient:
         ttl_seconds: int = 3600,
         exclusive: bool = False,
         max_total_s: Optional[int] = None,
+        wait_s: Optional[int] = None,
+        wait: bool = False,
     ) -> dict:
         """Request a lease. Returns `{"status_code": int, ...body}`.
 
@@ -80,7 +88,17 @@ class SamcloudClient:
         `service_id`, so a lease taken without one reports as "held by None"
         to whoever collides with it.
         """
+        # Explicit registry queue opt-in. This is a metadata wait allowance,
+        # not a duration limit on provider work; omit it for existing callers.
+        if wait_s is not None and (type(wait_s) is not int or wait_s < 0):
+            raise ValueError('wait_s must be a non-negative integer or None')
+        if type(wait) is not bool:
+            raise ValueError('wait must be a boolean')
         payload: dict = {"ttl_seconds": ttl_seconds}
+        if wait:
+            payload['wait'] = True
+        if wait_s is not None:
+            payload['wait_s'] = wait_s
         if max_total_s is not None:
             # The ceiling, counted by the registry from granted_at (#827 P3a/#34).
             # Sent explicitly rather than left to the registry default, because
@@ -130,6 +148,25 @@ class SamcloudClient:
         """
         r = self._http.post(f"/leases/{lease_id}/renew",
                             json={"ttl_seconds": ttl_seconds})
+        r.raise_for_status()
+        return r.json()
+
+    def rollover_lease(self, lease_id: str, *, key: str, ttl_seconds: int) -> dict:
+        """Explicit same-allocation handover, not renew or release/reacquire.
+
+        The caller persists this operation key before sending and reuses it
+        after an unknown reply. Errors propagate; there is no fallback to a
+        fresh lease or changed key. A200 replay may report an already-ended
+        replacement, so callers must validate current status/expiry before
+        treating the returned id as physical ownership. Not enabled by the
+        legacy manager's renewal loop.
+        """
+        if not isinstance(key, str) or not key.strip() or len(key) > 512:
+            raise ValueError('persisted rollover key required')
+        if type(ttl_seconds) is not int or ttl_seconds <= 0:
+            raise ValueError('positive rollover TTL required')
+        r = self._http.post(f"/leases/{lease_id}/rollover",
+                            json={"key": key, "ttl_seconds": ttl_seconds})
         r.raise_for_status()
         return r.json()
 
