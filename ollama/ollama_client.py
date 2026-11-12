@@ -30,7 +30,36 @@ _ERROR_PREFIXES = (
 # (harmony/harmonyparser.go:445), and the chat route reports it after the
 # runner's Completion call has returned (server/routes.go:2892). Unlike every
 # other tag it is affirmative evidence that generation ended.
-_COMPLETED_GENERATION = frozenset({"tool_parse"})
+_COMPLETED_GENERATION = frozenset({"tool_parse", "tool_parse_xml"})
+# 0.33.0's XML tool parser (qwen3-coder and qwen3.5 renderers) fails only in
+# model/parsers/qwen3coder.go parseToolCall's xml.Unmarshal, so its errors are Go
+# encoding/xml texts: a SyntaxError ("XML syntax error on line N: ...") or an
+# UnmarshalError ("expected element type <a> but have <b>"). The chat route
+# handles every builtin parser error alike: it sets parserErr and cancels the
+# runner request (server/routes.go:2810-2814), then sends the error frame only
+# after r.Completion has returned (server/routes.go:2892-2894), the same point
+# as harmony's tool_parse. Bare "EOF" is not matched: too generic to be proof.
+_XML_TOOL_PARSE_PREFIXES = (
+    ("xml syntax error on line ", "syntax"),
+    ("expected element type <", "element_type"),
+)
+# The kind of syntax error only; element names come from model text and are
+# never recorded.
+_XML_SYNTAX_KINDS = (
+    (re.compile(r"element <[^>]*> closed by </[^>]*>$"), "mismatched_close"),
+    (re.compile(r"unexpected EOF$"), "eof"),
+    (re.compile(r"unexpected end element </[^>]*>$"), "unexpected_end"),
+    (re.compile(r"invalid character entity "), "bad_entity"),
+)
+
+
+def _xml_tool_parse_shape(detail, kind):
+    """Content-free shape of a Go encoding/xml tool-call error."""
+    shape = {"parser": "xml", "xml_error": kind}
+    if kind == "syntax":
+        shape["xml_error"] = next((k for pattern, k in _XML_SYNTAX_KINDS if pattern.search(detail)),
+                                  "syntax_other")
+    return shape
 _TOOL_PARSE_PREFIX = "error parsing tool call"
 _TOOL_PARSE_STATUS_HEAD = b'{"error":"' + _TOOL_PARSE_PREFIX.encode()
 # Go encoding/json messages, so the shape of a rejected tool call is recorded
@@ -125,8 +154,16 @@ class OllamaBackendError(Exception):
             self.subtype = "tool_parse"
         elif phase == "status" and raw.startswith(_TOOL_PARSE_STATUS_HEAD):
             self.subtype = "tool_parse"
+        xml_kind = None
+        if self.subtype == "unclassified" and isinstance(detail, str) and not self.detail_truncated:
+            xml_kind = next((kind for prefix, kind in _XML_TOOL_PARSE_PREFIXES
+                             if detail.lower().startswith(prefix)), None)
+            if xml_kind is not None:
+                self.subtype = "tool_parse_xml"
         self.parse_shape = None
-        if self.subtype == "tool_parse":
+        if xml_kind is not None:
+            self.parse_shape = _xml_tool_parse_shape(detail, xml_kind)
+        elif self.subtype == "tool_parse":
             self.parse_shape = (_tool_parse_shape(detail) if isinstance(detail, str)
                                 and not self.detail_truncated else
                                 {"raw_len": None, "raw_first": "unknown", "raw_last": "unknown",
