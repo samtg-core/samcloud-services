@@ -202,6 +202,53 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests),3)
         self.assertNotEqual(self.initial.snapshot(vision)['lease_id'],old)
 
+    async def test_cooled_vision_retires_pre_rollover_initial_without_draining_text(self):
+        from .manager import VLM_MODELS
+        vision=next(iter(VLM_MODELS.values()))['default']
+        self.runtime.settings=QueueSettings(self.root/'queue.sqlite',
+            {'qwen':'gpu',vision:'gpu'},reservation_mb={'qwen':100},shared_queue_enabled=True)
+        self.initial.models[vision]='gpu'
+        self.source.binding.models[vision]='gpu'
+        old=self.initial.reserve(vision,resource='gpu',service_id='model-service',
+                                 memory_mb=100,ttl_seconds=LEASE_TTL)
+        store=self.runtime.residency_actor.store
+        store.register(vision,resource='gpu',model=vision,receipt=self.rows[0])
+        self.release(old)
+        store.retire(vision,self.rows[0])  # prior refresh already retired coverage
+        # The initial reservation retains its original ID after renewal rolls
+        # residency onto a successor; ordinary cooldown ends the successor.
+        successor=dict(self.rows[0], id='vision-renewal-successor', status='active')
+        self.rows.append(successor)
+        store.register(vision,resource='gpu',model=vision,receipt=successor)
+        self.release(successor['id'])
+        store.retire(vision,successor)
+        self.assertNotEqual(store.snapshot(vision)['lease_id'],old)
+        text=self.initial.reserve('qwen',resource='gpu',service_id='model-service',
+                                  memory_mb=100,ttl_seconds=LEASE_TTL)
+        self.manager.models['qwen']=SimpleNamespace(name='qwen',lease_id=text,memory_mb=100,in_flight=0)
+        self.running=[{'name':'qwen'}]
+        journal=self.runtime.queue.supervisor.journal
+        grant=journal.submit('creative','next-vision','gpu',vision)
+        journal.enqueue(grant['id'],'creative','call',{'messages':[]})
+        with patch('ollama.manager.VLM_MODELS',{'vision':{'default':vision,'memory_mb':100}}):
+            with patch('ollama.inference_shared_resource.cold_vision_absent',return_value=False):
+                await self.source.refresh(self.physical)
+            self.assertEqual(self.initial.snapshot(vision)['state'],'handed_off')
+            self.assertEqual(len(self.requests),2)
+            self.rows[0]['agent_id']='another-owner'
+            with patch('ollama.inference_shared_resource.cold_vision_absent',return_value=True):
+                await self.source.refresh(self.physical)
+            self.assertEqual(self.initial.snapshot(vision)['state'],'handed_off')
+            self.assertEqual(len(self.requests),2)
+            self.rows[0]['agent_id']='owner'
+            with patch('ollama.inference_shared_resource.cold_vision_absent',return_value=True):
+                await self.source.refresh(self.physical)
+        self.assertIsNone(self.runtime.shared_resource.task)
+        self.assertIn('qwen',self.manager.models)
+        self.assertEqual(self.initial.snapshot(vision)['state'],'queued')
+        self.assertEqual(len(self.requests),3)
+        self.assertNotEqual(self.initial.snapshot(vision)['lease_id'],old)
+
     async def test_busy_pool_stages_once_then_consumes_same_promoted_row_after_fresh_fit(self):
         unity=self.unity()
         self.demand()

@@ -162,8 +162,7 @@ class ManagerCapacitySource:
                     initial = getattr(manager, 'initial_reservations', None)
                     prior_intent = initial.snapshot(model) if initial is not None else None
                     needs_initial_retirement = (handoff is not None and former is not None and prior_intent is not None
-                        and prior_intent['state'] == 'handed_off'
-                        and prior_intent['lease_id'] == former['lease_id'])
+                        and prior_intent['state'] == 'handed_off')
                     if former is not None and (former['state']!='retired' or needs_initial_retirement):
                         ended=await source_call(lambda:manager.sc.list_leases(
                             resource_id=resource,service_id=store.service))
@@ -189,10 +188,12 @@ class ManagerCapacitySource:
                             continue
                         store.retire(self.binding.allocation(model),matches[0])
                         if needs_initial_retirement:
-                            # Ordinary cooldown ended this exact allocation. Retire
-                            # its initial pointer as well, including after restart
-                            # between the two commits. A fresh absence observation
-                            # and exact terminal receipt are still required; no
+                            # Renewal can replace the residency lease while the
+                            # initial intent still names its original lease.
+                            # Reconcile both exact pointers independently; the
+                            # initial actor checks its own saved lease and sizing
+                            # successors, not the residency receipt above. Fresh
+                            # absence and exact registry evidence remain required; no
                             # foreign-service handoff or resident text drain is
                             # needed to reconcile an already released allocation.
                             await source_call(lambda:initial.reconcile_absent(
