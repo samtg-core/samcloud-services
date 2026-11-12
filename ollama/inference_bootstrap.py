@@ -396,6 +396,19 @@ class QueueRuntime:
                 await source.refresh(await source_call(self.manager._collect_stats))
         self.queue.supervisor.on_finished = completed
 
+    def begin_http_shutdown(self):
+        """Detach HTTP observers before Uvicorn waits for their connections.
+
+        Workers and durable requests remain owned by this runtime. The normal
+        lifespan still drains known compute and refuses unresolved ownership.
+        Physical handoff never calls this: ordinary capacity waits stay open.
+        """
+        self._external_quiesce = True
+        self.capacity.pause()
+        if self.capacity_source is not None:
+            self.capacity_source.pause()
+        self.queue.supervisor.observers_closed = True
+
     async def quiesce(self, *, _resource_handoff=False):
         """Drain known workers with no age deadline; report unresolved ownership.
 

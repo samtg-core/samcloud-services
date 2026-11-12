@@ -546,6 +546,49 @@ class GatewayLifetime(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(self.model.in_flight, 0)
         self.assertIsNone(self.queue.supervisor.pump('gpu'))
 
+    async def test_shutdown_detaches_queued_stream_without_cancelling_saved_work(self):
+        self.queue.supervisor.permitted = lambda _: False
+        response = await self.call(stream=True)
+        execution = response.headers['X-Inference-Execution']
+        before = dict(self.queue.supervisor.journal.execution(execution,'creative'))
+        self.assertEqual(before['state'],'queued')
+        self.queue.supervisor.observers_closed = True
+        frames = ''.join([frame async for frame in response.body_iterator])
+        self.assertIn('service_restarting',frames)
+        self.assertIn(execution,frames)
+        self.assertNotIn('[DONE]',frames)
+        self.assertEqual(dict(self.queue.supervisor.journal.execution(execution,'creative')),before)
+        self.assertEqual(self.backend.entered,[])
+
+    async def test_shutdown_detaches_uncertain_stream_without_clearing_claim(self):
+        self.backend.omit_done = True
+        self.backend.gate.set()
+        response = await self.call(stream=True)
+        execution = response.headers['X-Inference-Execution']
+        await self.wait_for(lambda:self.queue.supervisor.journal.execution(
+            execution,'creative')['state']=='uncertain')
+        before = dict(self.queue.supervisor.journal.execution(execution,'creative'))
+        claim = self.queue.held_claims[execution]
+        self.queue.supervisor.observers_closed = True
+        frames = ''.join([frame async for frame in response.body_iterator])
+        self.assertIn('service_restarting',frames)
+        self.assertNotIn('[DONE]',frames)
+        self.assertEqual(dict(self.queue.supervisor.journal.execution(execution,'creative')),before)
+        self.assertIs(self.queue.held_claims[execution],claim)
+        self.assertGreater(self.model.in_flight,0)
+
+    async def test_shutdown_keeps_saved_successful_stream_readable(self):
+        self.backend.gate.set()
+        response = await self.call(stream=True)
+        execution = response.headers['X-Inference-Execution']
+        await self.wait_for(lambda:self.queue.supervisor.journal.execution(
+            execution,'creative')['state']=='complete')
+        self.queue.supervisor.observers_closed = True
+        frames = ''.join([frame async for frame in response.body_iterator])
+        self.assertIn('[DONE]',frames)
+        self.assertNotIn('service_restarting',frames)
+        self.assertEqual(self.backend.entered,['creative'])
+
     async def test_streaming_missing_terminal_keeps_claim_uncertain(self):
         self.backend.omit_done = True
         self.backend.gate.set()
