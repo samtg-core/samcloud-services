@@ -1,0 +1,394 @@
+--- a/ollama/hermes_queue_identity.py
++++ b/ollama/hermes_queue_identity.py
+@@ -15 +15 @@
+-from .inference_identity import IdentityStore
++from .inference_identity import IdentityStore, LocalSourceRefused
+@@ -19 +19,12 @@
+-class UnpersistedSource(ValueError):
++def intake_callback(path, scope, turn_id, keys, api_request_id=''):
++    """Capture exact native ownership; advance its fence only after service intake."""
++    def accepted(job):
++        store = IdentityStore(path)
++        try:
++            store.record_turn_call(scope, turn_id, keys, api_request_id=api_request_id, job=job)
++        finally:
++            store.close()
++    return accepted
++
++
++class UnpersistedSource(LocalSourceRefused):
+@@ -78 +89,2 @@
+-        Background/compaction sources cannot borrow this scheduling preference.
++        Compaction uses bind_compaction with a validated native foreground owner;
++        background sources cannot borrow this scheduling preference.
+@@ -89 +101 @@
+-                store.record_turn_call(self.scope, self.turn_id, keys, api_request_id=self.api_request_id)
++                keys = replace(keys, on_accepted=intake_callback(path, self.scope, self.turn_id, keys, self.api_request_id))
+@@ -102,0 +115 @@
++        self.compaction_owner = ContextVar('queue_compaction_owner', default=None)
+@@ -197 +210 @@
+-                raise ValueError('unpersisted foreground or unowned fork; no submission')
++                raise LocalSourceRefused('unpersisted foreground or unowned fork; no submission')
+@@ -240 +253 @@
+-    def compression_scope(self, session_id, messages, *, purpose='compression', persist_unstored=False):
++    def compression_scope(self, session_id, messages, *, purpose='compression', persist_unstored=False, owner_provider=None):
+@@ -254,0 +268 @@
++        owner_token = self.compaction_owner.set(owner_provider)
+@@ -257,0 +272 @@
++            self.compaction_owner.reset(owner_token)
+@@ -272 +287 @@
+-            raise ValueError('no owning persisted call boundary is bound')
++            raise LocalSourceRefused('no owning persisted call boundary is bound')
+@@ -285 +300 @@
+-            raise ValueError('no owning foreground source is bound for a stint')
++            raise LocalSourceRefused('no owning foreground source is bound for a stint')
+@@ -289,2 +303,0 @@
+-        # Auxiliary calls never borrow the main turn's boundary, including
+-        # preflight compaction before pre_api_request has run.
+@@ -292,9 +305,24 @@
+-        keys = self._keys(source, request)
+-        store = IdentityStore(self.path)
+-        try:
+-            # Compaction is a dependency, not a foreground-priority borrower.
+-            # Yield only stints allocated for this exact profile/session scope.
+-            parents = store.conversation_stints(source.scope)
+-            return store.bind_handoff(keys, parents)
+-        finally:
+-            store.close()
++        if source is None:
++            raise LocalSourceRefused('no owning persisted call boundary is bound')
++        store = IdentityStore(self.path)
++        try:
++            if source.purpose == 'compression':
++                owner_provider = self.compaction_owner.get()
++                owner = owner_provider() if owner_provider is not None else None
++                if owner_provider is not None and (not isinstance(owner, tuple) or len(owner) != 2
++                        or any(not isinstance(v, str) or not v.strip() for v in owner)):
++                    raise LocalSourceRefused('foreground compaction owner ended or changed before submission')
++                if isinstance(source, HeldSource):
++                    boundary = 'rows:' + hashlib.sha256(encoded(source.rows).encode()).hexdigest()
++                else:
++                    source.messages()
++                    boundary = 'operation:' + source.operation
++                keys = store.bind_compaction(source.scope, boundary, request,
++                    stint_model=owner[1] if owner else '')
++                if keys.work_session:
++                    return replace(keys, on_accepted=intake_callback(self.path, source.scope, owner[0], keys))
++            else:
++                keys = self._keys(source, request)
++            return store.bind_handoff(keys, store.conversation_stints(source.scope))
++        finally:
++            store.close()
+--- a/ollama/inference_identity.py
++++ b/ollama/inference_identity.py
+@@ -10 +10 @@
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+@@ -17,0 +18,4 @@
++
++
++class LocalSourceRefused(ValueError):
++    """Known local ownership refusal, before an inference intent can be submitted."""
+@@ -25,0 +30,3 @@
++    work_session: bool = False
++    on_accepted: object = field(default=None, compare=False, repr=False)
++    resume_job: object = field(default=None, compare=False, repr=False)
+@@ -61,0 +69,13 @@
++            CREATE TABLE IF NOT EXISTS compaction_binding (
++                scope TEXT NOT NULL, source_boundary TEXT NOT NULL,
++                work_boundary TEXT NOT NULL, call_boundary TEXT NOT NULL,
++                lifetime TEXT NOT NULL CHECK(lifetime IN ('execution','work_session')),
++                PRIMARY KEY(scope,source_boundary));
++            CREATE TABLE IF NOT EXISTS native_turn_end (
++                scope TEXT NOT NULL, turn_id TEXT NOT NULL,
++                PRIMARY KEY(scope,turn_id));
++            CREATE TABLE IF NOT EXISTS accepted_native_call (
++                scope TEXT NOT NULL, turn_id TEXT NOT NULL,
++                grant_key TEXT NOT NULL, call_key TEXT NOT NULL,
++                grant_id TEXT NOT NULL, execution_id TEXT NOT NULL,
++                PRIMARY KEY(scope,turn_id,grant_key,call_key));
+@@ -85,4 +105,25 @@
+-            self.db.execute('COMMIT')
+-        except BaseException:
+-            self.db.execute('ROLLBACK')
+-            raise
++            compaction_columns = {row[1] for row in self.db.execute('PRAGMA table_info(compaction_binding)')}
++            for column in ('model','shape_digest'):
++                if column not in compaction_columns:
++                    self.db.execute('ALTER TABLE compaction_binding ADD COLUMN '+column+' TEXT')
++            self.db.execute('COMMIT')
++        except BaseException:
++            self.db.execute('ROLLBACK')
++            raise
++
++    def _bind_in_transaction(self, scope, work_boundary, call_boundary, request):
++        digest = hashlib.sha256(encoded(request).encode()).hexdigest()
++        row = self.db.execute('SELECT key FROM work_identity WHERE scope=? AND boundary=?',
++                              (scope, work_boundary)).fetchone()
++        grant = row[0] if row else uuid.uuid4().hex
++        if row is None:
++            self.db.execute('INSERT INTO work_identity VALUES(?,?,?)', (scope, work_boundary, grant))
++        row = self.db.execute('SELECT key,digest FROM call_identity WHERE work_key=? AND boundary=?',
++                              (grant, call_boundary)).fetchone()
++        if row and row[1] != digest:
++            raise Conflict('persisted call boundary has different request content; reconcile before submitting')
++        call = row[0] if row else uuid.uuid4().hex
++        if row is None:
++            self.db.execute('INSERT INTO call_identity(work_key,boundary,key,digest) VALUES(?,?,?,?)',
++                            (grant, call_boundary, call, digest))
++        return CallKeys(grant, call)
+@@ -93,7 +134,37 @@
+-        # Integrity guard only. Equality of content never allocates identity.
+-        digest = hashlib.sha256(encoded(request).encode()).hexdigest()
+-        self.db.execute('BEGIN IMMEDIATE')
+-        try:
+-            row = self.db.execute('SELECT key FROM work_identity WHERE scope=? AND boundary=?',
+-                                  (scope, work_boundary)).fetchone()
+-            grant = row[0] if row else uuid.uuid4().hex
++        self.db.execute('BEGIN IMMEDIATE')
++        try:
++            keys = self._bind_in_transaction(scope, work_boundary, call_boundary, request)
++            self.db.execute('COMMIT')
++            return keys
++        except BaseException:
++            self.db.execute('ROLLBACK')
++            raise
++
++    def _saved_compaction(self, scope, work, call, *, required_receipt=True):
++        rows = self.db.execute('SELECT DISTINCT w.key,c.key,a.grant_id,a.execution_id '
++            'FROM work_identity w JOIN call_identity c ON c.work_key=w.key '
++            'JOIN accepted_native_call a ON a.scope=w.scope AND a.grant_key=w.key AND a.call_key=c.key '
++            'WHERE w.scope=? AND w.boundary=? AND c.boundary=?', (scope,work,call)).fetchall()
++        if not rows and not required_receipt:
++            return None
++        if len(rows) != 1:
++            raise Conflict('saved summary has no exact acknowledged intake; restore its original model and '
++                           'request to reattach the same keys, never delete the mapping or create a new grant')
++        grant, key, grant_id, execution_id = rows[0]
++        return CallKeys(grant,key,work_session=True,resume_job=(grant_id,execution_id))
++
++    def bind_compaction(self, scope, source_boundary, request, *, stint_model=''):
++        """Freeze source policy. A model-only switch can READ its acknowledged job.
++
++        Prompt/options changes cannot borrow an old summary. Unknown intake is
++        recovered with the original model/request and keys, never a new grant.
++        """
++        required(scope); required(source_boundary)
++        shape = hashlib.sha256(encoded({k:v for k,v in request.items() if k!='model'}).encode()).hexdigest()
++        legacy = 'execution:' + hashlib.sha256(
++            encoded(['compression', source_boundary]).encode()).hexdigest()
++        self.db.execute('BEGIN IMMEDIATE')
++        try:
++            row = self.db.execute('SELECT work_boundary,call_boundary,lifetime,model,shape_digest '
++                'FROM compaction_binding WHERE scope=? AND source_boundary=?',
++                (scope, source_boundary)).fetchone()
+@@ -101,11 +172,30 @@
+-                self.db.execute('INSERT INTO work_identity VALUES(?,?,?)', (scope, work_boundary, grant))
+-            row = self.db.execute('SELECT key,digest FROM call_identity WHERE work_key=? AND boundary=?',
+-                                  (grant, call_boundary)).fetchone()
+-            if row and row[1] != digest:
+-                raise Conflict('persisted call boundary has different request content; reconcile before submitting')
+-            call = row[0] if row else uuid.uuid4().hex
+-            if row is None:
+-                self.db.execute('INSERT INTO call_identity(work_key,boundary,key,digest) VALUES(?,?,?,?)',
+-                                (grant, call_boundary, call, digest))
+-            self.db.execute('COMMIT')
+-            return CallKeys(grant, call)
++                old = self.db.execute('SELECT 1 FROM work_identity WHERE scope=? AND boundary=?',
++                                      (scope, legacy)).fetchone()
++                if old is None and stint_model and stint_model == required(request.get('model')):
++                    work = 'conversation-stint:' + hashlib.sha256(encoded(['main', stint_model]).encode()).hexdigest()
++                    row = (work, 'compression:' + source_boundary, 'work_session',request.get('model'),shape)
++                else:
++                    row = (legacy, source_boundary, 'execution',request.get('model'),shape)
++                self.db.execute('INSERT INTO compaction_binding '
++                    '(scope,source_boundary,work_boundary,call_boundary,lifetime,model,shape_digest) '
++                    'VALUES(?,?,?,?,?,?,?)',(scope,source_boundary,*row))
++            work, call, lifetime, original_model, original_shape = row
++            if lifetime == 'work_session':
++                if not stint_model:
++                    raise Conflict('compaction continuation requires an exact live foreground owner')
++                expected = 'conversation-stint:' + hashlib.sha256(encoded(['main', stint_model]).encode()).hexdigest()
++                if work != expected or request.get('model') != stint_model:
++                    if not original_model or original_shape != shape:
++                        raise Conflict('saved summary prompt/options differ; restore the original model and '
++                                       'request before resuming this exact source')
++                    keys = self._saved_compaction(scope,work,call)
++                    self.db.execute('COMMIT')
++                    return keys
++            keys = self._bind_in_transaction(scope, work, call, request)
++            if original_model is None or original_shape is None:
++                # Backfill only after the original request digest has matched.
++                self.db.execute('UPDATE compaction_binding SET model=?,shape_digest=? '
++                    'WHERE scope=? AND source_boundary=?',(request.get('model'),shape,scope,source_boundary))
++            saved = self._saved_compaction(scope,work,call,required_receipt=False) if lifetime == 'work_session' else None
++            self.db.execute('COMMIT')
++            return saved or CallKeys(keys.grant_key, keys.call_key, work_session=lifetime == 'work_session')
+@@ -126 +216 @@
+-    def record_turn_call(self, scope, turn_id, keys, *, api_request_id=''):
++    def record_turn_call(self, scope, turn_id, keys, *, api_request_id='', job=None):
+@@ -137,0 +228,9 @@
++            if job is not None:
++                required(job.grant_id); required(job.execution_id)
++                old = self.db.execute('SELECT grant_id,execution_id FROM accepted_native_call '
++                    'WHERE scope=? AND grant_key=? AND call_key=?',
++                    (scope,keys.grant_key,keys.call_key)).fetchone()
++                if old and old != (job.grant_id,job.execution_id):
++                    raise Conflict('intake receipt changed its exact service identity')
++                self.db.execute('INSERT OR IGNORE INTO accepted_native_call VALUES(?,?,?,?,?,?)',
++                    (scope,turn_id,keys.grant_key,keys.call_key,job.grant_id,job.execution_id))
+@@ -147,0 +247,6 @@
++            if self.db.execute('SELECT 1 FROM native_turn_end WHERE scope=? AND turn_id=?',
++                               (scope,turn_id)).fetchone():
++                # A late intake cannot rewrite an already relayed event. Give it
++                # a new fenced event; a subsequent real call makes it stale safely.
++                self._queue_yields(scope,'late-intake:'+turn_id+':'+keys.call_key,
++                                   [(keys.grant_key,keys.call_key)])
+@@ -221,0 +327 @@
++            self.db.execute('INSERT OR IGNORE INTO native_turn_end VALUES(?,?)',(scope,turn_id))
+--- a/ollama/hermes_queue_context.py
++++ b/ollama/hermes_queue_context.py
+@@ -53 +53,16 @@
+-        with host.compression_scope(self._session_id, messages, persist_unstored=True) as source:
++        # Relay is bound by the native turn facade, not an observer hook worker.
++        # Revalidate it at submission so copied contexts cannot revive a closed turn.
++        owner_provider = None
++        if self.provider == 'samcloud-queue-stint':
++            from agent.relay_runtime import active_turn
++            turn = active_turn(self._session_id)
++            if turn is not None and turn.lease.profile_key == host.scope:
++                turn_id, session_id = turn.turn_id, self._session_id
++                def owner_provider():
++                    current = active_turn(session_id)
++                    if (current is turn and not current.closed and not current.lease.released
++                            and self._session_id == session_id and self.provider == 'samcloud-queue-stint'):
++                        return turn_id, self.model
++                    return None
++        with host.compression_scope(self._session_id, messages, persist_unstored=True,
++                                    owner_provider=owner_provider) as source:
+--- a/ollama/inference_sdk.py
++++ b/ollama/inference_sdk.py
+@@ -101,0 +102,3 @@
++    work_session = False
++    accepted = None
++    resume_job = None
+@@ -117,2 +120,10 @@
+-        if type(execution_only) is not bool:
+-            raise ValueError('host returned invalid execution-only policy')
++        accepted = getattr(keys, 'on_accepted', None)
++        if accepted is not None and not callable(accepted):
++            raise ValueError('host returned invalid intake callback')
++        resume_job = getattr(keys, 'resume_job', None)
++        if resume_job is not None and (not isinstance(resume_job,tuple) or len(resume_job)!=2 or
++                any(not isinstance(v,str) or not v.strip() for v in resume_job)):
++            raise ValueError('host returned invalid saved job receipt')
++        work_session = getattr(keys, 'work_session', False)
++        if type(execution_only) is not bool or type(work_session) is not bool or (execution_only and work_session):
++            raise ValueError('host returned invalid grant lifetime policy')
+@@ -125 +136,6 @@
+-    return intent+('execution',) if execution_only else intent
++    lifetime = 'work_session' if work_session else 'execution' if execution_only else None
++    if resume_job is not None:
++        return intent+(lifetime,accepted,resume_job)
++    if accepted is not None:
++        return intent+(lifetime,accepted)
++    return intent+(lifetime,) if lifetime else intent
+@@ -130,0 +147,2 @@
++    accepted = intent[5] if len(intent)>=6 else None
++    resume_job = intent[6] if len(intent)==7 else None
+@@ -132,3 +150,8 @@
+-        if len(intent)!=5 or intent[4]!='execution':
+-            raise ValueError('invalid host execution-only policy')
+-        grant_lifetime='execution'
++        if len(intent) not in (5,6,7) or intent[4] not in (None, 'execution', 'work_session'):
++            raise ValueError('invalid host grant lifetime policy')
++        if intent[4] is not None:
++            grant_lifetime=intent[4]
++        if intent[4] == 'work_session':
++            require_stint_policy=True
++        if accepted is not None and not callable(accepted):
++            raise ValueError('invalid host intake callback')
+@@ -152,15 +175,24 @@
+-    if require_stint_policy or yield_grant_keys:
+-        capabilities = await consumer.capabilities()
+-        policy = capabilities.get('stints') if isinstance(capabilities, dict) else None
+-        if (not isinstance(policy, dict) or type(policy.get('version')) is not int
+-                or policy['version'] != 1 or policy.get('enabled') is not True):
+-            # An older explicit-release server could accept this session and
+-            # retain it forever. Refuse BEFORE creating any service-owned job.
+-            raise ValueError('service does not advertise automatic conversation stints')
+-        if require_stint_policy and policy.get('lifecycle_yield') is not True:
+-            raise ValueError('service does not advertise native lifecycle handoff')
+-        if yield_grant_keys and policy.get('dependency_yield') is not True:
+-            raise ValueError('service does not advertise atomic dependency handoff')
+-    job = await consumer.submit(body['model'], grant_key=grant_key, call_key=call_key,
+-                                request=body, lifetime=grant_lifetime,
+-                                yield_grant_keys=yield_grant_keys)
++    if resume_job is not None:
++        # This is observation of already accepted work, not new admission. Do
++        # not make receipt reads depend on current model/lifecycle capability.
++        job = await consumer.reattach(*resume_job)
++    else:
++        if require_stint_policy or yield_grant_keys:
++            capabilities = await consumer.capabilities()
++            policy = capabilities.get('stints') if isinstance(capabilities, dict) else None
++            if (not isinstance(policy, dict) or type(policy.get('version')) is not int
++                    or policy['version'] != 1 or policy.get('enabled') is not True):
++                # An older explicit-release server could accept this session and
++                # retain it forever. Refuse BEFORE creating any service-owned job.
++                raise ValueError('service does not advertise automatic conversation stints')
++            if require_stint_policy and policy.get('lifecycle_yield') is not True:
++                raise ValueError('service does not advertise native lifecycle handoff')
++            if yield_grant_keys and policy.get('dependency_yield') is not True:
++                raise ValueError('service does not advertise atomic dependency handoff')
++        job = await consumer.submit(body['model'], grant_key=grant_key, call_key=call_key,
++                                    request=body, lifetime=grant_lifetime,
++                                    yield_grant_keys=yield_grant_keys)
++    if accepted is not None:
++        acknowledged = accepted(job)
++        if inspect.isawaitable(acknowledged):
++            await acknowledged
+--- a/ollama/inference_consumer.py
++++ b/ollama/inference_consumer.py
+@@ -111,0 +112,12 @@
++    async def reattach(self, grant_id, execution_id):
++        """Read an exact acknowledged job under the caller's auth; no submit/admission.
++
++        A receipt mismatch or inaccessible job is not permission to replace it.
++        """
++        if not all(isinstance(v,str) and v.strip() for v in (grant_id,execution_id)):
++            raise ValueError('exact acknowledged job identity required')
++        row = await self._request('GET','/executions/'+execution_id)
++        if row.get('id') != execution_id or row.get('grant_id') != grant_id:
++            raise ValueError('saved execution receipt does not match the service')
++        return Job(grant_id,execution_id)
++
+--- a/ollama/hermes_queue_provider.py
++++ b/ollama/hermes_queue_provider.py
+@@ -12,0 +13 @@
++from .inference_identity import LocalSourceRefused
+@@ -127,0 +129,19 @@
++def _classify_local_source_error(error, **kwargs):
++    # The OpenAI SDK wraps exceptions raised by its local transport in
++    # APIConnectionError. Only our typed, pre-submission refusal is a
++    # local terminal failure; never classify by prose or provider name.
++    seen = set()
++    cause = error
++    while cause is not None and id(cause) not in seen:
++        seen.add(id(cause))
++        if isinstance(cause, LocalSourceRefused):
++            return {'reason': 'format_error', 'retryable': False,
++                    'should_fallback': False, 'should_compress': False,
++                    'should_rotate_credential': False,
++                    'error_context': {'origin': 'local_queue_adapter',
++                        'code': 'queue_source_unbound',
++                        'detail': 'No exact owning durable source is bound; no new inference was submitted.'}}
++        cause = cause.__cause__ or cause.__context__
++    return None
++
++
+@@ -144 +164 @@
+-                require_stint_policy=stint, event_source=host if stint else None,
++                require_stint_policy=stint, event_source=host if (stint or auxiliary) else None,
+@@ -148,0 +169 @@
++            classify_api_error=_classify_local_source_error,

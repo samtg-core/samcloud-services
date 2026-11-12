@@ -1,0 +1,31 @@
+{
+  "runtime_changed": false,
+  "scope": "six-module client overlay on captured 99-module HS client package; native code unchanged",
+  "baseline": {
+    "foreground_compaction_controls": 12,
+    "failed": 12
+  },
+  "candidate": {
+    "unique_controls_passed": 79,
+    "failures_remaining": 0,
+    "focused_compaction_controls": 26,
+    "related_existing_controls": 53,
+    "owned_cpu_fixture_child": 1
+  },
+  "guard": {
+    "external_ip_attempts": 0,
+    "blocked_loopback_bind_probes": 2,
+    "model_import_attempts": 0,
+    "signals_sent": 0,
+    "note": "Optional process probes were refused. One exact SQLite reopen fixture child ran with network/process/signal/model guards inside it."
+  },
+  "native_python_test_version": "3.14.7",
+  "production_image_or_lease_qualification": false,
+  "limits": [
+    "No active profile or worker changed.",
+    "No queued call is reprioritized or rekeyed.",
+    "Legacy already-bound compactions retain their execution-lifetime identity.",
+    "Busy-intake behavior is unchanged; PR91 is separate.",
+    "Three native source seams are pinned; this is not a whole-environment attestation."
+  ]
+}
