@@ -1,0 +1,26 @@
+fastapi>=0.100.0
+uvicorn>=0.20.0
+httpx>=0.24.0
+aiohttp>=3.9.0
+pydantic>=2.0.0
+
+# Counts a prompt with the resident model's own tokenizer before the gateway
+# dispatches it to the pool (ticket #837). Optional at runtime — prompt_size
+# falls back to a conservative chars/token estimate if it is missing — but a box
+# without it refuses good prompts it did not need to refuse.
+tokenizers>=0.22.0
+
+# The same counting path renders the model's own `chat_template.jinja` before
+# tokenising it, so jinja2 is a hard dependency of the exact path, not an
+# extra. Undeclared until #862: `tokenizers` was listed and jinja2 was not, so
+# a venv built from this file counted every prompt through the `serialised`
+# fallback while a venv that happened to have jinja2 from some earlier install
+# used the template. The two differ, and nothing failed loudly — see
+# prompt_size.__doc__ for which way they differ and how to tell them apart.
+jinja2>=3.1.0
+
+# Multipart form parsing, for POST /v1/audio/transcriptions. FastAPI raises
+# `RuntimeError: Form data requires "python-multipart" to be installed` on the
+# first request without it and imports cleanly, so the gateway starts, every
+# other route works, and only the audio route is broken.
+python-multipart>=0.0.9
