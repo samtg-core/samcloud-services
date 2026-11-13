@@ -28,6 +28,38 @@ class HostIdentity(unittest.TestCase):
         self.host.complete_api(session,'turn','api',(tool,))
         return keys
 
+    def test_only_a_service_failed_state_gives_a_stint_retry_a_fresh_call(self):
+        source=HeldSource.capture('own-profile','session','main',self.messages,
+                                 turn_id='turn',api_request_id='api')
+        first=source.bind_stint(self.path,self.body)
+        for kind,state in (('transport','transport_unavailable'),('execution','queued'),
+                           ('execution','running'),('execution','uncertain'),('execution','cancelled')):
+            self.host.observe_call_state({'grant_key':first.grant_key,'call_key':first.call_key,
+                                          'kind':kind,'state':state})
+            self.assertEqual(first,source.bind_stint(self.path,self.body),state)
+        self.host.observe_call_state({'grant_key':first.grant_key,'call_key':first.call_key,
+                                      'kind':'execution','state':'failed','execution_id':'0b800389'})
+        retry=source.bind_stint(self.path,self.body)
+        self.assertEqual(retry.grant_key,first.grant_key)  # same conversation stint
+        self.assertNotEqual(retry.call_key,first.call_key)
+        self.assertEqual(retry,source.bind_stint(self.path,self.body))
+        first.on_accepted(SimpleNamespace(grant_id='grant',execution_id='0b800389'))
+        retry.on_accepted(SimpleNamespace(grant_id='grant',execution_id='retry'))
+        from .inference_identity import IdentityStore
+        store=IdentityStore(self.path)
+        try:  # the turn's lifecycle handoff now names the retry, not the failed call
+            self.assertEqual(store.db.execute('SELECT call_key FROM turn_call').fetchall(),
+                             [(retry.call_key,)])
+        finally:
+            store.close()
+
+    def test_execution_grants_keep_replaying_after_a_failure(self):
+        source=HeldSource.capture('own-profile','session','main',self.messages)
+        first=source.bind(self.path,self.body)
+        self.host.observe_call_state({'grant_key':first.grant_key,'call_key':first.call_key,
+                                      'kind':'execution','state':'failed'})
+        self.assertEqual(first,source.bind(self.path,self.body))
+
     def test_tool_auxiliary_yields_only_own_parent_and_success_advances_intent(self):
         main=self.bind_tool()
         body=self.body|{'model':'vision'}
