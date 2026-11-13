@@ -151,6 +151,100 @@ class Startup(unittest.IsolatedAsyncioTestCase):
         await source.refresh({'memory_available_mb':20000,'memory_device_inuse_mb':0})
         self.assertTrue(runtime.capacity.permitted(resource))
 
+    def strand(self, **changes):
+        """A dead predecessor's residency: its allocation still covered, its exact lease live."""
+        from .inference_residency import ResidencyStore
+        resource=server.config.SC_RESOURCE_ID
+        receipt={'id':'dead-gateway','agent_id':'user:65','service_id':server.config.SC_SERVICE_ID,
+            'resource_id':resource,'memory_mb':100,'max_total_s':3600,'exclusive':0,
+            'status':'active','expires_at':'2099-01-01T00:00:00+00:00'}
+        store=ResidencyStore(self.root/'residency.sqlite',registry_owner='user:65',
+                             service_id=server.config.SC_SERVICE_ID)
+        store.register('qwen',resource=resource,model='qwen',receipt=receipt)
+        store.close()
+        self.leases={'dead-gateway':receipt|changes}
+        def release(lease_id):
+            self.leases[lease_id]['status']='released'
+            return {'status':'released'}
+        live=lambda:[dict(row) for row in self.leases.values() if row['status']=='active']
+        self.registry.list_leases=Mock(side_effect=lambda **filters:[dict(row) for row in self.leases.values()])
+        self.registry.release_lease=Mock(side_effect=release)
+        self.registry.get_resource=Mock(side_effect=lambda resource_id:{'id':resource,'allocation_mode':'shared',
+            'available_memory_mb':100-sum(row['memory_mb'] for row in live()),'leases':live()})
+        return resource
+
+    async def test_startup_releases_and_retires_its_own_stranded_residency_then_admits(self):
+        resource=self.strand()
+        server.inference_startup=QueueStartup(self.settings,work_permitted=True)
+        await self.boot()
+        runtime=server.inference_runtime
+        self.registry.release_lease.assert_called_once_with('dead-gateway')
+        store=runtime.residency_actor.store
+        self.assertEqual(store.snapshot('qwen')['state'],'retired')
+        self.assertEqual([tuple(row) for row in store.db.execute(
+            'SELECT lease_id,ended_status FROM residency_ends')],[('dead-gateway','released')])
+        await runtime.capacity_source.refresh({'memory_available_mb':20000,'memory_device_inuse_mb':0})
+        self.assertTrue(runtime.capacity.permitted(resource))
+
+    async def test_startup_retires_an_already_ended_lease_without_releasing_it(self):
+        self.strand(status='released')
+        server.inference_startup=QueueStartup(self.settings,work_permitted=True)
+        await self.boot()
+        self.registry.release_lease.assert_not_called()
+        self.assertEqual(server.inference_runtime.residency_actor.store.snapshot('qwen')['state'],'retired')
+
+    async def test_a_resident_model_keeps_its_lease(self):
+        resource=self.strand()
+        self.manager.ollama.list_running.return_value=[{'name':'qwen'}]
+        server.inference_startup=QueueStartup(self.settings,work_permitted=True)
+        with self.assertRaisesRegex(RuntimeError,'confirmed empty Ollama inventory'):
+            await self.boot()
+        self.registry.release_lease.assert_not_called()
+        self.assertEqual(self.leases['dead-gateway']['status'],'active')
+        # Resident again by the time of the release: the fresh absence read wins.
+        self.manager.ollama.list_running.side_effect=[[],[{'name':'qwen'}]]
+        await self.boot()
+        runtime=server.inference_runtime
+        self.registry.release_lease.assert_not_called()
+        self.assertEqual(runtime.residency_actor.store.snapshot('qwen')['state'],'covered')
+        await runtime.capacity_source.refresh({'memory_available_mb':20000,'memory_device_inuse_mb':0})
+        self.assertFalse(runtime.capacity.permitted(resource))
+
+    async def assert_left_for_reconciliation(self, **changes):
+        self.strand(**changes)
+        if 'id' in changes:
+            self.leases={'other':self.leases.pop('dead-gateway')}
+        server.inference_startup=QueueStartup(self.settings,work_permitted=True)
+        await self.boot()
+        self.registry.release_lease.assert_not_called()
+        self.assertEqual(server.inference_runtime.residency_actor.store.snapshot('qwen')['state'],'covered')
+
+    async def test_another_services_lease_is_left_for_reconciliation(self):
+        await self.assert_left_for_reconciliation(service_id='another/service')
+
+    async def test_another_owners_lease_is_left_for_reconciliation(self):
+        await self.assert_left_for_reconciliation(agent_id='user:1')
+
+    async def test_a_resized_lease_is_left_for_reconciliation(self):
+        await self.assert_left_for_reconciliation(memory_mb=99)
+
+    async def test_a_missing_lease_is_left_for_reconciliation(self):
+        await self.assert_left_for_reconciliation(id='other')
+
+    async def test_a_pending_rollover_is_left_for_reconciliation(self):
+        from .inference_residency import ResidencyStore
+        self.strand()
+        store=ResidencyStore(self.root/'residency.sqlite',registry_owner='user:65',
+                             service_id=server.config.SC_SERVICE_ID)
+        store.register('qwen',resource=server.config.SC_RESOURCE_ID,model='qwen',
+                       receipt=dict(self.leases['dead-gateway']))
+        store.prepare('qwen',ttl_seconds=3600)
+        store.close()
+        server.inference_startup=QueueStartup(self.settings,work_permitted=True)
+        await self.boot()
+        self.registry.release_lease.assert_not_called()
+        self.assertEqual(server.inference_runtime.residency_actor.store.snapshot('qwen')['state'],'handover_pending')
+
     async def test_invalid_permission_refuses_before_mounting_or_creating_journals(self):
         server.inference_startup = QueueStartup(self.settings,work_permitted='yes')
         with self.assertRaisesRegex(ValueError,'explicit work permission'):
