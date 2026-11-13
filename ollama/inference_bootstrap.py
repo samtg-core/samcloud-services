@@ -287,6 +287,7 @@ class QueueStartup:
                 raise RuntimeError('Durable startup requires confirmed absent vision backend') from None
         runtime = QueueRuntime.install(service,self.settings,registry_owner=owner)
         runtime.bind_capacity_source(work_permitted=self.work_permitted)
+        await runtime.release_stranded()
         return runtime
 
 
@@ -359,6 +360,63 @@ class QueueRuntime:
             logging.getLogger(__name__).info('Inference queue config source=%s sha256=%s',
                                             settings.source_path, settings.source_sha256)
         return runtime
+
+    async def release_stranded(self):
+        """Startup only: end this service's own residency a dead predecessor left.
+
+        A gateway that dies without releasing leaves its allocation covered and
+        its exact lease active, while nothing it loaded survives: startup has
+        confirmed Ollama empty. The live lease cannot be retired, and the registry
+        keeps counting its bytes, so no fresh load fits (#1072: lease_34ff on
+        12 Nov, lease_2f24 on 13 Nov). Release only the exact journaled pointer
+        after a fresh absence read, re-read its terminal receipt, then retire.
+        A pending rollover, a changed or foreign lease, or any unknown read is
+        left as it was, and ordinary reconciliation still fails closed on it.
+        """
+        from .inference_arbiter import Conflict
+        from .inference_reservation import needs_settlement
+        manager,store = self.manager,self.residency_actor.store
+        log = logging.getLogger(__name__)
+        async def exact(resource,row):
+            rows = await asyncio.to_thread(lambda:manager.sc.list_leases(
+                resource_id=resource,service_id=store.service))
+            matches = [item for item in rows if isinstance(item,dict) and
+                       item.get('id') == row['lease_id']] if isinstance(rows,list) else []
+            if len(matches) != 1:
+                raise Conflict('exact allocation unknown')
+            receipt = matches[0]
+            if (receipt.get('agent_id') != store.owner or receipt.get('service_id') != store.service
+                    or receipt.get('resource_id') != resource or receipt.get('exclusive') != 0
+                    or receipt.get('memory_mb') != row['memory_mb']):
+                raise Conflict('allocation ownership differs')
+            return receipt
+        released = []
+        for model,resource in self.settings.models.items():
+            try:
+                row = store.snapshot(model)
+            except Conflict:
+                continue
+            if row['state'] == 'retired':
+                continue
+            try:
+                if row['pending_id'] is not None:
+                    raise Conflict('handover pending')
+                receipt = await exact(resource,row)
+                if receipt.get('status') == 'active' or needs_settlement(receipt):
+                    running = await asyncio.to_thread(manager.ollama.list_running)
+                    if manager.models or not isinstance(running,list) or running:
+                        raise Conflict('backend absence unconfirmed')
+                    await asyncio.to_thread(manager.sc.release_lease,row['lease_id'])
+                    receipt = await exact(resource,row)
+                store.retire(model,receipt)
+            except Exception as error:
+                log.warning('Startup left %s residency %s for reconciliation: %s', model,
+                            row['lease_id'], error if isinstance(error,Conflict) else type(error).__name__)
+                continue
+            released.append(row['lease_id'])
+            log.info('Startup released %s residency %s (%sMB) left by a previous gateway',
+                     model, row['lease_id'], row['memory_mb'])
+        return released
 
     def bind_capacity_source(self,*,work_permitted=None):
         """Bind manager-owned observations/renewal before maintenance starts."""
