@@ -110,6 +110,8 @@ class IdentityStore:
                 grant_key TEXT NOT NULL, call_key TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('pending','accepted','stale')),
                 UNIQUE(scope,turn_id,grant_key));
+            CREATE TABLE IF NOT EXISTS call_terminal_failure (
+                call_key TEXT PRIMARY KEY REFERENCES call_identity(key));
         ''')
         self.db.execute('BEGIN IMMEDIATE')
         try:
@@ -134,7 +136,8 @@ class IdentityStore:
             self.db.execute('ROLLBACK')
             raise
 
-    def _bind_in_transaction(self, scope, work_boundary, call_boundary, request, *, job_turn=''):
+    def _bind_in_transaction(self, scope, work_boundary, call_boundary, request, *, job_turn='',
+                             fresh_after_failure=False):
         if job_turn != '':
             required(job_turn)
         digest = hashlib.sha256(encoded(request).encode()).hexdigest()
@@ -143,8 +146,18 @@ class IdentityStore:
         grant = row[0] if row else uuid.uuid4().hex
         if row is None:
             self.db.execute('INSERT INTO work_identity VALUES(?,?,?)', (scope, work_boundary, grant))
+        boundary, attempt = call_boundary, 1
+        # A call the service terminally failed is finished: retrying the same
+        # boundary asks for a new sample, not a replay of the saved failure.
+        # Only an affirmative `failed` is recorded; uncertain or unknown work
+        # keeps its key, so a call that may still be running is never doubled.
+        while fresh_after_failure and self.db.execute('SELECT 1 FROM call_identity c '
+                'JOIN call_terminal_failure f ON f.call_key=c.key WHERE c.work_key=? AND c.boundary=?',
+                (grant, boundary)).fetchone():
+            attempt += 1
+            boundary = call_boundary + '#attempt:' + str(attempt)
         row = self.db.execute('SELECT key,digest,job_key FROM call_identity WHERE work_key=? AND boundary=?',
-                              (grant, call_boundary)).fetchone()
+                              (grant, boundary)).fetchone()
         if row and row[1] != digest:
             raise Conflict('persisted call boundary has different request content; reconcile before submitting')
         call = row[0] if row else uuid.uuid4().hex
@@ -158,15 +171,16 @@ class IdentityStore:
                 self.db.execute('INSERT OR IGNORE INTO native_job_binding VALUES(?,?,?)',
                                 (scope, job_turn, job_key))
             self.db.execute('INSERT INTO call_identity(work_key,boundary,key,digest,job_key) VALUES(?,?,?,?,?)',
-                            (grant, call_boundary, call, digest, job_key))
+                            (grant, boundary, call, digest, job_key))
         return CallKeys(grant, call, job_key=job_key)
 
-    def bind(self, scope, work_boundary, call_boundary, request, *, job_turn=''):
+    def bind(self, scope, work_boundary, call_boundary, request, *, job_turn='', fresh_after_failure=False):
         for value in (scope, work_boundary, call_boundary):
             required(value)
         self.db.execute('BEGIN IMMEDIATE')
         try:
-            keys = self._bind_in_transaction(scope, work_boundary, call_boundary, request, job_turn=job_turn)
+            keys = self._bind_in_transaction(scope, work_boundary, call_boundary, request, job_turn=job_turn,
+                                             fresh_after_failure=fresh_after_failure)
             self.db.execute('COMMIT')
             return keys
         except BaseException:
@@ -238,6 +252,16 @@ class IdentityStore:
 
     def close(self):
         self.db.close()
+
+    def record_terminal_failure(self, grant_key, call_key):
+        """The service read this saved call back as `failed`: terminal, nothing running.
+
+        Only a call this store allocated, under its own grant, is recorded.
+        """
+        required(grant_key)
+        required(call_key)
+        return self.db.execute('INSERT OR IGNORE INTO call_terminal_failure '
+            'SELECT key FROM call_identity WHERE key=? AND work_key=?', (call_key, grant_key)).rowcount
 
     def foreground_turn(self,scope,turn_id,*,record=False):
         required(scope);required(turn_id)

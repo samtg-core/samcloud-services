@@ -660,6 +660,82 @@ def test_auxiliary_hooks_scope_identity_without_leaking_main_boundary(tmp_path, 
         asyncio.run(client.aclose())
 
 
+def test_native_stint_retry_after_terminal_failure_is_a_new_sample(tmp_path, monkeypatch, queued_profile):
+    """0b800389's shape: a stint call the service ends `failed` (backend_tool_parse, 502),
+    then the native retry of the same persisted rows. The retry must reach the service
+    as a new call on the same stint grant, not replay the saved failure."""
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'profile'))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    import httpx
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+    import model_tools
+    from hermes_cli import plugins
+    from ollama import hermes_queue_provider as plugin
+    from ollama.inference_sdk import QueuedClient
+    monkeypatch.setattr(model_tools, 'get_tool_definitions', lambda *a, **k: [])
+    monkeypatch.setattr(model_tools, 'check_toolset_requirements', lambda *a, **k: {})
+    class ToolParseFailureAPI(QueueFixture):
+        failed_key = None
+        def handle(self, request):
+            if request.method == 'POST' and request.url.path.endswith('/executions'):
+                key = json.loads(request.content)['key']
+                if self.failed_key is None:
+                    self.failed_key = key
+            path = request.url.path
+            if self.failed_key is not None and path.removesuffix('/events').endswith('/' + self.failed_key):
+                with self.lock:
+                    self.requests.append((request.method, path, None))
+                if path.endswith('/events'):
+                    return httpx.Response(200, json={'state': 'failed', 'events': [],
+                                                     'next_cursor': 0, 'has_more': False})
+                return httpx.Response(200, json={'state': 'failed', 'result': {'kind': 'error',
+                    'status': 502, 'code': 'backend_tool_parse',
+                    'detail': 'The model ended on a tool call the backend could not parse'}})
+            if path.endswith('/events'):
+                frame = {'id': 'answer', 'object': 'chat.completion.chunk', 'created': 1,
+                         'model': 'qwen', 'choices': [{'index': 0, 'delta': {'content': 'hello'},
+                                                     'finish_reason': 'stop'}]}
+                return httpx.Response(200, json={'state': 'complete', 'events': [
+                    {'seq': 1, 'data': 'data: ' + json.dumps(frame) + '\n\n'},
+                    {'seq': 2, 'data': 'data: [DONE]\n\n'}], 'next_cursor': 2, 'has_more': False})
+            return super().handle(request)
+    api = ToolParseFailureAPI()
+    home = tmp_path / 'profile'
+    source = Path(__file__).resolve().parents[1] / 'hermes-plugins'
+    for component in ('samcloud-queue-provider', 'samcloud-queue-hooks'):
+        shutil.copytree(source / component, home / 'plugins' / component)
+    (home / 'config.yaml').write_text('plugins:\n  isolation: in_process\n  enabled:\n    - samcloud-queue-hooks\n')
+    plugins.discover_plugins()
+    monkeypatch.setattr(plugin, 'QueuedClient',
+                        lambda **kwargs: QueuedClient(**kwargs, http_factory=api.http, poll_interval=.01))
+    db = SessionDB(tmp_path / 'state.db')
+    agent = AIAgent(api_key='synthetic', base_url='https://queue.invalid/v1',
+                    provider='samcloud-queue-stint', model='qwen', session_db=db, quiet_mode=True,
+                    skip_context_files=True, skip_memory=True)
+    agent._cached_system_prompt = 'Synthetic test.'
+    agent._use_prompt_caching = agent.compression_enabled = agent.save_trajectories = False
+    monkeypatch.setattr(agent, '_cleanup_task_resources', lambda *a, **k: None)
+    try:
+        result = agent.run_conversation('same request')
+        assert result['final_response'] == 'hello', result
+        main = [body for method, path, body in api.requests
+                if method == 'POST' and path.endswith('/executions')]
+        keys = [body['key'] for body in main]
+        assert keys[0] == api.failed_key
+        # One failed call, then exactly one new call. Hermes may retry streamed (the seat's
+        # 0b800389 replayed its saved failure) or non-streamed (a changed digest on the same
+        # boundary was a Conflict); either way the same persisted input is re-sampled.
+        assert len(set(keys)) == 2, keys
+        assert main[0]['request']['messages'] == main[-1]['request']['messages']
+        stints = {body['key'] for method, path, body in api.requests
+                  if method == 'POST' and path.endswith('/grants') and body['lifetime'] == 'work_session'}
+        assert len(stints) == 1  # the conversation stint is kept
+    finally:
+        agent.close()
+        db.close()
+
+
 @pytest.mark.parametrize('wait_for_service,native_plugins,stint,contact_loss', [
     (wait, plugins, stint, 'none')
     for wait in (False, True) for plugins in (False, True) for stint in (False, True)

@@ -227,6 +227,7 @@ def register_profiles():
                 grant_lifetime='work_session' if stint else 'execution',
                 require_stint_policy=stint,
                 event_source=host if (stint or auxiliary or host.job_continuity) else None,
+                on_state=host.observe_call_state if stint else None,
                 call_scope=host.tool_api_scope if tool else None)
 
     for name in ('samcloud-queue', 'samcloud-queue-stint', 'samcloud-queue-aux','samcloud-queue-tool'):

@@ -121,7 +121,7 @@ class HeldSource:
         boundary = self.call_boundary()
         store = IdentityStore(path)
         try:
-            keys = store.bind(self.scope, work, boundary, request, job_turn=job_turn)
+            keys = store.bind(self.scope, work, boundary, request, job_turn=job_turn, fresh_after_failure=True)
             if self.turn_id:
                 keys = replace(keys, on_accepted=intake_callback(path, self.scope, self.turn_id, keys, self.api_request_id))
             return keys
@@ -424,6 +424,20 @@ class HostBindings:
 
     def post_api_request(self, **unused):
         self.main.set(None)
+
+    def observe_call_state(self, state):
+        """SDK state observer: remember a stint call the service terminally failed.
+
+        Only `failed` read from the service counts. Transport, uncertain,
+        cancelled and local errors leave the call key to replay as before.
+        """
+        if state.get('kind') != 'execution' or state.get('state') != 'failed':
+            return
+        store = IdentityStore(self.path)
+        try:
+            store.record_terminal_failure(state.get('grant_key'), state.get('call_key'))
+        finally:
+            store.close()
 
     def begin_foreground(self,session_id,turn_id, *, is_current=None):
         session_id = self.owner_session(session_id)
