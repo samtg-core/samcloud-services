@@ -266,6 +266,118 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
             memory_mb=100,ttl_seconds=LEASE_TTL),'own-1')
         self.assertEqual(len(self.requests),1)
 
+    async def queued_text_with_resident_vision(self, *, foreign_first=False):
+        from .manager import VLM_MODELS
+        absence=patch('ollama.inference_shared_resource.cold_vision_absent',return_value=True)
+        absence.start()
+        self.addCleanup(absence.stop)
+        vision=next(iter(VLM_MODELS.values()))['default']
+        self.runtime.settings=QueueSettings(self.root/'queue.sqlite',
+            {'qwen':'gpu',vision:'gpu'},reservation_mb={'qwen':100,vision:20},
+            shared_queue_enabled=True)
+        self.initial.models[vision]='gpu'
+        self.source.binding.models[vision]='gpu'
+        big=self.unity()
+        big['memory_mb']=50
+        lease=self.initial.reserve(vision,resource='gpu',service_id='model-service',
+                                   memory_mb=20,ttl_seconds=LEASE_TTL)
+        self.manager.models[vision]=SimpleNamespace(name=vision,lease_id=lease,
+                                                   memory_mb=20,in_flight=0)
+        grant=self.demand()
+        await self.source.refresh(self.physical)
+        wanted=self.initial.snapshot('qwen')['lease_id']
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'queued')
+        foreign=dict(big,id='later-render',status='queued',memory_mb=25)
+        index=next(i for i,row in enumerate(self.rows) if row['id']==wanted)
+        self.rows.insert(index if foreign_first else len(self.rows),foreign)
+        released=[]
+
+        def strict_release(lease_id):
+            row=next(row for row in self.rows if row['id']==lease_id)
+            row['status']='cancelled' if row['status']=='queued' else 'released'
+            released.append(lease_id)
+            # The registry's strict head of line, not the older fixture's
+            # fit-any-waiter shortcut: later small requests cannot pass.
+            for queued in self.rows:
+                if queued['status']!='queued':
+                    continue
+                if self.view('gpu')['available_memory_mb']<queued['memory_mb']:
+                    break
+                queued['status']='active'
+            return {'status':row['status']}
+
+        self.release=strict_release
+        self.client.release_lease=strict_release
+        return grant,wanted,foreign,released
+
+    async def test_handoff_preserves_earlier_queued_text_demand_and_registry_order(self):
+        grant,wanted,foreign,released=await self.queued_text_with_resident_vision()
+        before=dict(self.runtime.queue.supervisor.journal.get(grant['id'],'requester'))
+        await self.source.refresh(self.physical)
+        self.assertEqual((await self.runtime.shared_resource.task)['phase'],'idle')
+        self.assertEqual(self.initial.snapshot('qwen')['lease_id'],wanted)
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'queued')
+        self.assertNotIn(wanted,released)
+        self.assertEqual(foreign['status'],'queued')
+        self.assertEqual(len(self.requests),2)
+        self.assertEqual(dict(self.runtime.queue.supervisor.journal.get(grant['id'],'requester')),before)
+        with patch('ollama.inference_shared_resource.cold_vision_absent',return_value=True):
+            await self.source.refresh(self.physical)
+        self.assertEqual(len(self.requests),2)  # same queue claim, no re-acquisition
+        # Explicit caller withdrawal makes the reservation unused and releasable.
+        self.runtime.queue.supervisor.journal.request_release(grant['id'],'requester')
+        with patch('ollama.inference_shared_resource.cold_vision_absent',return_value=True):
+            await self.source.refresh(self.physical)
+            await self.runtime.shared_resource.task
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'retired')
+        self.assertIn(wanted,released)
+        self.assertEqual(foreign['status'],'active')
+
+    async def test_handoff_still_serves_earlier_foreign_waiter_without_rekeying_text(self):
+        grant,wanted,foreign,released=await self.queued_text_with_resident_vision(foreign_first=True)
+        await self.source.refresh(self.physical)
+        self.assertEqual((await self.runtime.shared_resource.task)['phase'],'idle')
+        self.assertEqual(foreign['status'],'active')
+        self.assertEqual(self.manager.models,{})
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'queued')
+        self.assertEqual(self.initial.snapshot('qwen')['lease_id'],wanted)
+        self.assertNotIn(wanted,released)
+        self.assertEqual(len(self.requests),2)
+
+    async def test_saved_handoff_reentry_retains_exact_queued_demand(self):
+        self.unity()
+        grant=self.demand()
+        await self.source.refresh(self.physical)
+        wanted=self.initial.snapshot('qwen')['lease_id']
+        call=dict(self.runtime.queue.supervisor.journal.db.execute(
+            'SELECT * FROM executions WHERE grant_id=?',(grant['id'],)).fetchone())
+        self.runtime.shared_resource._save('unloading',allocations=[
+            {'model':'qwen','lease_id':wanted,'memory_mb':100}])
+        # Recover a saved handoff rather than building fresh allocation pointers.
+        self.runtime.shared_resource=ResourceHandoff(self.runtime)
+        result=await self.runtime.shared_resource.begin()
+        self.assertEqual(result['phase'],'idle')
+        self.assertEqual(self.rows[-1]['status'],'queued')
+        self.assertEqual(self.initial.snapshot('qwen')['lease_id'],wanted)
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'queued')
+        self.assertEqual(len(self.requests),1)
+        self.assertEqual(dict(self.runtime.queue.supervisor.journal.execution(call['id'],'requester')),call)
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
+
+    async def test_queued_demand_preservation_refuses_foreign_receipt(self):
+        self.unity()
+        self.demand()
+        await self.source.refresh(self.physical)
+        wanted=self.initial.snapshot('qwen')['lease_id']
+        self.runtime.shared_resource._save('unloading',allocations=[
+            {'model':'qwen','lease_id':wanted,'memory_mb':100}])
+        self.rows[-1]['agent_id']='different-owner'
+        result=await self.runtime.shared_resource.begin()
+        self.assertEqual(result['phase'],'uncertain')
+        self.assertEqual(self.rows[-1]['status'],'queued')
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'queued')
+        self.assertEqual(len(self.requests),1)
+
     async def test_promoted_grant_does_not_override_failed_physical_fit(self):
         self.demand()
         self.manager._collect_stats=lambda:{}

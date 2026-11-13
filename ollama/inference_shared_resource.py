@@ -198,6 +198,20 @@ class ResourceHandoff:
             for allocation in allocations:
                 model = allocation['model']
                 mm = manager.models.get(model)
+                if mm is None:
+                    rows = await source_call(lambda:manager.sc.list_leases(
+                        resource_id=self.resource, service_id=self.initial.service))
+                    row = self._exact(rows, allocation)
+                    intent = self.initial.snapshot(model)
+                    if (row.get('status') == 'queued' and intent is not None
+                            and intent['state'] == 'queued'
+                            and intent['lease_id'] == allocation['lease_id']
+                            and model in self.runtime.queue.supervisor.journal.pending_models(self.resource)):
+                        # A live waiter's intent holds no memory to hand back.
+                        # Keep its exact registry position while releasing real
+                        # residency; cancellation/re-acquisition would put later
+                        # contenders ahead of already accepted demand.
+                        continue
                 if mm is not None:
                     if mm.lease_id != allocation['lease_id']:
                         raise Conflict('residency pointer changed during handoff')
