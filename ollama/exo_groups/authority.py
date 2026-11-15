@@ -9,6 +9,7 @@ must additionally confirm the exact instance and runner readiness.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
@@ -19,7 +20,7 @@ from urllib.parse import quote
 import httpx
 
 from .clock import authority_clock
-from .member import AuthorityDecision, ExpectedMember, check_projection
+from .member import AuthorityDecision, ExpectedMember, check_projection, event_requires_read
 from .plan import BindingRefused, GroupPlan, LaunchBinding
 
 
@@ -87,6 +88,18 @@ class GroupAuthorityReader:
     def invalidate(self) -> None:
         self._epoch += 1
         self._current = None
+
+    def on_event(self, event: Mapping) -> bool:
+        """Withdraw on any exact member/resource hint; caller owns fresh read.
+
+        No event payload establishes authority. The event consumer must also
+        call invalidate on contact loss or a gap in its durable event cursor.
+        """
+        if isinstance(event, Mapping) and any(
+                event_requires_read(expected, event) for expected in self.expected):
+            self.invalidate()
+            return True
+        return False
 
     def _permitted(self, requests: bool) -> bool:
         try:

@@ -138,6 +138,22 @@ class ProviderGroupAuthority(unittest.IsolatedAsyncioTestCase):
             await self.reader.refresh()
         self.assertIsNone(self.reader.current)
 
+    async def test_exact_member_event_withdraws_but_never_grants_permission(self):
+        binding = self.launches[-1]
+        hint = {'type': 'lease.group_changed', 'target': binding.lease_id,
+            'data': {'resource_id': binding.resource_id, 'lease_id': binding.lease_id,
+                     'group_id': binding.group_id, 'generation': 999}}
+        await self.reader.refresh()
+        unrelated = copy.deepcopy(hint)
+        unrelated['data']['group_id'] = 'another-group'
+        self.assertFalse(self.reader.on_event(unrelated))
+        self.assertTrue(self.reader.may_serve_requests())
+        self.assertTrue(self.reader.on_event(hint))
+        self.assertFalse(self.reader.may_serve_requests())
+        # Event's generation and advertised state are never used as permission.
+        await self.reader.refresh()
+        self.assertTrue(self.reader.may_serve_requests())
+
     async def test_host_sleep_or_backward_clock_cannot_extend_authority(self):
         await self.reader.refresh()
         self.now = 399.9

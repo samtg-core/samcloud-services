@@ -105,7 +105,8 @@ def test_actual_admission_serving_and_fence_never_create_or_release_leases(clien
             await reader.refresh()
             assert reader.may_serve_requests()
             command(client, admitted[1], "fence", reason="replace test coordinator")
-            reader.invalidate()  # Event handler withdraws before reconciliation.
+            notices = client.get("/api/v1/events/recent?limit=100").json()
+            assert any(reader.on_event(event) for event in notices)
             assert not reader.may_serve_requests()
             observed = await reader.refresh()
             assert all(decision.state == "stop_required" for decision in observed.decisions)
