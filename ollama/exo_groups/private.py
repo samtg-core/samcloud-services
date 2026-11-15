@@ -1,12 +1,10 @@
-"""Authenticated loopback EXO metadata, separate from the plane credential.
-
-No inference submission, placement or retry is exposed by this reader.
-"""
+"""Private EXO transport; inference must consume a journal submission decision."""
 
 import os
 from pathlib import Path
 import re
 import stat
+from contextlib import asynccontextmanager
 
 import httpx
 
@@ -54,6 +52,30 @@ class PrivateEXO:
         except Exception:
             # No token, local file path, response body or prompt in diagnostics.
             raise PrivateEXOUnavailable('private EXO state unavailable') from None
+
+    def _headers(self):
+        return {'Authorization': 'Bearer ' + private_key(self.key_file),
+                'Accept': 'application/json', 'Cache-Control': 'no-cache'}
+
+    @asynccontextmanager
+    async def chat(self, bindings, execution_id, contract, body, *, state_event_idx):
+        """Commit once-only ownership immediately before the sole inference POST."""
+        headers = self._headers()
+        headers['Accept'] = 'text/event-stream'
+        bindings.begin(execution_id, contract, body, state_event_idx=state_event_idx)
+        async with self._client.stream('POST', '/v1/chat/completions',
+                                       headers=headers, json=body) as response:
+            yield response
+
+    async def command_end(self, command_id):
+        if (not isinstance(command_id, str)
+                or not re.fullmatch(r'[a-f0-9-]{36}', command_id)):
+            raise PrivateEXOUnavailable('private EXO command identity unavailable')
+        try:
+            return await bounded_json(self._client, 'GET',
+                '/leased/commands/' + command_id + '/end', self._headers())
+        except Exception:
+            raise PrivateEXOUnavailable('private EXO command end unavailable') from None
 
     async def close(self):
         await self._client.aclose()

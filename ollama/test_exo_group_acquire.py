@@ -112,6 +112,18 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.actor.authority.may_serve_requests())
         self.assertEqual(len(self.saved()['launches']), 3)
 
+    async def test_request_permission_requires_serving_current_cursor_and_authority(self):
+        self.group['phase'] = 'serving'
+        await self.start()
+        self.assertTrue(self.actor.may_serve_requests())
+        self.actor.events_lost()
+        self.assertFalse(self.actor.may_serve_requests())
+        self.actor.events_reconciled()
+        await self.actor.wait()
+        self.assertTrue(self.actor.may_serve_requests())
+        self.actor.authority.invalidate()
+        self.assertFalse(self.actor.may_serve_requests())
+
     async def test_observer_cancellation_leaves_metadata_task_owned(self):
         self.release.clear()
         self.actor.note_demand(self.call['id'])

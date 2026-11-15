@@ -40,8 +40,15 @@ class ExecutionBindings:
                 request_sha256 TEXT NOT NULL,
                 command_id TEXT UNIQUE,
                 created REAL NOT NULL,
+                state_event_idx INTEGER,
+                end_json TEXT,
                 FOREIGN KEY(owner,request_key) REFERENCES exo_group_intents(owner,request_key)
             )''')
+            columns = {row['name'] for row in self.journal.db.execute(
+                'PRAGMA table_info(exo_execution_bindings)')}
+            for name, declaration in (('state_event_idx', 'INTEGER'), ('end_json', 'TEXT')):
+                if name not in columns:
+                    self.journal.db.execute(f'ALTER TABLE exo_execution_bindings ADD COLUMN {name} {declaration}')
 
     def bind_instance(self, owner: str, request_key: str, contract: InstanceContract) -> None:
         """Freeze provider configuration before private instance creation.
@@ -71,7 +78,8 @@ class ExecutionBindings:
             self.journal.db.execute('INSERT INTO exo_private_instances VALUES(?,?,?,?,?)',
                 (owner, request_key, value, contract.sha256, contract.instance_id))
 
-    def begin(self, execution_id: str, contract: InstanceContract, body: dict) -> dict:
+    def begin(self, execution_id: str, contract: InstanceContract, body: dict,
+              *, state_event_idx: int) -> dict:
         """Consume one POST decision while the existing supervisor owns dispatch.
 
         Repeated calls refuse, including after crash or lost first response.
@@ -80,6 +88,8 @@ class ExecutionBindings:
         """
         if not isinstance(contract, InstanceContract):
             raise TypeError("provider-prepared instance contract required")
+        if type(state_event_idx) is not int or state_event_idx < -1:
+            raise Conflict("exact pre-dispatch EXO state index required")
         journal = self.journal
         with journal.transaction():
             row = journal.db.execute('''SELECT x.state,x.request,g.model,g.resource,
@@ -104,14 +114,16 @@ class ExecutionBindings:
             request = json.loads(row['request'])
             if (request.get('operation') != 'chat' or not isinstance(request.get('body'), dict)
                     or request['body'].get('model') != plan.model_id
-                    or encoded(body) != encoded(request['body'] | {'stream': True})):
+                    or encoded(body) != encoded(request['body'])):
                 raise Conflict("private wire body differs from the saved inference request")
             if journal.db.execute('SELECT 1 FROM exo_execution_bindings WHERE execution_id=?',
                                   (execution_id,)).fetchone():
                 raise Conflict("private inference submission already owned; do not replay")
-            journal.db.execute('''INSERT INTO exo_execution_bindings VALUES(?,?,?,?,?,?,?,NULL,?)''',
+            journal.db.execute('''INSERT INTO exo_execution_bindings
+                (execution_id,owner,request_key,contract_json,contract_sha256,instance_id,
+                 request_sha256,created,state_event_idx) VALUES(?,?,?,?,?,?,?,?,?)''',
                 (execution_id, row['owner'], row['request_key'], encoded(asdict(contract)),
-                 contract.sha256, contract.instance_id, digest(body), time.time()))
+                 contract.sha256, contract.instance_id, digest(body), time.time(), state_event_idx))
         return self.snapshot(execution_id)
 
     def snapshot(self, execution_id: str) -> dict:
@@ -121,7 +133,35 @@ class ExecutionBindings:
             raise NotFound()
         result = dict(row)
         result['contract'] = json.loads(result.pop('contract_json'))
+        result['end'] = json.loads(result.pop('end_json') or 'null')
         return result
+
+    def record_end(self, execution_id: str, proof: dict) -> dict:
+        """Save exact all-rank runtime evidence; never finish or release here."""
+        with self.journal.transaction():
+            saved = self.snapshot(execution_id)
+            contract = InstanceContract(**saved['contract'])
+            instance = contract._instance
+            if (not isinstance(proof, dict) or set(proof) != {
+                    'command_id', 'instance_id', 'task_id', 'runner_ids', 'end_event_idx',
+                    'group_id', 'generation', 'rank_manifest_sha256'}
+                    or saved['command_id'] is None or proof['command_id'] != saved['command_id']
+                    or proof['instance_id'] != saved['instance_id']
+                    or proof['group_id'] != contract.group_id
+                    or type(proof['generation']) is not int or proof['generation'] != contract.generation
+                    or proof['rank_manifest_sha256'] != GroupPlan.parse(
+                        self.intents.snapshot(saved['owner'], saved['request_key'])['plan']).rank_manifest_sha256
+                    or type(proof['end_event_idx']) is not int
+                    or type(saved['state_event_idx']) is not int
+                    or proof['end_event_idx'] <= saved['state_event_idx']
+                    or not isinstance(proof['task_id'], str) or not proof['task_id']
+                    or proof['runner_ids'] != sorted(instance['shardAssignments']['runnerToShard'])):
+                raise Conflict("private end evidence differs from the submitted execution")
+            if saved['end'] is not None and encoded(saved['end']) != encoded(proof):
+                raise Conflict("private end evidence already frozen")
+            self.journal.db.execute('UPDATE exo_execution_bindings SET end_json=? WHERE execution_id=?',
+                                    (encoded(proof), execution_id))
+        return self.snapshot(execution_id)
 
     def observe_command(self, execution_id: str, command_id: str) -> dict:
         """Bind EXO's actual UUID once, before publishing any of its output.

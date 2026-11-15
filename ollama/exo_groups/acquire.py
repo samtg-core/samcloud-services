@@ -144,6 +144,12 @@ class GroupAcquisition:
             await asyncio.shield(task)
         return self.report
 
+    def may_serve_requests(self):
+        """Current event cursor and lease prerequisite; backend checks additional."""
+        return bool(not self._closed and self._events_ready
+            and self.report.phase == 'lease_serving' and self.authority is not None
+            and self.authority.may_serve_requests())
+
     def _current(self, epoch):
         if self._closed or not self._events_ready or epoch != self._epoch:
             raise RuntimeError('acquisition observation changed')

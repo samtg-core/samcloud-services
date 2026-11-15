@@ -31,9 +31,9 @@ class ExecutionBindingControls(unittest.TestCase):
         instance_id = digest([self.group['id'], 1, self.plan.rank_manifest_sha256, 'instance'])
         self.contract = InstanceContract(digest(asdict(self.plan)), self.group['id'], 1,
             'e' * 64, canonical({'instance': {'MlxRingInstance': {'instance_id': instance_id}}}).decode(),
-            canonical({'MlxRingInstance': {'instanceId': instance_id}}).decode())
+            canonical({'MlxRingInstance': {'instanceId': instance_id, 'shardAssignments': {'runnerToShard': {m.rank: {} for m in self.plan.members}}}}).decode())
         self.body = {'model': self.plan.model_id, 'messages': [{'role': 'user', 'content': 'hello'}],
-                     'stream': False}
+                     'stream': True}
         self.command = '318b2c23-d63e-4c4f-8dc5-eaef0753d68a'
 
     def tearDown(self):
@@ -51,7 +51,7 @@ class ExecutionBindingControls(unittest.TestCase):
         return grant, call
 
     def begin(self, call):
-        return self.calls.begin(call['id'], self.contract, self.body | {'stream': True})
+        return self.calls.begin(call['id'], self.contract, self.body | {'stream': True}, state_event_idx=10)
 
     def bind(self):
         self.calls.bind_instance(self.plan.owner_id, self.plan.request_key, self.contract)
@@ -113,14 +113,14 @@ class ExecutionBindingControls(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.begin(call)
         self.bind()
-        for body in (self.body, self.body | {'stream': True, 'model': 'other'},
+        for body in (self.body | {'stream': False}, self.body | {'stream': True, 'model': 'other'},
                      self.body | {'stream': True, 'messages': []}):
             with self.assertRaises(Conflict):
-                self.calls.begin(call['id'], self.contract, body)
+                self.calls.begin(call['id'], self.contract, body, state_event_idx=10)
         for contract in (replace(self.contract, generation=2),
                          replace(self.contract, runtime_sha256='f' * 64)):
             with self.assertRaises(Conflict):
-                self.calls.begin(call['id'], contract, self.body | {'stream': True})
+                self.calls.begin(call['id'], contract, self.body | {'stream': True}, state_event_idx=10)
         with self.assertRaises(NotFound):
             self.calls.snapshot(call['id'])
 
@@ -148,6 +148,45 @@ class ExecutionBindingControls(unittest.TestCase):
         for value in ('chatcmpl-' + self.command, '', None, 'secret\ntext'):
             with self.assertRaises(Conflict):
                 self.calls.observe_command(second['id'], value)
+
+    def proof(self):
+        return {'command_id': self.command, 'instance_id': self.contract.instance_id,
+            'task_id': 'task', 'runner_ids': sorted(member.rank for member in self.plan.members),
+            'end_event_idx': 20, 'group_id': self.group['id'], 'generation': 1,
+            'rank_manifest_sha256': self.plan.rank_manifest_sha256}
+
+    def test_end_evidence_is_durable_and_does_not_finish_or_release_the_call(self):
+        _, call = self.enqueue()
+        self.bind()
+        self.journal.dispatch_next(HOST_RESOURCES['slice'])
+        self.begin(call)
+        self.calls.observe_command(call['id'], self.command)
+        proof = self.proof()
+        self.calls.record_end(call['id'], proof)
+        self.assertEqual(self.calls.record_end(call['id'], proof)['end'], proof)
+        with self.assertRaises(Conflict):
+            self.calls.record_end(call['id'], proof | {'end_event_idx': 21})
+        self.journal.close()
+        self.journal = Arbiter(self.path)
+        self.intents = GroupIntents(self.journal)
+        self.calls = ExecutionBindings(self.intents)
+        self.assertEqual(self.calls.snapshot(call['id'])['end'], proof)
+        self.assertEqual(self.journal.execution(call['id'], 'caller')['state'], 'running')
+
+    def test_legacy_submission_without_event_baseline_cannot_invent_end_or_replay(self):
+        _, call = self.enqueue()
+        self.bind()
+        self.journal.dispatch_next(HOST_RESOURCES['slice'])
+        self.begin(call)
+        self.calls.observe_command(call['id'], self.command)
+        self.journal.db.execute('ALTER TABLE exo_execution_bindings DROP COLUMN state_event_idx')
+        self.journal.db.execute('ALTER TABLE exo_execution_bindings DROP COLUMN end_json')
+        self.calls = ExecutionBindings(self.intents)
+        self.assertIsNone(self.calls.snapshot(call['id'])['state_event_idx'])
+        with self.assertRaises(Conflict):
+            self.calls.record_end(call['id'], self.proof())
+        with self.assertRaises(Conflict):
+            self.begin(call)
 
 
 if __name__ == '__main__':
