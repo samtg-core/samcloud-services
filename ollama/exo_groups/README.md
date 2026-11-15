@@ -48,15 +48,26 @@ The plan/member/clock code is migrated from the qualified consumer preparation
 in task967 (docs575/630/632). There are no imports from that workspace staging
 directory. The HTTP reader and its real-registry tests live here as provider code.
 
+`intents.py` links group-create provenance to queued executions in that same
+`Arbiter` database. The exact plan and server-idempotent create body commit before
+a coordinator can submit them. Multiple queued calls can share one pinned intent;
+changed placement/key reuse conflicts. Reopening the journal recovers the same
+request, and a known group ID is reconciled rather than created again. A fence
+never silently advances the saved generation. Cancelled, running or uncertain
+work alone cannot initiate new acquisition. These rows have no dispatch order
+or scheduler of their own, and they perform no plane writes.
+
 ## Integration still required
 
 This component is **not enabled by startup and is not a complete EXO provider**.
 It does not acquire leases, launch ranks, load a model or run inference. The
 remaining provider integration must:
 
-1. Assemble demand from the existing inference journal before dispatch, without
-   requiring the HTTP observer to stay connected. Persist the exact group,
-   generation, manifest and instance binding before a provider POST.
+1. Connect the saved intents/demand links to a service-owned acquisition actor
+   before dispatch, without requiring the HTTP observer to stay connected.
+   Persist the exact group, generation, manifest and execution/instance binding
+   before an inference POST. The create-intent store is implemented; the actor
+   and execution/instance binding are not.
 2. Publish group-covered capacity alongside local-model capacity. Slice's group
    lease must not be mistaken for spare local memory or trigger a second lease.
 3. Bind the pinned EXO runtime, its private namespace/API key and exact explicit
@@ -80,7 +91,7 @@ From the model-service repository:
 ```sh
 python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_member ollama.test_exo_group_clock \
-  ollama.test_exo_group_authority
+  ollama.test_exo_group_authority ollama.test_exo_group_intents
 ```
 
 The real registry qualification uses Samcloud PR19's source, currently

@@ -16,13 +16,15 @@ from test_registry import _register_device
 
 from ollama import test_exo_group_plan as fixtures
 from ollama.exo_groups.authority import AuthorityReadUnavailable, GroupAuthorityReader
+from ollama.exo_groups.intents import GroupIntents
 from ollama.exo_groups.plan import GroupPlan, bind_admitted_group
+from ollama.inference_arbiter import Arbiter
 
 pytest_plugins = ["test_registry"]
 
 
 @pytest.fixture
-def admitted(client):
+def placement(client):
     fixture = fixtures.GroupBindingControls()
     fixture.setUp()
     raw = fixture.raw
@@ -39,6 +41,12 @@ def admitted(client):
         assert response.status_code == 200, response.text
         db.execute("UPDATE resources SET expiry_policy='hold' WHERE id=?",
                    (member.resource_id,))
+    return plan, fixture.manifest
+
+
+@pytest.fixture
+def admitted(client, placement):
+    plan, _ = placement
     response = client.post("/api/v1/lease-groups", json=plan.request())
     assert response.status_code == 200, response.text
     group = response.json()
@@ -117,6 +125,38 @@ def test_actual_admission_serving_and_fence_never_create_or_release_leases(clien
         finally:
             await reader.close()
     asyncio.run(run())
+
+
+def test_actual_lost_create_reply_recovers_the_same_group_from_inference_journal(
+        client, placement, tmp_path):
+    plan, manifest = placement
+    path = tmp_path / 'inference.sqlite'
+    journal = Arbiter(path)
+    try:
+        intents = GroupIntents(journal)
+        grant = journal.submit('native-caller', 'one', 'claude-services-slice/gpu-0',
+                               plan.model_id, lifetime='execution')
+        call = journal.enqueue(grant['id'], 'native-caller', 'one', {'operation': 'chat'})
+        intents.prepare(call['id'], plan, manifest)
+        body = intents.create_request(plan.owner_id, plan.request_key)
+        assert body == plan.request()
+        first = client.post('/api/v1/lease-groups', json=body)
+        assert first.status_code == 200
+        # The API committed, but the coordinator didn't persist the reply.
+        first_id = first.json()['id']
+        journal.close()
+        journal = Arbiter(path)
+        intents = GroupIntents(journal)
+        assert intents.snapshot(plan.owner_id, plan.request_key)['group_id'] is None
+        replay = client.post('/api/v1/lease-groups',
+            json=intents.create_request(plan.owner_id, plan.request_key))
+        assert replay.status_code == 200 and replay.json()['id'] == first_id
+        intents.record_group(plan.owner_id, plan.request_key, replay.json())
+        assert intents.create_request(plan.owner_id, plan.request_key) is None
+        assert journal.execution(call['id'], 'native-caller')['state'] == 'queued'
+        assert_still_charged()  # Three member leases, not a duplicate set.
+    finally:
+        journal.close()
 
 
 def test_actual_peer_hold_expiry_revokes_the_whole_group_without_settlement(client, admitted):
