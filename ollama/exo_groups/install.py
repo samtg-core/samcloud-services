@@ -23,6 +23,7 @@ class GroupProvider:
         self.model, self.resource = actor.plan.model_id, HOST_RESOURCES['slice']
         self.backend = None
         self.completion = GroupCompletion(actor)
+        self.publication = None
         self._ready = False
         self._actor_epoch = None
         self._epoch = 0
@@ -111,6 +112,21 @@ class GroupProvider:
     async def settle_member(self, lease_id, *, generation, file_id, sha256):
         return await self.completion.settle_member(lease_id, generation=generation,
                                                   file_id=file_id, sha256=sha256)
+
+    def bind_publication(self, *, group_scope):
+        """Trusted deployment configuration chooses the existing file audience."""
+        from .publication import GroupPublication
+        if self.publication is not None:
+            if self.publication.group_scope != group_scope:
+                raise ValueError('cleanup publication audience is already configured')
+            return self.publication
+        self.publication = GroupPublication(self.completion, group_scope=group_scope)
+        return self.publication
+
+    async def settle_observed_member(self, lease_id, raw, *, generation):
+        if self.publication is None:
+            raise RuntimeError('cleanup publication audience is unconfigured')
+        return await self.publication.complete_member(lease_id, raw, generation=generation)
 
     def permitted(self, resource):
         if (resource != self.resource or self.source.paused or self._closed

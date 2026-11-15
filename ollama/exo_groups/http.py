@@ -5,16 +5,19 @@ import json
 
 async def bounded_json(client, method, path, headers, *, payload=None):
     async with client.stream(method, path, headers=headers, json=payload) as response:
-        if (response.status_code != 200 or
-                response.headers.get('content-type', '').split(';')[0] != 'application/json'):
-            raise ValueError('plane HTTP metadata unavailable')
-        raw = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(raw) + len(chunk) > 128 * 1024:
-                raise ValueError('plane metadata exceeds bound')
-            raw.extend(chunk)
+        return await bounded_response(response)
 
-        return decode_json(raw)
+
+async def bounded_response(response):
+    if (response.status_code != 200 or
+            response.headers.get('content-type', '').split(';')[0] != 'application/json'):
+        raise ValueError('plane HTTP metadata unavailable')
+    raw = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(raw) + len(chunk) > 128 * 1024:
+            raise ValueError('plane metadata exceeds bound')
+        raw.extend(chunk)
+    return decode_json(raw)
 
 
 def decode_json(raw):

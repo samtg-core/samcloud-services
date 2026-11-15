@@ -1122,3 +1122,74 @@ def test_actual_partly_owned_group_uses_host_no_start_fence_then_exact_settlemen
             await actor.close()
             journal.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('lose_upload_reply,expire_member', [(False,False),(True,False),(True,True)])
+def test_actual_cleanup_upload_then_exact_member_settlement(
+        client, admitted, placement, tmp_path, lose_upload_reply, expire_member):
+    """Real file upload/list/readback and group receipt, no physical host effects."""
+    from ollama.exo_groups.publication import GroupPublication
+    from ollama.exo_groups.completion import GroupCompletion
+    from ollama.exo_groups.plane import PlaneUnavailable
+
+    class UploadRegistry(ObservedRegistry):
+        async def handle_async_request(self, request):
+            response = await super().handle_async_request(request)
+            if self.lose and request.method == 'POST' and request.url.path == '/api/v1/files':
+                self.lose = False
+                await response.aread()
+                await response.aclose()
+                raise httpx.ReadError('lost file reply after actual commit')
+            return response
+
+    async def run():
+        plan, group, _ = admitted
+        path = tmp_path/'publication.sqlite'
+        journal = Arbiter(path)
+        actor, completion, injected, proofs = cleanup_controller(client,plan,placement[1],group,journal)
+        lease = next(iter(proofs))
+        raw = injected.files[proofs[lease]['file_id']]
+        if expire_member:
+            db.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",(lease,))
+            client.get('/api/v1/resources/'+plan.members[0].resource_id)
+        await actor.plane.close()
+        transport = UploadRegistry(client)
+        transport.lose = lose_upload_reply
+        actor.plane = CoordinatorPlane(plan.owner_id,lambda:client._headers['Authorization'],transport=transport)
+        completion = GroupCompletion(actor)
+        scope = client.get('/api/v1/auth/verify').json()['default_group']
+        publication = GroupPublication(completion,group_scope=scope)
+        try:
+            if lose_upload_reply:
+                with pytest.raises(PlaneUnavailable):
+                    await publication.complete_member(lease,raw,generation=1)
+                assert db.query_one('SELECT COUNT(*) n FROM files')['n'] == 1
+                assert_still_charged(expired=int(expire_member))
+                # Process restart retains upload_started and rediscovers the
+                # same actual file, not a second upload or replacement proof.
+                await actor.wait()
+                journal.close()
+                journal = Arbiter(path)
+                actor.intents = GroupIntents(journal)
+                completion = GroupCompletion(actor)
+                publication = GroupPublication(completion,group_scope=scope)
+            result = await publication.complete_member(lease,raw,generation=1)
+            assert result['state'] == 'exact_member_settlement_confirmed'
+            saved = publication._saved(lease)
+            assert saved['confirmed'] == 1
+            assert saved['raw'] == raw
+            assert db.query_one('SELECT COUNT(*) n FROM files')['n'] == 1
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 3
+            terminal = client.get('/api/v1/leases/'+lease).json()
+            assert terminal['settled_at'] is not None if expire_member else terminal['status']=='released'
+            assert db.query_one("SELECT COUNT(*) n FROM leases WHERE status='active'")['n'] == 2
+            assert client.get('/api/v1/files/'+str(saved['file_id'])+'/raw').content == raw
+            assert result['cleanup_evidence']['evidence_ref'].endswith('/'+str(saved['file_id'])+'/raw')
+            posts = [p for m,p in transport.requests if m=='POST']
+            assert posts.count('/api/v1/files') == 1
+            assert len([p for p in posts if '/members/' in p and p.endswith('/release')]) == 1
+            assert not any(p.endswith('/advance') or p.endswith('/renew') for p in posts)
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
