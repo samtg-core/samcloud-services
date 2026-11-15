@@ -426,6 +426,11 @@ async def lifespan(app: FastAPI):
     if runtime is not None:
         if runtime.manager is not mgr or runtime.queue is not inference_dispatcher:
             raise RuntimeError('Inference runtime/manager ownership differs; shutdown refused')
+        composition = getattr(runtime, 'exo_service', None)
+        if composition is not None:
+            # Its observers outlive callers. Refuse while a host has no cleanup
+            # or a group lacks exact settlement, before manager lease release.
+            await composition.close()
         state = await runtime.quiesce()
         if not state['drained']:
             # A stopped HTTP waiter is not backend termination. Do not enter

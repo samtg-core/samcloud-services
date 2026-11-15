@@ -574,6 +574,9 @@ class QueueRuntime:
 
     def close(self):
         """Only after quiescence and manager cleanup, never on uncertain work."""
+        composition = getattr(self, 'exo_service', None)
+        if composition is not None and not composition.closed:
+            raise RuntimeError('EXO service subscriptions must retain their lifecycle owner')
         host_rank = getattr(self, 'host_rank', None)
         if host_rank is not None and not host_rank.closed:
             raise RuntimeError('Host rank must retain its owner until observed cleanup')

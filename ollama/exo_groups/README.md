@@ -632,3 +632,38 @@ previously qualified on all three hosts; these receipt controls are not a live
 fleet attempt, model startup or group settlement. Exact installed route/feed
 configuration, service-owned artifact publication and startup orchestration
 remain required before activation.
+
+## Trusted service startup and subscription lifetime
+
+`service.EXOQueueStartup` is an explicit Python launcher binding accepted by the
+existing server lifespan. It runs the same verified cold `QueueStartup`, then
+awaits the launcher's `configure(runtime)` before background maintenance or
+public serving. That function binds the exact provider/host objects and returns
+`EXOService(runtime)`. QueueSettings JSON cannot import/select a factory, and the
+ordinary launcher has no default EXO activation. Failed configuration aborts
+startup with the journal retained; it cannot fall back to legacy adoption.
+
+`EXOService` owns one subscription for each installed role. A co-hosted coordinator
+and host use their separate existing readers and credentials. Subscriptions are
+not finite Supervisor preparations, so an open SSE stream cannot deadlock the
+queue drain. Failure is recorded in the existing journal and logged without
+exception content. The same owner exposes explicit reconnect and shielded wait;
+there is no reconnect timer, new watchdog, rank launch or inference retry.
+A live subscription task is diagnostic state, never authority.
+
+The existing server shutdown closes this owner before manager shutdown. It first
+requires observed host cleanup and exact group settlement through the component
+close methods. A refusal retains the streams, child owner and explicit authority
+alarm. After proven cleanup it drains the subscriptions before closing the host
+adapter, whose close refuses a live stream. QueueRuntime.close also refuses an
+unclosed composition. These paths do not release a group or invent cleanup.
+
+Thirteen new controls exercise the real FastAPI lifespan, QueueRuntime, host
+runtime and registry feed with isolated HTTP/physical fixtures: ordering, missing
+or failing factory, consumer cancellation, explicit same-attempt reconnect,
+separate co-hosted principals, failure reporting, shutdown refusal and successful
+no-start-proof drain. The full group/compatibility set passes361, gateway/SDK357,
+and617 pass on Obelisk's own Python3.14.10 with external DNS/connects blocked and
+no MLX/native compute import. Counts overlap. These are CPU controls, not fleet
+activation or a distributed model result. The fleet's exact configure function,
+launch/receipt orchestration and enforced private transport remain rollout work.
