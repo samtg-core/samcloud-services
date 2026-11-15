@@ -124,6 +124,25 @@ No saved readiness result authorizes a later dispatch. The fixture is actual-typ
 serialization with synthetic node IDs, not observed running hosts. Its selected
 source-pin manifest checks this API surface; it is not full runtime qualification.
 
+`private.py` reads authenticated `/state` only from an explicitly configured
+loopback port. It reads EXO's own single-link, owned 0600 private key, not the
+coordinator's plane credential; redirects, oversized/ambiguous JSON, failed reads
+and invalid keys establish no observation. There is no cached readiness fallback,
+retry, environment proxy or default transport deadline.
+
+`calls.py` freezes the prepared instance per group intent in that same inference
+journal, then records a once-only private submission decision only for the actual
+dispatched execution. The canonical body must equal the saved chat request with
+streaming enabled. Reopening after a crash or losing the first frame cannot create
+a second submission, even with zero saved output.
+
+EXO creates a command UUID inside its chat handler, so it **cannot be known before
+POST**. The pre-POST record includes execution, group generation, instance/contract
+and canonical request digest, with command initially unknown. The actual UUID binds
+once on first observation, before output is published. A changed/duplicate command
+refuses; a late observation may improve uncertain-call provenance but cannot finish
+it or release HOLD. These components do not yet submit inference or publish output.
+
 ## Integration still required
 
 This component is **not enabled by startup and is not a complete EXO provider**.
@@ -132,14 +151,15 @@ PR has been installed on a host. It does not launch ranks, load a model or run
 inference. The remaining provider integration must:
 
 1. Bind the actor/hook to startup's exact configuration, the existing event feed
-   and shutdown lifecycle after the rollout gates. Persist execution/instance
-   binding before an inference POST; group/member intent binding is implemented.
+   and shutdown lifecycle after the rollout gates. Wire the implemented instance/
+   execution journal binding into the private adapter before an inference POST.
 2. Publish group-covered capacity alongside local-model capacity. Slice's group
    lease must not be mistaken for spare local memory or trigger a second lease.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
    authenticated API and host/file receipts. EXO's chat API selects by model, not
    a caller-supplied instance ID; check exact state before dispatch and persist
-   execution-to-instance/command identity before posting inference.
+   execution-to-instance identity before posting inference. Bind the server-created
+   command UUID on first observation, before publishing output.
 4. Execute through the existing supervisor. Transport loss, a missing terminal
    frame or unconfirmed backend end retains uncertainty and physical HOLD;
    neither reconnect nor elapsed time retries inference or releases the group.
@@ -163,7 +183,8 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_authority ollama.test_exo_group_intents \
   ollama.test_exo_group_acquire ollama.test_exo_group_demand \
   ollama.test_exo_group_renew ollama.test_exo_group_alarm \
-  ollama.test_exo_group_instance
+  ollama.test_exo_group_instance ollama.test_exo_group_calls \
+  ollama.test_exo_group_private
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the
