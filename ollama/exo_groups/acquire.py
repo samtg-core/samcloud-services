@@ -154,6 +154,11 @@ class GroupAcquisition:
             and self.report.phase == 'lease_serving' and self.authority is not None
             and self.authority.may_serve_requests())
 
+    def may_start_ranks(self):
+        return bool(not self._closed and self._events_ready
+            and self.report.phase in ('admitted', 'lease_serving') and self.authority is not None
+            and self.authority.may_start_ranks())
+
     def _current(self, epoch):
         if self._closed or not self._events_ready or epoch != self._epoch:
             raise RuntimeError('acquisition observation changed')

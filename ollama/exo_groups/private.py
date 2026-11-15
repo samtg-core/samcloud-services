@@ -57,6 +57,16 @@ class PrivateEXO:
         return {'Authorization': 'Bearer ' + private_key(self.key_file),
                 'Accept': 'application/json', 'Cache-Control': 'no-cache'}
 
+    async def create_instance(self, starts, plan, contract, *, state_event_idx):
+        headers = self._headers()
+        starts.begin(plan, contract, state_event_idx=state_event_idx)
+        try:
+            response = await bounded_json(self._client, 'POST', '/instance', headers,
+                payload=contract.create_request())
+            return starts.accept(plan, contract, response)
+        except Exception:
+            raise PrivateEXOUnavailable('private instance creation outcome unconfirmed; do not replay') from None
+
     @asynccontextmanager
     async def chat(self, bindings, execution_id, contract, body, *, state_event_idx):
         """Commit once-only ownership immediately before the sole inference POST."""

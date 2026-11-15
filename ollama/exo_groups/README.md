@@ -154,7 +154,28 @@ streams or unconfirmed end evidence stay uncertain, preserving HOLD and output.
 The acquisition actor's current event cursor and lease permission are required;
 runtime/host verification is an explicit injected effect, with no default success.
 
-The runtime cooperation is a separate **uninstalled, uncommitted candidate**:
+`startup.py` adds an explicit private-instance submission owner on the same
+journal. It requires fresh admitted authority, an independently verified runtime
+and the exact empty three-host namespace. The frozen contract/baseline commits
+before the sole POST /instance; acceptance records the server command and matching
+card, never runner readiness or serving permission. Crash, lost reply, malformed
+acceptance and a second concurrent startup owner cannot re-post. GET reconciliation,
+host launch and mark-serving remain separate integration work.
+
+The leased runtime candidate also validates the prepared explicit pipeline/card
+at POST /instance and avoids ModelCard.load's name-based fallback to Hugging Face
+main. Ordinary EXO profiles retain their lookup. Actual handler tests cover the
+pinned-card/ordinary paths and reject changed namespace, runner, endpoint, card,
+layers, timeout, remote-code and image variants before any command. They use MLX
+CPU and an injected command transport; no model/node/listening server.
+
+Current runtime source review: [packet2256](https://cloud.samtg.xyz/api/v1/files/2256/raw),
+SHA256`e8f5e1ea5cdff3c0384ac8224b3425a1740cad9c8b07fcb79d615cdaf523808a`.
+It reconstructs903source files and includes the pinned-card creation change.
+The12placement,12command-end and15actual HTTP-handler controls pass from that
+reconstructed copy. Full native repository gates remain unmet; no commit/install.
+
+The earlier runtime-end candidate remains an exact historical packet:
 [review packet2254](https://cloud.samtg.xyz/api/v1/files/2254/raw), SHA256
 `4af9caf540450fadfb1ac848354c7415a8221d30a7f503eb02d12ae71155cf9a`.
 Its private `/leased/commands/{id}/end` waits on EXO's existing indexed events for
@@ -211,8 +232,8 @@ Remaining work:
 
 1. Bind exact deployed configuration, staging verification, the existing plane
    event feed and observed host cleanup into startup/shutdown after rollout gates.
-2. Implement once-only private-instance/rank startup and runtime/file receipt
-   verification before binding the prepared backend or marking the group serving.
+2. Wire the implemented once-only private-instance submission to host rank startup,
+   staging/runtime/file receipts and mark-serving after actual ready observations.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
    authenticated API and host/file receipts. EXO's chat API selects by model, not
    a caller-supplied instance ID; check exact state before dispatch and persist
@@ -243,7 +264,7 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_renew ollama.test_exo_group_alarm \
   ollama.test_exo_group_instance ollama.test_exo_group_calls \
   ollama.test_exo_group_private ollama.test_exo_group_backend \
-  ollama.test_exo_group_install
+  ollama.test_exo_group_install ollama.test_exo_group_startup
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the

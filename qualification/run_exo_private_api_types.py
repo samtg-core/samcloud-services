@@ -26,6 +26,7 @@ def main():
     import mlx.core as mx
 
     mx.set_default_device(mx.cpu)
+    sys.path.insert(0, str(here.parent))
     sys.path.insert(0, str(source / 'src'))
     sys.addaudithook(audit)
     with tempfile.TemporaryDirectory(prefix='exo-private-handler-controls-') as private:

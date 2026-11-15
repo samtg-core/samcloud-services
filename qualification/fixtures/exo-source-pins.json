@@ -17,11 +17,12 @@
     "src/exo/shared/types/worker/downloads.py": "7953c94edc4898ec42cad1aae3f5d9a04718bb36b971737f32437a4359a070ea",
     "src/exo/shared/constants.py": "b18e90d8fd63c7a50803f281074a2025d49163493ede8f829212cd54ac269ce5",
     "src/exo/shared/apply.py": "0fc6233a187cd9be8186603154b10fea7dbd01d155cb5058377eee3be73284b2",
-    "src/exo/api/main.py": "7f5cd13967f1af2a537ad36b507795488e7834c2d4f578404011d0f50ad55b94",
+    "src/exo/api/main.py": "168a162629d3adc1eaf833b11c41eb278a985f872b1cd54f4597366d48b0592d",
     "src/exo/api/adapters/chat_completions.py": "8ab7d27d8cb241eced033d81b503bff4f88c4ba22b887cd89037936409f4d30e",
     "src/exo/utils/leased_commands.py": "96f64895e671ee2cc41a158186158ad1f0302f28a16f73149187e04ab73cdbb8",
     "src/exo/shared/types/events.py": "688025a400fd6e629ef8cc6cd0db403576727ef1c0ab2c950479f6ef254d1e4b",
-    "src/exo/worker/runner/runner.py": "c99bc3cf88eccbac90b6709ff3278e4016c6d2284e1032af7abe577b6117858d"
+    "src/exo/worker/runner/runner.py": "c99bc3cf88eccbac90b6709ff3278e4016c6d2284e1032af7abe577b6117858d",
+    "src/exo/utils/leased_instance.py": "2bb8536880c0e679bf7c02a3ebab5b58c4f06248b396efa591b6b5059f4abbf7"
   },
   "full_runtime_gates": "not passed; this is API/guard configuration qualification only"
 }

@@ -105,3 +105,116 @@ async def test_ordinary_profile_has_no_private_end_endpoint_or_command_header(tm
         response = await client.get('/leased/commands/unknown/end',
                                     headers={'Authorization': 'Bearer ' + 'a' * 64})
         assert response.status_code == 404
+
+
+def creation_payload(api):
+    from dataclasses import replace
+    from exo.api.types.api import CreateInstanceParams
+    from ollama.exo_groups.prepare import canonical
+    from test_exo_instance_types import ExplicitInstanceControls
+    fixture = ExplicitInstanceControls()
+    fixture.setUp()
+    try:
+        api._leased_profile = replace(api._leased_profile,
+            manifest_sha256=fixture.plan.rank_manifest_sha256)
+        return CreateInstanceParams.model_validate_json(canonical(fixture.build()))
+    finally:
+        fixture.doCleanups()
+
+
+async def test_leased_instance_creation_uses_prepared_card_without_model_name_lookup(tmp_path):
+    from unittest.mock import AsyncMock, patch
+    from exo.shared.models.model_cards import ModelCard
+    from exo.shared.types.memory import Memory
+    api = make_api(tmp_path)
+    payload = creation_payload(api)
+    expected = next(iter(payload.instance.shard_assignments.runner_to_shard.values())).model_card
+    lookup = AsyncMock(side_effect=AssertionError('leased request must not look up a model name'))
+    with patch.object(ModelCard, 'load', lookup), patch.object(api,
+            '_calculate_total_available_memory', return_value=Memory.from_gb(1000)):
+        result = await api.create_instance(payload)
+    lookup.assert_not_awaited()
+    assert result.model_card == expected
+    assert api.sent[0].instance == payload.instance
+
+
+async def test_ordinary_instance_creation_keeps_existing_model_card_lookup(tmp_path):
+    from unittest.mock import AsyncMock, patch
+    from exo.shared.models.model_cards import ModelCard
+    from exo.shared.types.memory import Memory
+    api = make_api(tmp_path)
+    payload = creation_payload(api)
+    api._leased_profile = None
+    card = next(iter(payload.instance.shard_assignments.runner_to_shard.values())).model_card
+    lookup = AsyncMock(return_value=card)
+    with patch.object(ModelCard, 'load', lookup), patch.object(api,
+            '_calculate_total_available_memory', return_value=Memory.from_gb(1000)):
+        result = await api.create_instance(payload)
+    lookup.assert_awaited_once_with(payload.instance.shard_assignments.model_id)
+    assert result.model_card == card
+    assert len(api.sent) == 1
+
+
+@pytest.mark.parametrize('change', ['namespace', 'runner', 'endpoint', 'card',
+                                  'layers', 'timeout', 'remote_code', 'image'])
+async def test_leased_instance_refuses_changed_wire_before_command_or_lookup(tmp_path, change):
+    from unittest.mock import AsyncMock, patch
+    from exo.api.types.api import CreateInstanceParams
+    from exo.shared.models.model_cards import ModelCard
+    api = make_api(tmp_path)
+    payload = creation_payload(api)
+    wire = payload.model_dump(mode='json')
+    instance = wire['instance']['MlxRingInstance']
+    assignments = instance['shard_assignments']
+    shards = list(assignments['runner_to_shard'].values())
+    first = shards[0]['PipelineShardMetadata']
+    if change == 'namespace':
+        instance['instance_id'] = 'f' * 64
+    elif change == 'runner':
+        runner, shard = assignments['runner_to_shard'].popitem()
+        assignments['runner_to_shard']['f' * 64] = shard
+        for node, value in assignments['node_to_runner'].items():
+            if value == runner:
+                assignments['node_to_runner'][node] = 'f' * 64
+    elif change == 'endpoint':
+        next(iter(instance['hosts_by_node'].values()))[0]['ip'] = '192.168.50.99'
+    elif change == 'card':
+        first['model_card']['context_length'] += 1
+    elif change == 'layers':
+        first['end_layer'] += 1
+    elif change == 'timeout':
+        first['should_timeout'] = 3.0
+    elif change == 'remote_code':
+        for shard in shards:
+            shard['PipelineShardMetadata']['model_card']['trust_remote_code'] = True
+    else:
+        for shard in shards:
+            shard['PipelineShardMetadata']['model_card']['tasks'] = ['TextToImage']
+    altered = CreateInstanceParams.model_validate_json(json.dumps(wire))
+    lookup = AsyncMock(side_effect=AssertionError('no name lookup on leased profile'))
+    with patch.object(ModelCard, 'load', lookup), pytest.raises(HTTPException) as error:
+        await api.create_instance(altered)
+    assert error.value.status_code == 400
+    lookup.assert_not_awaited()
+    assert not api.sent
+
+
+async def test_actual_private_instance_http_reply_preserves_pinned_card_aliases(tmp_path):
+    from unittest.mock import AsyncMock, patch
+    from exo.shared.models.model_cards import ModelCard
+    from exo.shared.types.memory import Memory
+    api = make_api(tmp_path)
+    payload = creation_payload(api)
+    card = next(iter(payload.instance.shard_assignments.runner_to_shard.values())).model_card
+    api.app.post('/instance')(api.create_instance)
+    lookup = AsyncMock(side_effect=AssertionError('leased path must not resolve a model name'))
+    with patch.object(ModelCard, 'load', lookup), patch.object(api,
+            '_calculate_total_available_memory', return_value=Memory.from_gb(1000)):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app),
+                                    base_url='http://private') as client:
+            response = await client.post('/instance', json=payload.model_dump(mode='json'),
+                headers={'Authorization': 'Bearer ' + 'a' * 64})
+    assert response.status_code == 200, response.text
+    assert response.json()['model_card'] == card.model_dump(mode='json', by_alias=True)
+    assert response.json()['command_id'] == str(api.sent[0].command_id)
+    lookup.assert_not_awaited()

@@ -63,16 +63,10 @@ class InstanceContract:
         """Return detached data; obtaining it never authorizes its submission."""
         return json.loads(self.request_json)
 
-    def check_idle(
+    def _check_binding(
         self, plan: GroupPlan, launches: tuple[LaunchBinding, ...],
-        state: dict, *, runtime_sha256: str,
+        *, runtime_sha256: str,
     ) -> None:
-        """Refuse another instance, placement, runner or unfinished task.
-
-        Requires a fresh authenticated private /state read and independently
-        verified host/runtime receipts. It performs no I/O and grants no lease
-        permission. Authority must still be current at actual dispatch.
-        """
         if digest(asdict(plan)) != self.plan_sha256 or runtime_sha256 != self.runtime_sha256:
             raise BindingRefused("private instance plan or runtime changed")
         if (len(launches) != 3
@@ -85,6 +79,30 @@ class InstanceContract:
             ExpectedMember.from_launch(plan, item)
             if item.group_id != self.group_id or item.generation != self.generation:
                 raise BindingRefused("private instance belongs to another group generation")
+
+    def check_empty(self, plan, launches, state, *, runtime_sha256):
+        """Fresh isolated pre-create namespace; no compute/ownership proof."""
+        self._check_binding(plan, launches, runtime_sha256=runtime_sha256)
+        topology = state.get('topology') if isinstance(state, dict) else None
+        nodes = topology.get('nodes') if isinstance(topology, dict) else None
+        if (not isinstance(state, dict)
+                or type(state.get('lastEventAppliedIdx')) is not int
+                or state['lastEventAppliedIdx'] < -1
+                or any(state.get(name) != {} for name in (
+                    'instances', 'runners', 'tasks', 'downloads',
+                    'prefillServerPorts', 'instanceLinks'))
+                or not isinstance(nodes, list) or len(nodes) != 3
+                or any(not isinstance(node, str) for node in nodes)
+                or set(nodes) != set(
+                    self._instance['shardAssignments']['nodeToRunner'])):
+            raise BindingRefused('private startup namespace is not the exact empty three-host group')
+
+    def check_idle(
+        self, plan: GroupPlan, launches: tuple[LaunchBinding, ...],
+        state: dict, *, runtime_sha256: str,
+    ) -> None:
+        """Fresh exact idle observation; separate from lease/host authority."""
+        self._check_binding(plan, launches, runtime_sha256=runtime_sha256)
         if not isinstance(state, dict):
             raise BindingRefused("private EXO state is not an object")
         expected = {self.instance_id: json.loads(self.state_instance_json)}
