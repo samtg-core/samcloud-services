@@ -17,6 +17,7 @@ from .inference_bootstrap import QueueRuntime, QueueSettings
 class HostInstallControls(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.parts = runtime_fixtures.RankRuntimeControls()
+        self.parts.register_journal = False  # QueueRuntime owns registration here.
         await self.parts.asyncSetUp()
         self.owner = self.parts.runtime
         self.resource = self.owner.actor.spec.binding.resource_id
@@ -98,6 +99,7 @@ class HostInstallControls(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_member_cannot_be_registered_again_even_after_close(self):
         self.runtime.bind_exo_rank(self.owner)
+        await self.owner.attest_never_started()
         await self.runtime.close_exo_rank()  # Even a pre-launch committed attempt is not replayed.
         with self.assertRaises(ObservationUnknown):
             record_host_attempt(self.owner,self.runtime.queue.supervisor.journal)

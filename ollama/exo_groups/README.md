@@ -399,8 +399,42 @@ member's receipt, then independently re-reads before claiming group settlement.
 Core cancels queued-only members itself; these need no invented process cleanup.
 
 This is source preparation, not installed EXO acceptance. Full host/runtime feed
-activation, the actual startup observation-to-pin wiring, publication of host
-artifacts, and negative cleanup proof for an **active member whose rank never
-started** remain unfinished. Such an active member is retained, never settled
-using a fake child or elapsed time. The registry/SQLite controls inject physical
-reports; they do not prove distributed inference or Metal memory return.
+activation, the actual startup observation-to-pin wiring and publication of host
+artifacts remain unfinished. The registry/SQLite controls inject physical
+counters; they do not prove distributed inference or Metal memory return.
+
+
+## Prepared members that never launch
+
+A host registration now stores its exact prepared runtime/spec/boot, listener set
+and memory baseline in the existing host inference journal before enabling the
+owner. The same durable row records the launch decision. A normal start commits
+`launch_committed` before entering the lifecycle and `spawning` before its
+filesystem launch intent/Popen. A registered lifecycle cannot bypass this CAS.
+Legacy rows become `unknown`; they are never retroactively called unlaunched.
+
+`HostRankRuntime.attest_never_started` shares the launch lock, re-verifies the
+runtime/uid/boot, and commits `launch_fenced` only from a genuinely prepared row.
+An existing launch intent, committed launch decision, observed child or unknown
+spawn refuses this path, including when zero process/output was observed. Once
+fenced, this attempt can never start. Fresh closed-listener and device-memory
+observations are still required; incomplete reads keep the fence and physical
+claim. Existing inventory callbacks can observe eventual cleanup. There is no
+new timer, loop, PID adoption, group release or settlement on the host.
+
+The distinct `NoStartExpectation` contains no invented child or exit code. The
+coordinator pins the actual host preparation independently, checks its exact
+member/lease/runtime and boot against staged provenance, and accepts only a
+matching later no-launch/fence artifact. A preparation can specialize once into
+an actual observed-child pin before drain; a real child can never become
+no-start. Exact member acknowledgements/terminal receipts are unchanged. A
+registered prelaunch owner cannot close until this evidence exists. Evidence
+bytes survive a later audit-notification failure and are reused without rewrite.
+
+The startup controller must persist these preparation pins before group drain.
+That orchestration and authenticated host artifact publication remain unwired;
+a missing preparation/start receipt stays held and needs explicit reconciliation,
+not inference from an empty process list. The isolated registry controls exercise
+two admitted-but-unstarted members with a third queued, both ordinary release and
+expired HOLD settlement, while preserving the unrelated blocking lease. CPU
+process/listener/journal controls are separate from actual Metal qualification.

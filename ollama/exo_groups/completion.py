@@ -12,11 +12,12 @@ import hashlib
 import json
 
 from ..inference_arbiter import Conflict
-from .cleanup import CleanupExpectation, _aware, _ended, validate_cleanup
+from .cleanup import CleanupExpectation, NoStartExpectation, _aware, _ended, validate_cleanup
 from .member import ExpectedMember
 from .plan import BindingRefused, LaunchBinding
 from .prepare import canonical
 from .rank_process import Listener, ProcessIdentity, RunBinding
+from .staging import VerifiedStaging
 
 
 class GroupCompletion:
@@ -59,9 +60,13 @@ class GroupCompletion:
             previous = self.journal.db.execute('SELECT expectation_json FROM exo_group_cleanup_pins '
                 'WHERE owner=? AND request_key=? AND lease_id=?', key).fetchone()
             if previous is not None:
-                if previous['expectation_json'] != raw:
+                prior = json.loads(previous['expectation_json'])
+                if 'child' in prior:
+                    if previous['expectation_json'] != raw:
+                        raise Conflict('actual host launch cleanup pin is immutable')
+                    return
+                if canonical(prior.get('binding')) != canonical(asdict(run)):
                     raise Conflict('actual host launch cleanup pin is immutable')
-                return
             if self.intents.closing(self.plan.owner_id, self.plan.request_key):
                 raise Conflict('a closing session cannot acquire a post-hoc launch pin')
             saved = self._saved()
@@ -72,25 +77,72 @@ class GroupCompletion:
                     or saved['launches'] is None or json.loads(canonical(launch)) not in saved['launches']
                     or staged is None or staged['runtime_sha256'] != run.runtime_sha256):
                 raise BindingRefused('actual launch differs from the journaled group/runtime')
-            self.journal.db.execute('INSERT INTO exo_group_cleanup_pins VALUES(?,?,?,?)', (*key, raw))
+            # Prepared -> actual observed child is a one-way specialization,
+            # before drain/settlement. An actual child can never become no-start.
+            self.journal.db.execute('INSERT OR REPLACE INTO exo_group_cleanup_pins VALUES(?,?,?,?)', (*key, raw))
 
     def _pin(self, lease_id):
         row = self.journal.db.execute('SELECT expectation_json FROM exo_group_cleanup_pins '
             'WHERE owner=? AND request_key=? AND lease_id=?', self._key(lease_id)).fetchone()
         if row is None:
-            raise BindingRefused('actual pre-drain host launch pin is missing')
+            raise BindingRefused('actual pre-drain host attempt pin is missing')
         value = json.loads(row['expectation_json'])
+        no_start = 'child' not in value
         run = value['binding']
         launch = run['expected']['binding']
         launch['layers'] = tuple(launch['layers'])
         expected = ExpectedMember.from_launch(self.plan, LaunchBinding(**launch))
         binding = RunBinding.from_expected(expected, run['runtime_sha256'])
-        pinned = CleanupExpectation(binding, ProcessIdentity(**value['child']),
-            tuple(Listener(**item) for item in value['listeners']),
-            value['baseline_in_use_bytes'], value['tolerance_bytes'])
+        listeners = tuple(Listener(**item) for item in value['listeners'])
+        if no_start:
+            pinned = NoStartExpectation(binding, value['host_boot'], value['launch_sha256'],
+                value['attempt_sha256'], listeners, value['baseline_in_use_bytes'],
+                value['tolerance_bytes'], value['prepared_at'])
+        else:
+            pinned = CleanupExpectation(binding, ProcessIdentity(**value['child']), listeners,
+                value['baseline_in_use_bytes'], value['tolerance_bytes'])
         if canonical(asdict(pinned)).decode() != row['expectation_json']:
             raise BindingRefused('saved launch cleanup pin differs from its plan')
         return pinned
+
+    async def pin_prepared(self, pinned, *, generation):
+        """Trusted host preparation read, before drain, including partial groups.
+
+        The host's existing journal supplies the unique attempt pin. These
+        bytes are independent of its later cleanup artifact. No permission to
+        launch is derived here from a partially admitted group.
+        """
+        if not isinstance(pinned, NoStartExpectation):
+            raise BindingRefused('actual prepared host attempt required')
+        group = await self._group(generation)
+        run = pinned.binding
+        self._member(group, run)
+        lease = await self._lease(run)
+        saved = self._saved()
+        staged = self.intents.staging(self.plan.owner_id, self.plan.request_key)
+        if (run.group_id != saved['group_id'] or run.generation != saved['generation']
+                or run.generation != generation or lease.get('status') != 'active'
+                or ExpectedMember.from_launch(self.plan, run.expected.binding) != run.expected
+                or staged is None or staged['runtime_sha256'] != run.runtime_sha256):
+            raise BindingRefused('prepared host differs from this journaled member/runtime')
+        saved_proof = json.loads(staged['proof_json'])
+        saved_proof['hosts'] = tuple(tuple(host) for host in saved_proof['hosts'])
+        observed = VerifiedStaging(**saved_proof)
+        observed.check(self.plan)
+        if not any((rank, resource, boot) == (run.expected.binding.rank, run.resource_id, pinned.host_boot)
+                   for rank, resource, boot, _uid in observed.boots):
+            raise BindingRefused('prepared host boot differs from verified staging')
+        raw, key = canonical(asdict(pinned)).decode(), self._key(run.lease_id)
+        with self.journal.transaction():
+            previous = self.journal.db.execute('SELECT expectation_json FROM exo_group_cleanup_pins '
+                'WHERE owner=? AND request_key=? AND lease_id=?', key).fetchone()
+            if previous is not None:
+                if previous['expectation_json'] != raw:
+                    raise Conflict('actual prepared host attempt is immutable')
+                return
+            if self.intents.closing(self.plan.owner_id, self.plan.request_key):
+                raise Conflict('host preparation must be pinned before group drain')
+            self.journal.db.execute('INSERT INTO exo_group_cleanup_pins VALUES(?,?,?,?)', (*key, raw))
 
     async def _owned(self, identity, operation):
         if self._task is not None and not self._task.done():
@@ -113,6 +165,8 @@ class GroupCompletion:
         return await self._owned(('release', generation), lambda: self._begin(generation))
 
     async def _group(self, generation):
+        if type(generation) is not int or generation < 1:
+            raise BindingRefused('explicit positive coordinator generation required')
         saved = self._saved()
         if saved['group_id'] is None:
             raise BindingRefused('group-create outcome requires exact reconciliation')

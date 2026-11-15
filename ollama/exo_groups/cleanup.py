@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
 from typing import Any, Mapping
+from uuid import UUID
+import re
 
 from .http import decode_json
 from .plan import BindingRefused
@@ -53,7 +55,37 @@ class CleanupExpectation:
             )
 
 
-def validate_cleanup(raw: bytes, pinned: CleanupExpectation) -> dict[str, Any]:
+@dataclass(frozen=True)
+class NoStartExpectation:
+    """Actual prepared host attempt, pinned before drain; no fictional child."""
+
+    binding: RunBinding
+    host_boot: str
+    launch_sha256: str
+    attempt_sha256: str
+    listeners: tuple[Listener, ...]
+    baseline_in_use_bytes: int
+    tolerance_bytes: int
+    prepared_at: str
+
+    def __post_init__(self):
+        try:
+            boot = UUID(self.host_boot)
+        except (ValueError, TypeError, AttributeError):
+            raise BindingRefused('exact host boot required for a prepared attempt') from None
+        if (not isinstance(self.binding, RunBinding) or str(boot) != self.host_boot or boot.int == 0
+                or any(not isinstance(v, str) or not re.fullmatch(r'[a-f0-9]{64}', v)
+                       for v in (self.launch_sha256, self.attempt_sha256))
+                or type(self.listeners) is not tuple or not self.listeners
+                or any(not isinstance(v, Listener) for v in self.listeners)
+                or len(set(self.listeners)) != len(self.listeners)
+                or type(self.baseline_in_use_bytes) is not int or self.baseline_in_use_bytes < 0
+                or type(self.tolerance_bytes) is not int or self.tolerance_bytes < 0):
+            raise BindingRefused('exact prepared attempt, listener set and memory baseline required')
+        _aware(self.prepared_at)
+
+
+def validate_cleanup(raw: bytes, pinned: CleanupExpectation | NoStartExpectation) -> dict[str, Any]:
     """Validate the real host actor's shape against its frozen launch binding."""
     if not isinstance(raw, bytes) or len(raw) > 128 * 1024:
         raise BindingRefused("cleanup artifact exceeds the evidence bound")
@@ -65,7 +97,8 @@ def validate_cleanup(raw: bytes, pinned: CleanupExpectation) -> dict[str, Any]:
     binding = json.loads(canonical(asdict(expected)))
     if (
         not isinstance(value, dict)
-        or value.get("kind") != "observed_rank_cleanup"
+        or value.get("kind") != ('observed_rank_never_started'
+                                if isinstance(pinned, NoStartExpectation) else 'observed_rank_cleanup')
         or canonical({key: value.get(key) for key in binding}) != canonical(binding)
         or value.get("lease_released") is not False
         or value.get("settlement_recorded") is not False
@@ -76,6 +109,9 @@ def validate_cleanup(raw: bytes, pinned: CleanupExpectation) -> dict[str, Any]:
         observation.get("binding")
     ) != canonical(binding):
         raise BindingRefused("cleanup observation names another member or runtime")
+    if isinstance(pinned, NoStartExpectation):
+        _validate_no_start(observation, pinned)
+        return value
     child = observation.get("child")
     fields = tuple(ProcessIdentity.__dataclass_fields__)
     if (
@@ -118,6 +154,25 @@ def validate_cleanup(raw: bytes, pinned: CleanupExpectation) -> dict[str, Any]:
     if not checked.clean:
         raise BindingRefused("physical cleanup report is incomplete; do not settle")
     return value
+
+
+def _validate_no_start(observation, pinned):
+    exact = {k: v for k, v in asdict(pinned).items() if k not in ('binding', 'listeners')}
+    if (any(type(observation.get(k)) is not type(v) or observation.get(k) != v
+            for k, v in exact.items())
+            or observation.get('launch_fenced') is not True
+            or observation.get('launch_intent_absent') is not True
+            or observation.get('launch_attempted') is not False
+            or type(observation.get('processes_started')) is not int or observation['processes_started'] != 0
+            or observation.get('attempt_phase') != 'launch_fenced'
+            or 'child' in observation or 'exit_code' in observation):
+        raise BindingRefused('never-started evidence differs from the actual prepared/fenced attempt')
+    ports, memory = observation.get('listeners_closed'), observation.get('observed_in_use_bytes')
+    if (not isinstance(ports, list) or len(ports) != len(pinned.listeners)
+            or any(v is not True for v in ports) or type(memory) is not int or memory < 0
+            or memory > pinned.baseline_in_use_bytes + pinned.tolerance_bytes):
+        raise BindingRefused('never-started listener or device observation is unconfirmed')
+    _aware(observation.get('observed_at'))
 
 
 def _ended(lease: Mapping[str, Any]) -> bool:

@@ -750,7 +750,8 @@ def test_partial_group_does_not_advance_after_staged_files_disappear(client, pla
     asyncio.run(run())
 
 
-def host_runtime_for(client, admitted, tmp_path, *, rank='slice'):
+def host_runtime_for(client, admitted, tmp_path, *, rank='slice', credential_rank='slice',
+                     runtime_sha256='b' * 64, boot_id=None):
     """Actual scoped HTTP authority; host process/runtime effects are CPU fakes."""
     import os
     import sys
@@ -759,25 +760,26 @@ def host_runtime_for(client, admitted, tmp_path, *, rank='slice'):
     from ollama.exo_groups.member import ExpectedMember
     from ollama.exo_groups.rank_lifecycle import RankLifecycle, RankSpec
     from ollama.exo_groups.rank_process import Listener, RunBinding
-    from ollama.exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256
+    from ollama.exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256, record_host_attempt
     from ollama.test_exo_group_host_authority import FakeAlarm
     from ollama.test_exo_group_rank_lifecycle import FakeProcess
     plan, group, launches = admitted
     response = client.post('/api/v1/users', json={
-        'username': 'host-rank-runtime', 'password': 'test-pw', 'role': 'user',
-        'scopes': ['device:claude-services-slice'],
+        'username': 'host-rank-runtime-' + rank, 'password': 'test-pw', 'role': 'user',
+        'scopes': ['device:' + next(m.resource_id.split('/')[0] for m in plan.members
+                                   if m.rank == credential_rank)],
     })
     assert response.status_code == 200
     login = client.post('/api/v1/auth/login', json={
-        'username': 'host-rank-runtime', 'password': 'test-pw'})
+        'username': 'host-rank-runtime-' + rank, 'password': 'test-pw'})
     assert login.status_code == 200
     header = {'Authorization': 'Bearer ' + login.json()['token']}
     principal = client._client.get('/api/v1/auth/verify', headers=header).json()['owner_id']
     assert principal != plan.owner_id
     expected = ExpectedMember.from_launch(plan, next(value for value in launches if value.rank == rank))
-    binding = RunBinding.from_expected(expected, 'b' * 64)
+    binding = RunBinding.from_expected(expected, runtime_sha256)
     child = FakeProcess(binding)
-    boot = str(UUID(int=123))
+    boot = boot_id or str(UUID(int=123))
     actor = RankLifecycle(expected, RankSpec(binding, (sys.executable, '-c', 'pass'),
         tmp_path, (Listener('127.0.0.1', 39999),), 0), tmp_path / 'host-run',
         memory_reader=lambda: 100, port_reader=lambda _: True, boot_reader=lambda: boot,
@@ -787,7 +789,7 @@ def host_runtime_for(client, admitted, tmp_path, *, rank='slice'):
     adapter = HostAuthorityAdapter(actor, reader, alarm_factory=FakeAlarm)
     environment = {}
     async def verify_runtime():
-        return RuntimeObservation('b' * 64, launch_sha256(actor, environment), boot, os.getuid())
+        return RuntimeObservation(runtime_sha256, launch_sha256(actor, environment), boot, os.getuid())
     class Watch:
         def __init__(self, process, notify, failed):
             self.notify = notify
@@ -795,6 +797,8 @@ def host_runtime_for(client, admitted, tmp_path, *, rank='slice'):
             pass
     runtime = HostRankRuntime(actor, adapter, verify_runtime=verify_runtime,
         environment=environment, boot_id=boot, watcher_factory=Watch)
+    runtime.test_journal = Arbiter(tmp_path / 'host-inference.sqlite')
+    record_host_attempt(runtime, runtime.test_journal)
     return runtime, child, header
 
 
@@ -827,6 +831,7 @@ def test_actual_host_runtime_uses_scoped_authority_then_fence_stops_without_sett
                 child.code = 0
                 runtime.actor.process_exited()
             await runtime.close_after_cleanup()
+            runtime.test_journal.close()
     asyncio.run(run())
 
 
@@ -841,7 +846,9 @@ def test_actual_host_runtime_cannot_use_slice_credential_for_wafer(client, admit
             assert runtime.actor.process is None and child.stop_count == 0
             assert_still_charged()
         finally:
+            await runtime.attest_never_started()
             await runtime.close_after_cleanup()
+            runtime.test_journal.close()
     asyncio.run(run())
 
 
@@ -865,6 +872,7 @@ def test_actual_host_runtime_stops_on_peer_hold_expiry_and_retains_every_claim(
             child.code = 0
             runtime.actor.process_exited()
             await runtime.close_after_cleanup()
+            runtime.test_journal.close()
     asyncio.run(run())
 
 
@@ -1033,6 +1041,84 @@ def test_actual_queued_only_partial_group_cancels_without_cleanup_fiction(client
             assert journal.db.execute('SELECT COUNT(*) FROM exo_group_cleanup_pins').fetchone()[0] == 0
             assert not any('/members/' in p and m=='POST' for m,p in transport.requests)
         finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('expire', [False, True])
+def test_actual_partly_owned_group_uses_host_no_start_fence_then_exact_settlement(
+        client, placement, tmp_path, expire):
+    import hashlib
+    from pathlib import Path
+    from ollama.exo_groups.plan import LaunchBinding
+    from ollama.exo_groups.rank_process import ObservationUnknown
+    plan,manifest=placement
+    slice_member=next(m for m in plan.members if m.rank=='slice')
+    blocker=client.post('/api/v1/resources/'+slice_member.resource_id+'/leases',
+        json={'exclusive':True,'wait':True,'ttl_seconds':600,'max_total_s':7200}).json()['lease_id']
+    group=client.post('/api/v1/lease-groups',json=plan.request()).json()
+    assert group['phase']=='acquiring'
+    # Once the first host is admitted, core requests both later members through
+    # their queues: Slice queues, while Wafer is admitted too. Neither may run.
+    active=[m for m in group['members'] if m['status']=='active']
+    assert len(active)==2
+
+    async def run():
+        journal=Arbiter(tmp_path/'coordinator.sqlite')
+        actor,completion,transport,_=cleanup_controller(client,plan,manifest,group,journal)
+        runtimes=[]
+        try:
+            for held in active:
+                member=next(m for m in plan.members if m.resource_id==held['resource_id'])
+                lease=client.get('/api/v1/leases/'+held['lease_id']).json()
+                launch=LaunchBinding(group['id'],1,plan.owner_id,member.rank,member.pipeline_rank,
+                    member.resource_id,lease['id'],member.layers,lease['expires_at'],plan.rank_manifest_sha256)
+                directory=tmp_path/member.rank
+                directory.mkdir()
+                runtime,child,_=host_runtime_for(client,(plan,group,(launch,)),directory,
+                    rank=member.rank,credential_rank=member.rank,
+                    runtime_sha256=fixtures.staging_fixture(plan).runtime_sha256,
+                    boot_id=next(boot for name,_resource,boot,_uid in fixtures.staging_fixture(plan).boots
+                                 if name==member.rank))
+                runtimes.append((runtime,child,lease,member))
+                await runtime.on_connect()
+                assert runtime.actor.process is None and not runtime.actor.draining
+                await completion.pin_prepared(runtime.prepared,generation=1)
+            result=await completion.begin_release(generation=1)
+            assert result['state']=='host_cleanup_required'
+            if expire:
+                runtime,child,lease,member=runtimes[0]
+                db.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",(lease['id'],))
+                resource=client.get('/api/v1/resources/'+member.resource_id).json()
+                assert resource['available_memory_mb']==9000
+                assert resource['unsettled'][0]['lease_id']==lease['id']
+            for index,(runtime,child,lease,member) in enumerate(runtimes):
+                notices=client.get('/api/v1/events/recent?limit=100').json()
+                for notice in notices:
+                    await runtime.on_event(notice)
+                receipt=await runtime.attest_never_started()
+                raw=Path(receipt['evidence_path']).read_bytes()
+                transport.files[index+1]=raw
+                result=await completion.settle_member(lease['id'],generation=1,
+                    file_id=index+1,sha256=hashlib.sha256(raw).hexdigest())
+                assert result['state']=='exact_member_settlement_confirmed'
+                assert client.get('/api/v1/resources/'+member.resource_id).json()['available_memory_mb']==10000
+                assert child.stop_count==0 and runtime.actor.process is None
+                assert not runtime.actor.launch_attempted
+                with pytest.raises(ObservationUnknown):
+                    await runtime.start()
+                assert runtime.test_journal.db.execute('SELECT phase FROM exo_host_rank_attempts').fetchone()[0]=='launch_fenced'
+            assert (await completion.begin_release(generation=1))['state']=='group_settlement_confirmed'
+            assert client.get('/api/v1/leases/'+blocker).json()['status']=='active'
+            assert sum(m=='POST' and '/members/' in p for m,p in transport.requests)==2
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n']==4
+        finally:
+            for runtime,child,lease,member in runtimes:
+                if runtime.actor.receipt is None:
+                    await runtime.attest_never_started()
+                await runtime.close_after_cleanup()
+                runtime.test_journal.close()
             await actor.close()
             journal.close()
     asyncio.run(run())

@@ -19,7 +19,8 @@ from . import test_exo_group_member as member_fixtures
 from .exo_groups.host_authority import HostAuthorityAdapter, HostPlaneReader
 from .exo_groups.rank_lifecycle import RankLifecycle, RankSpec, darwin_boot_id
 from .exo_groups.rank_process import Listener, ObservationUnknown, RunBinding
-from .exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256
+from .exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256, record_host_attempt
+from .inference_arbiter import Arbiter
 
 
 class FakeWatch:
@@ -51,13 +52,25 @@ class RankRuntimeControls(unittest.IsolatedAsyncioTestCase):
             return result
         self.runtime = HostRankRuntime(self.actor, self.adapter, verify_runtime=verify,
             environment=self.environment, boot_id=self.fixture.boot, watcher_factory=watch)
+        self.original_spec, self.original_observation = self.actor.spec, self.observation
+        self.journal = None
+        if getattr(self, 'register_journal', True):
+            self.journal = Arbiter(self.fixture.root / 'host-inference.sqlite')
+            record_host_attempt(self.runtime, self.journal)
+        if getattr(self, 'initial_phase', None) == 'acquiring':
+            self.context.projection.update(phase='acquiring', authoritative=False)
         await self.runtime.on_connect()  # Existing feed established, then fresh snapshot.
 
     async def asyncTearDown(self):
+        self.actor.spec, self.observation = self.original_spec, self.original_observation
         if self.actor.process is not None:
             self.fixture.child.code = 0
             self.actor.process_exited()
+        elif self.runtime._journal is not None and self.actor.receipt is None:
+            await self.runtime.attest_never_started()
         await self.runtime.close_after_cleanup()
+        if self.journal is not None:
+            self.journal.close()
         self.fixture.tearDown()
 
     async def test_simultaneous_starters_own_one_launch_and_one_exit_event(self):
@@ -224,6 +237,8 @@ class ActualRankRuntimeControls(unittest.IsolatedAsyncioTestCase):
                 return RuntimeObservation('b' * 64, launch_sha256(actor, environment), boot, os.getuid())
             runtime = HostRankRuntime(actor, adapter, verify_runtime=verify,
                                       environment=environment, boot_id=boot)
+            journal = Arbiter(root / 'host-inference.sqlite')
+            record_host_attempt(runtime, journal)
             try:
                 await runtime.on_connect()
                 await runtime.start()
@@ -245,4 +260,7 @@ class ActualRankRuntimeControls(unittest.IsolatedAsyncioTestCase):
                     actor.process.process.wait(timeout=5)
                     actor.process_exited()
                 if actor.phase == 'awaiting_settlement' or not actor.launch_attempted:
+                    if actor.receipt is None:
+                        await runtime.attest_never_started()
                     await runtime.close_after_cleanup()
+                journal.close()

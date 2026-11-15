@@ -2,7 +2,7 @@
 
 import asyncio
 import copy
-from dataclasses import replace
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -337,3 +337,76 @@ class ClosureRaceControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(c[0]=='create' for c in base.calls if isinstance(c,tuple)),1)
         self.assertEqual(sum(c[0]=='advance' for c in base.calls if isinstance(c,tuple)),0)
         self.assertFalse(base.actor.may_start_ranks())
+
+
+class PreparedSettlementControls(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from .exo_groups.cleanup import NoStartExpectation
+        from uuid import UUID
+        self.parts=CompletionControls()
+        await self.parts.asyncSetUp()
+        self.addAsyncCleanup(self.parts.base.asyncTearDown)
+        p=self.parts
+        self.journal=p.base.journal
+        self.journal.db.execute('DELETE FROM exo_group_cleanup_pins')
+        run=p.pins[p.lease_id].binding
+        self.pin=NoStartExpectation(run,str(UUID(int=1)),'a'*64,'b'*64,
+            p.pins[p.lease_id].listeners,100,0,'2026-11-14T10:00:00+00:00')
+
+    async def prepare(self):
+        await self.parts.completion.pin_prepared(self.pin,generation=1)
+
+    async def test_prepared_partial_member_settles_without_fictional_child(self):
+        p=self.parts
+        p.group['phase']='acquiring'
+        self.journal.db.execute('UPDATE exo_group_intents SET launch_json=NULL')
+        await self.prepare()
+        # Inject the host's separately observed negative artifact, not the pin.
+        observation={k:v for k,v in asdict(self.pin).items() if k!='listeners'}
+        observation.update(launch_fenced=True,launch_intent_absent=True,launch_attempted=False,
+            processes_started=0,attempt_phase='launch_fenced',listeners_closed=[True],
+            observed_in_use_bytes=100,observed_at='2026-11-14T10:05:00+00:00')
+        raw=json.dumps({'kind':'observed_rank_never_started',
+            **asdict(self.pin.binding),'observation':observation,
+            'lease_released':False,'settlement_recorded':False}).encode()
+        file_id,digest=p.proofs[p.lease_id]
+        p.files[file_id]=raw
+        p.proofs[p.lease_id]=(file_id,hashlib.sha256(raw).hexdigest())
+        p.end_call()
+        result=await p.settle()
+        self.assertEqual(result['state'],'exact_member_settlement_confirmed')
+        self.assertEqual(len(p.releases()),1)
+        self.assertNotIn('child',json.loads(raw)['observation'])
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM exo_group_settlements').fetchone()[0],1)
+
+    async def test_prepare_pin_is_immutable_and_cannot_be_learned_from_cleanup_after_drain(self):
+        await self.prepare()
+        with self.assertRaises(Conflict):
+            await self.parts.completion.pin_prepared(replace(self.pin,attempt_sha256='c'*64),generation=1)
+        self.parts.end_call()
+        await self.parts.completion.begin_release(generation=1)
+        self.journal.db.execute('DELETE FROM exo_group_cleanup_pins')
+        with self.assertRaises(Conflict):
+            await self.prepare()
+
+    async def test_actual_start_specializes_prepared_pin_one_way_before_drain(self):
+        await self.prepare()
+        p=self.parts
+        p.completion.pin_launch(p.pins[p.lease_id])
+        self.assertIsInstance(p.completion._pin(p.lease_id),CleanupExpectation)
+        with self.assertRaises(Conflict):
+            await self.prepare()
+        p.end_call()
+        self.assertEqual((await p.settle())['state'],'exact_member_settlement_confirmed')
+
+    async def test_foreign_preparation_or_implicit_generation_refuses(self):
+        p=self.parts
+        with self.assertRaises(BindingRefused):
+            await p.completion.pin_prepared(replace(self.pin,
+                binding=replace(self.pin.binding,runtime_sha256='f'*64)),generation=1)
+        with self.assertRaises(BindingRefused):
+            await p.completion.pin_prepared(self.pin,generation=True)
+        with self.assertRaises(BindingRefused):
+            await p.completion.pin_prepared(replace(self.pin,
+                host_boot='00000000-0000-0000-0000-000000000099'),generation=1)
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM exo_group_cleanup_pins').fetchone()[0],0)

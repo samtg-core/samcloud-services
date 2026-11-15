@@ -126,6 +126,7 @@ class RankLifecycle:
         self.host_boot = None
         self.receipt = None
         self.audit_write_failures = []
+        self.launch_guard = None  # Installed host role supplies its journal CAS.
         self._sequence = 0
         write_new(
             state / "prepared.json",
@@ -264,6 +265,8 @@ class RankLifecycle:
         # may convert an expired grant into permission to start a process.
         if not self.authority.allows_start(self.monotonic()):
             raise ObservationUnknown("authority elapsed during physical preflight")
+        if self.launch_guard is not None:
+            self.launch_guard()
         write_new(
             self.state / "launch-intent.json",
             {
