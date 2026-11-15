@@ -44,7 +44,8 @@ class InstalledControls(unittest.IsolatedAsyncioTestCase):
                                    SC_SERVICE_ID='fixture-service'))
         self.runtime = QueueRuntime.install(service, QueueSettings(
             Path(p.temp.name) / 'queue.sqlite', {p.plan.model_id: self.resource, 'local': self.resource},
-            reservation_mb={p.plan.model_id: 1000, 'local': 100}), registry_owner='user:58')
+            reservation_mb={p.plan.model_id: 1000, 'local': 100}),
+            registry_owner=getattr(self, 'registry_owner', 'user:58'))
         self.runtime.bind_capacity_source(work_permitted=True)
         self.queue = self.runtime.queue
         self.journal = self.queue.supervisor.journal
