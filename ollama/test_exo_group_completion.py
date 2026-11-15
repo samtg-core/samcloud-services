@@ -410,3 +410,19 @@ class PreparedSettlementControls(unittest.IsolatedAsyncioTestCase):
             await p.completion.pin_prepared(replace(self.pin,
                 host_boot='00000000-0000-0000-0000-000000000099'),generation=1)
         self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM exo_group_cleanup_pins').fetchone()[0],0)
+
+    async def test_independent_host_observation_pins_and_specializes_existing_journal(self):
+        from .exo_groups.host_receipts import HostReceiptObservation
+        report=HostReceiptObservation(self.pin,None,'prepared',None,None)
+        await report.pin(self.parts.completion,generation=1)
+        self.assertEqual(self.parts.completion._pin(self.parts.lease_id),self.pin)
+        started=self.parts.pins[self.parts.lease_id]
+        actual=HostReceiptObservation(self.pin,started,'spawning',None,None)
+        await actual.pin(self.parts.completion,generation=1)
+        await actual.pin(self.parts.completion,generation=1)  # Idempotent observation, no downgrade.
+        self.assertEqual(self.parts.completion._pin(self.parts.lease_id),started)
+        with self.assertRaises(BindingRefused):
+            await actual.pin(self.parts.completion,generation=2)
+        with self.assertRaises(Conflict):
+            await report.pin(self.parts.completion,generation=1)
+        self.assertFalse(self.parts.mutations)

@@ -438,3 +438,36 @@ not inference from an empty process list. The isolated registry controls exercis
 two admitted-but-unstarted members with a third queued, both ordinary release and
 expired HOLD settlement, while preserving the unrelated blocking lease. CPU
 process/listener/journal controls are separate from actual Metal qualification.
+
+## Reading actual host attempt receipts
+
+`receipt_files.py` is a read-only stdlib collector for one exact host journal
+row and private attempt directory. It opens paths without symlink traversal,
+checks uid/modes/inodes, brackets the immutable file reads with a SQLite read
+snapshot and filesystem/boot checks, and refuses missing/legacy/changed attempts.
+It reads only prepared metadata, launch intent, typed lifecycle events and the
+exact cleanup file. It never returns stdout/stderr, arbitrary files or tokens.
+Metadata byte/event-count bounds are not execution deadlines.
+
+`host_receipts.py` sends that source-pinned collector through an explicit existing
+authenticated host route. The interpreter, uid, journal and attempt paths, boot,
+runtime/spec/member pins come from trusted service configuration. A fresh nonce
+binds every response; proxy credentials or the coordinator's bearer are not
+forwarded. Cancellation reaps only the finite read-only observer. A failed read
+grants no launch/cleanup authority and does not stop/restart a rank.
+
+The coordinator reconstructs preparation independently of the cleanup artifact.
+An actual-child pin additionally requires the separate launch intent and one
+birth identity from the host lifecycle journal. A committed launch without that
+receipt stays unconfirmed. Cleanup bytes are returned unchanged only after the
+exact preparation/actual-child validation. `HostReceiptObservation.pin` records
+that independent observation in the existing GroupCompletion journal; repeated
+actual-child observations do not downgrade it back to preparation. It neither
+publishes the artifact nor settles a member.
+
+The CPU controls use real temporary journals/files and one isolated Python probe,
+with injected runtime/physical metadata. The existing SSH staging transport was
+previously qualified on all three hosts; these receipt controls are not a live
+fleet attempt, model startup or group settlement. Exact installed route/feed
+configuration, service-owned artifact publication and startup orchestration
+remain required before activation.
