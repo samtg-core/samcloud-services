@@ -20,13 +20,31 @@ keeps the earlier UV-cache launch failure separate from the successful native
 run. Both leases are terminal. The source has not been pushed to public upstream;
 no fleet native library or standing service was switched.
 
-This proves **Wafer/M4 native unit checks**, not M5/model loading or distributed
-inference. [Frozen-v2 file evidence2268](https://cloud.samtg.xyz/api/v1/files/2268/raw)
-includes complete host runtime audits and built dashboard assets, but retains
-the old native binary. A paired final runtime, actual host/feed configuration,
-fresh process provenance, enforced private transport, M5/model loading,
-numerical parity and the small three-host run remain before deployment. The
-235B model then needs measured memory/context fit and the same full21 evals.
+These repository checks prove **Wafer/M4 native units**. The committed source
+and wheel are now paired as **frozen-v3 on all three hosts**. Complete
+authenticated runtime audits and second-read byte stability checks pass. The
+explicit new native-binding import root cannot silently fall back to the old
+extension in the preserved dependency tree.
+
+**The actual M5 model check also passed** on Obelisk's Apple M5 Max, macOS kernel
+27.2: the paired native constructor and EXO main module import, a Metal kernel
+passes, and the complete Qwen3-0.6B model's 704 parameters and 48 output-logit
+vectors match the locally reconstructed ranks exactly. Peak MLX memory was
+820,314,424 bytes. The ordinary exclusive qualification lease is released after
+independent process/group absence and memory return observations. No server or
+cluster was started, and no standing service was switched.
+
+[Paired-runtime and M5 evidence2301](https://cloud.samtg.xyz/api/v1/files/2301/raw),
+SHA256 `89babf9359925bb172f5b8ad89de64839261822f249367412d20aaec41729dc2`,
+contains complete manifests/audits, as-used controller/preparer, 24 offline
+controls and the exact lease/cleanup receipts. This is not distributed proof.
+M4/M5 greedy output agrees 48/48; the older M1 result differs at one token while
+its local canonical-versus-reconstruction logits were also exact. That remains
+an unresolved cross-hardware finding; no numerical criterion is relaxed.
+
+Actual host/feed activation, enforced private transport, numerical diagnosis
+and the small queued three-host pipeline still precede deployment. Only after
+that come the 235B model's measured context/memory fit and same full21 evals.
 Sam's interactive identity covers attended small qualification; a dedicated
 identity is a separate prerequisite for unattended pooled service.
 
