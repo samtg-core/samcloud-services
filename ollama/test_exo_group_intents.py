@@ -154,6 +154,20 @@ class ProviderGroupIntents(unittest.TestCase):
         finally:
             legacy.close()
 
+    def test_explicit_renewal_control_survives_reopen_and_cannot_silently_change(self):
+        _, call = self.enqueue()
+        self.prepare(call)
+        policy = {m.rank: 120 for m in self.plan.members}
+        self.intents.bind_renewal_policy(self.plan.owner_id, self.plan.request_key, policy)
+        self.journal.close()
+        self.journal = Arbiter(self.path)
+        self.intents = GroupIntents(self.journal)
+        self.assertEqual(self.intents.snapshot(self.plan.owner_id,
+            self.plan.request_key)['renewal_policy'], {'renew_before_s': policy})
+        for changed in (None, {m.rank: 60 for m in self.plan.members}):
+            with self.assertRaises(Conflict):
+                self.intents.bind_renewal_policy(self.plan.owner_id, self.plan.request_key, changed)
+
     def test_new_intent_requires_exact_queued_slice_model_and_manifest(self):
         for key, model, resource in [('wrong-model', 'other', HOST_RESOURCES['slice']),
                 ('wrong-host', self.plan.model_id, HOST_RESOURCES['wafer'])]:

@@ -20,6 +20,7 @@ from ollama.exo_groups.authority import AuthorityReadUnavailable, GroupAuthority
 from ollama.exo_groups.intents import GroupIntents
 from ollama.exo_groups.demand import AcquisitionDemand
 from ollama.exo_groups.plane import CoordinatorPlane
+from ollama.exo_groups.renew import GroupRenewals
 from ollama.exo_groups.plan import GroupPlan, bind_admitted_group
 from ollama.inference_arbiter import Arbiter
 from ollama.inference_supervisor import Supervisor
@@ -237,14 +238,34 @@ def test_actual_rotated_host_credential_cannot_take_over_the_coordinator(client,
     asyncio.run(run())
 
 
-def acquisition_for(client, plan, manifest, journal, *, transport=None, header=None):
+class RenewalAlarm:
+    def __init__(self, loop, notify, failed):
+        self.notify, self.deadline, self.closed = notify, None, False
+    def arm(self, deadline):
+        assert not self.closed
+        self.deadline = deadline
+    def disarm(self):
+        self.deadline = None
+    def fire(self):
+        assert self.deadline is not None and not self.closed
+        self.deadline = None
+        self.notify()
+    def close(self):
+        self.closed = True
+
+
+def acquisition_for(client, plan, manifest, journal, *, transport=None, header=None,
+                    renew_before_s=None):
     credentials = header or (lambda: client._headers['Authorization'])
     plane = CoordinatorPlane(plan.owner_id, credentials,
         transport=transport or httpx.ASGITransport(app=client._client.app))
     def factory(selected, launches):
         return GroupAuthorityReader(selected, launches, credentials,
             transport=httpx.ASGITransport(app=client._client.app))
-    return GroupAcquisition(GroupIntents(journal), plan, manifest, plane, factory)
+    renewals = (GroupRenewals(plan, plane, renew_before_s=renew_before_s)
+                if renew_before_s is not None else None)
+    return GroupAcquisition(GroupIntents(journal), plan, manifest, plane, factory,
+        renewals=renewals, renewal_alarm_factory=RenewalAlarm)
 
 
 def enqueue(journal, plan):
@@ -426,4 +447,167 @@ def test_existing_supervisor_wakes_acquisition_before_capacity_then_dispatches_o
             await actor.close()
             await asyncio.gather(*tuple(supervisor.workers.values()))
             supervisor.close()
+    asyncio.run(run())
+
+
+def test_partial_group_renewal_keeps_ordinary_queue_positions_and_exact_member_ids(
+        client, placement, tmp_path):
+    from datetime import timedelta
+    plan, manifest = placement
+    response = client.post('/api/v1/resources/' + plan.members[1].resource_id + '/leases',
+        json={'exclusive': True, 'wait': True, 'ttl_seconds': 600, 'max_total_s': 7200})
+    assert response.status_code == 200
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal,
+            renew_before_s={m.rank: 120 for m in plan.members})
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            report = await actor.wait()
+            assert report.phase == 'waiting_members'
+            group_id = report.group_id
+            before = client.get('/api/v1/lease-groups/' + group_id).json()
+            assert [m['status'] for m in before['members']] == ['active', 'queued', 'active']
+            held_ids = [before['members'][i]['lease_id'] for i in (0, 2)]
+            queued_id = before['members'][1]['lease_id']
+            queue_before = client.get('/api/v1/leases/' + queued_id).json()['queue_position']
+            old_expiry = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+            for held_id in held_ids:
+                db.execute('UPDATE leases SET expires_at=? WHERE id=?', (old_expiry, held_id))
+            actor.renewal_alarm.fire()  # Existing event loop wake, no watcher loop.
+            assert (await actor.wait()).phase == 'waiting_members'
+            after = client.get('/api/v1/lease-groups/' + group_id).json()
+            assert [m['lease_id'] for m in after['members']] == [m['lease_id'] for m in before['members']]
+            for held_id in held_ids:
+                renewed = client.get('/api/v1/leases/' + held_id).json()
+                assert datetime.fromisoformat(renewed['expires_at']) > datetime.now(timezone.utc) + timedelta(seconds=500)
+            assert client.get('/api/v1/leases/' + queued_id).json()['queue_position'] == queue_before
+            assert actor.authority is None  # Partial renewal never permits model dispatch.
+            assert actor.renewal_alarm.deadline is not None
+            assert db.query_one('SELECT COUNT(*) n FROM lease_groups')['n'] == 1
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 4
+            assert db.query_one('SELECT COUNT(*) n FROM lease_group_members '
+                'WHERE release_receipt IS NOT NULL')['n'] == 0
+        finally:
+            await actor.close()
+            assert actor.renewal_alarm.closed
+            journal.close()
+    asyncio.run(run())
+
+
+def test_real_fence_racing_ordinary_renewal_does_not_restore_old_group_permission(
+        client, placement, tmp_path):
+    from datetime import timedelta
+    plan, manifest = placement
+    class FenceBeforeRenew(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.inner = httpx.ASGITransport(app=client._client.app)
+            self.fence = False
+            self.renew_calls = 0
+        async def handle_async_request(self, request):
+            if request.method == 'POST' and request.url.path.endswith('/renew'):
+                self.renew_calls += 1
+                if self.fence:
+                    self.fence = False
+                    group_id = db.query_one('SELECT id FROM lease_groups')['id']
+                    command(client, {'id': group_id}, 'fence', reason='race the old coordinator renewal')
+            return await self.inner.handle_async_request(request)
+        async def aclose(self):
+            await self.inner.aclose()
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        transport = FenceBeforeRenew()
+        actor = acquisition_for(client, plan, manifest, journal, transport=transport,
+            renew_before_s={m.rank: 120 for m in plan.members})
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'admitted'
+            assert actor.authority.may_start_ranks()
+            group_id = actor.report.group_id
+            member = client.get('/api/v1/lease-groups/' + group_id).json()['members'][0]
+            old_expiry = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+            db.execute('UPDATE leases SET expires_at=? WHERE id=?', (old_expiry, member['lease_id']))
+            transport.fence = True
+            actor.renewal_alarm.fire()
+            assert (await actor.wait()).phase == 'unknown'
+            assert not actor.authority.may_start_ranks() and not actor.authority.may_serve_requests()
+            assert transport.renew_calls == 1
+            assert actor.intents.snapshot(plan.owner_id, plan.request_key)['generation'] == 1
+            assert client.get('/api/v1/lease-groups/' + group_id).json()['generation'] == 2
+            # The ordinary lease POST may extend the row despite the fence; it
+            # confers no group permission, and nothing is released/reacquired.
+            assert client.get('/api/v1/leases/' + member['lease_id']).json()['expires_at'] > old_expiry
+            assert_still_charged()
+            assert actor.renewal_alarm.deadline is None
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_expired_member_stays_held_without_renewal_or_replacement(client, placement, tmp_path):
+    plan, manifest = placement
+    transport = ObservedRegistry(client)
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal, transport=transport,
+            renew_before_s={m.rank: 120 for m in plan.members})
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'admitted'
+            group_id = actor.report.group_id
+            before = client.get('/api/v1/lease-groups/' + group_id).json()
+            member = before['members'][0]
+            db.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                (member['lease_id'],))
+            actor.renewal_alarm.fire()
+            assert (await actor.wait()).phase == 'draining'
+            assert not actor.authority.may_start_ranks()
+            assert not any(method == 'POST' and path.endswith('/renew') for method, path in transport.requests)
+            after = client.get('/api/v1/lease-groups/' + group_id).json()
+            assert [m['lease_id'] for m in after['members']] == [m['lease_id'] for m in before['members']]
+            assert_still_charged(expired=1)
+            assert actor.renewal_alarm.deadline is None
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_explicit_member_ceiling_arms_end_notification_without_renewal(client, placement, tmp_path):
+    from datetime import timedelta
+    from ollama.exo_groups.clock import authority_clock
+    plan, manifest = placement
+    transport = ObservedRegistry(client)
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal, transport=transport,
+            renew_before_s={m.rank: 120 for m in plan.members})
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'admitted'
+            group_id = actor.report.group_id
+            member = client.get('/api/v1/lease-groups/' + group_id).json()['members'][0]
+            ceiling = datetime.now(timezone.utc) + timedelta(seconds=20)
+            granted = ceiling - timedelta(seconds=plan.members[0].max_total_s)
+            db.execute('UPDATE leases SET granted_at=?,expires_at=? WHERE id=?',
+                (granted.isoformat(), ceiling.isoformat(), member['lease_id']))
+            actor.renewal_alarm.fire()
+            assert (await actor.wait()).phase == 'admitted'
+            assert any(m.at_ceiling and m.lease_id == member['lease_id']
+                       for m in actor.renewal_report.members)
+            assert authority_clock() < actor.renewal_alarm.deadline < authority_clock() + 21
+            assert not any(method == 'POST' and path.endswith('/renew') for method, path in transport.requests)
+            assert_still_charged()
+        finally:
+            await actor.close()
+            journal.close()
     asyncio.run(run())

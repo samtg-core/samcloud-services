@@ -29,6 +29,7 @@ class GroupIntents:
                 group_id TEXT UNIQUE,
                 create_started INTEGER NOT NULL DEFAULT 0 CHECK(create_started IN (0,1)),
                 launch_json TEXT,
+                renewal_json TEXT,
                 generation INTEGER NOT NULL CHECK(generation=1),
                 created REAL NOT NULL,
                 PRIMARY KEY(owner,request_key)
@@ -42,7 +43,7 @@ class GroupIntents:
                 raise Conflict('legacy EXO intents require explicit reconciliation')
             for name, declaration in (
                     ('create_started', 'INTEGER NOT NULL DEFAULT 0 CHECK(create_started IN (0,1))'),
-                    ('launch_json', 'TEXT')):
+                    ('launch_json', 'TEXT'), ('renewal_json', 'TEXT')):
                 if name not in columns:
                     journal.db.execute(f'ALTER TABLE exo_group_intents ADD COLUMN {name} {declaration}')
             journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_group_demands (
@@ -108,7 +109,19 @@ class GroupIntents:
         result['plan'] = json.loads(result.pop('plan_json'))
         result['request'] = json.loads(result.pop('request_json'))
         result['launches'] = json.loads(result.pop('launch_json') or 'null')
+        result['renewal_policy'] = json.loads(result.pop('renewal_json') or 'null')
         return result
+
+    def bind_renewal_policy(self, owner, request_key, renew_before_s):
+        """Record explicit enabled/disabled policy; never silently change it."""
+        policy = {'renew_before_s': renew_before_s}
+        with self.journal.transaction():
+            saved = self.snapshot(owner, request_key)
+            if saved['renewal_policy'] is not None and saved['renewal_policy'] != policy:
+                raise Conflict('renewal policy differs from the recorded provider control')
+            self.journal.db.execute('UPDATE exo_group_intents SET renewal_json=? '
+                'WHERE owner=? AND request_key=?', (encoded(policy), owner, request_key))
+        return self.snapshot(owner, request_key)
 
     def create_request(self, owner: str, request_key: str) -> dict | None:
         """Same server-idempotent body after lost reply, only for queued demand.

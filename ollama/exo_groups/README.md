@@ -79,6 +79,29 @@ Failures and recovery write deduplicated metadata events with no exception body.
 The default supervisor path has no hook, so ordinary installed gateways retain
 their existing behavior. The hook creates no public route or extra event loop.
 
+`renew.py` maintains exact member leases in place, including partial ownership
+while another member remains queued. Per-rank `renew_before_s` values must be
+explicit, positive and below that member's declared TTL. Enabled or disabled
+renewal policy commits to the same journal and cannot silently change on restart.
+Fresh scoped projections supply the server observation time; conservative
+continuous-clock deadlines subtract transport time and include host sleep.
+Indefinite queue waits are not renewed. Expired members are not resurrected.
+
+Renewal uses the existing ordinary lease endpoint, with fresh group checks before
+and after. That endpoint is **not** a group-generation CAS: a POST racing a fence
+can extend a lease row. The subsequent read rejects the old generation; the
+renewal reply never grants execution permission. A successful but unextended
+reply cannot drive an immediate retry loop. At the member's explicit lifetime
+ceiling, no further renewal is attempted and an end-of-authority event is armed;
+there is no automatic release/reacquisition.
+
+`alarm.py` migrates the qualified Darwin continuous kqueue timer into this package.
+One descriptor joins the existing service loop when renewal is explicitly enabled;
+there is no watchdog thread/polling loop. Its flags are checked against the
+installed SDK and its registration/disarm/replacement controls run against the
+real native timer. An alarm failure withdraws permission. No timer kills compute
+in this coordinator; host authority/cleanup remains a separate contract.
+
 ## Integration still required
 
 This component is **not enabled by startup and is not a complete EXO provider**.
@@ -99,8 +122,8 @@ inference. The remaining provider integration must:
    neither reconnect nor elapsed time retries inference or releases the group.
 5. Keep call completion distinct from the residency session. Release only after
    observed rank cleanup, exact evidence publication and acknowledged settlement
-   of every member. Wire member renewal to the explicitly declared lease/session
-   authority before longer runs. Standing long arcs still need their recorded
+   of every member. Wire the implemented renewal policy to the pinned runtime
+   configuration before longer runs. Standing long arcs still need their recorded
    protocol decision; there is no default idle-release/reacquire timer.
 
 Production integration remains gated by the small-model native and multi-host
@@ -115,7 +138,8 @@ From the model-service repository:
 python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_member ollama.test_exo_group_clock \
   ollama.test_exo_group_authority ollama.test_exo_group_intents \
-  ollama.test_exo_group_acquire ollama.test_exo_group_demand
+  ollama.test_exo_group_acquire ollama.test_exo_group_demand \
+  ollama.test_exo_group_renew ollama.test_exo_group_alarm
 ```
 
 The real registry qualification uses Samcloud PR19's source, currently
@@ -137,4 +161,6 @@ queue assembly behind an Obelisk blocker, same-key recovery of a lost committed
 create reply after caller cancellation, and a logical dispatch through the real
 supervisor only after lease-serving plus explicit injected-backend readiness.
 The final backend is a CPU injection, not EXO/native qualification. No production
-lease or inference is submitted by any of these controls.
+lease or inference is submitted by any of these controls. Renewal controls also
+keep partial-group active IDs/queue positions, reject a fence racing POST, retain
+expired HOLD without resurrection, and arm the explicit ceiling notification.

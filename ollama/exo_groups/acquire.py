@@ -26,7 +26,7 @@ class AcquisitionReport:
 
 
 class GroupAcquisition:
-    """Explicitly installed by a provider; no timer or automatic retry loop.
+    """Explicit provider; no assembly/compute timer or automatic retry loop.
 
     The existing event consumer calls events_reconciled after its cursor is
     current, on_event for hints, and events_lost on contact/cursor loss. A new
@@ -36,7 +36,8 @@ class GroupAcquisition:
 
     def __init__(self, intents: GroupIntents, plan: GroupPlan, manifest: bytes,
                  plane, authority_factory, *, notify=lambda _report: None,
-                 wall_clock=lambda: datetime.now(timezone.utc)):
+                 wall_clock=lambda: datetime.now(timezone.utc), renewals=None,
+                 renewal_alarm_factory=None):
         if not isinstance(intents, GroupIntents) or not isinstance(plan, GroupPlan):
             raise TypeError('existing journal and provider-owned plan required')
         if not isinstance(manifest, bytes) or plane.owner_id != plan.owner_id:
@@ -53,6 +54,21 @@ class GroupAcquisition:
         self._closed = False
         self._drained = False
         self.task_factory = asyncio.create_task
+        self.renewals, self.renewal_report, self.renewal_alarm = renewals, None, None
+        if renewals is not None:
+            if renewals.plan != plan or renewals.plane is not plane:
+                raise ValueError('renewals must name this exact coordinator plan and client')
+            from .alarm import ContinuousAuthorityAlarm
+            factory = renewal_alarm_factory or ContinuousAuthorityAlarm
+            self.renewal_alarm = factory(asyncio.get_running_loop(), self.wake, self._renewal_failed)
+
+    def _renewal_failed(self):
+        self.events_lost()
+        self._publish(AcquisitionReport('unknown', 'renewal_alarm_unavailable', self._known_group()))
+
+    def _disarm_renewal(self):
+        if self.renewal_alarm is not None:
+            self.renewal_alarm.disarm()
 
     def _invalidate(self):
         if self.authority is not None:
@@ -88,6 +104,7 @@ class GroupAcquisition:
         self._events_ready = False
         self._epoch += 1
         self._invalidate()
+        self._disarm_renewal()
         self._publish(AcquisitionReport('unknown', 'event_source_unconfirmed', self.report.group_id))
 
     def on_event(self, event):
@@ -140,6 +157,7 @@ class GroupAcquisition:
                 self._publish(report)
             except (Exception, asyncio.CancelledError) as error:
                 self._invalidate()
+                self._disarm_renewal()
                 self._publish(AcquisitionReport('unknown', 'reconciliation_required', self._known_group()))
                 if isinstance(error, asyncio.CancelledError):
                     raise
@@ -153,6 +171,8 @@ class GroupAcquisition:
             saved = self.intents.snapshot(self.plan.owner_id, self.plan.request_key)
         except NotFound:
             return AcquisitionReport('idle', 'no_saved_demand')
+        self.intents.bind_renewal_policy(self.plan.owner_id, self.plan.request_key,
+            self.renewals.lead if self.renewals is not None else None)
         await self.plane.verify_owner()
         self._current(epoch)
         if saved['group_id'] is None:
@@ -173,13 +193,25 @@ class GroupAcquisition:
                 or type(group.get('release_requested')) is not bool):
             raise RuntimeError('group state requires reconciliation')
         if group['generation'] != saved['generation']:
+            self._disarm_renewal()
             return AcquisitionReport('fenced', 'coordinator_generation_changed', group_id, group['phase'])
         if group.get('release_requested') or group['phase'] in ('releasing', 'released', 'uncertain'):
+            self._disarm_renewal()
             return AcquisitionReport('draining', 'group_not_available', group_id, group['phase'])
         if group['phase'] in ('pending', 'acquiring'):
             group = await self.plane.advance(group_id, saved['generation'])
             self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
             self._current(epoch)
+        if self.renewals is not None:
+            self.renewal_report = await self.renewals.maintain(group,
+                generation=saved['generation'], current=lambda: self._current(epoch))
+            self._current(epoch)
+            if self.renewal_report.next_event is None:
+                self._disarm_renewal()
+            else:
+                # Arm before publishing any refreshed permission. This is a
+                # declared lease-renewal wake, not an assembly or compute cap.
+                self.renewal_alarm.arm(self.renewal_report.next_event)
         if group['phase'] not in ('admitted', 'serving'):
             return AcquisitionReport('waiting_members', 'ordinary_host_queue', group_id, group['phase'])
         leases = {}
@@ -209,6 +241,8 @@ class GroupAcquisition:
         await self.wait()  # Drain metadata ownership; never cancel backend work.
         if self.authority is not None:
             await self.authority.close()
+        if self.renewal_alarm is not None:
+            self.renewal_alarm.close()
         await self.plane.close()
         self._drained = True
         # Physical ownership remains recorded until the separate observed

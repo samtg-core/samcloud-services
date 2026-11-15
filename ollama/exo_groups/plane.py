@@ -65,5 +65,17 @@ class CoordinatorPlane:
             raise ValueError('exact member lease id required')
         return await self._request('GET', '/api/v1/leases/' + quote(lease_id, safe=''))
 
+    async def member(self, group_id, lease_id):
+        if not isinstance(lease_id, str) or not re.fullmatch(r'lease_[a-f0-9]{16,64}', lease_id):
+            raise ValueError('exact member lease id required')
+        return await self._request('GET', self._group(group_id) + '/members/' + lease_id + '/authority')
+
+    async def renew(self, lease_id, ttl_seconds):
+        if (not isinstance(lease_id, str) or not re.fullmatch(r'lease_[a-f0-9]{16,64}', lease_id)
+                or type(ttl_seconds) is not int or ttl_seconds < 1):
+            raise ValueError('exact lease and explicit positive renewal TTL required')
+        return await self._request('POST', '/api/v1/leases/' + lease_id + '/renew',
+                                   {'ttl_seconds': ttl_seconds})
+
     async def close(self):
         await self._client.aclose()
