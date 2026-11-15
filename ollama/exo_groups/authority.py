@@ -12,7 +12,6 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
-import json
 import math
 from typing import Callable
 from urllib.parse import quote
@@ -20,6 +19,7 @@ from urllib.parse import quote
 import httpx
 
 from .clock import authority_clock
+from .http import bounded_json, credential_headers
 from .member import AuthorityDecision, ExpectedMember, check_projection, event_requires_read
 from .plan import BindingRefused, GroupPlan, LaunchBinding
 
@@ -119,35 +119,10 @@ class GroupAuthorityReader:
         return self._permitted(True)
 
     def _headers(self) -> dict[str, str]:
-        value = self._header()
-        if (not isinstance(value, str) or not value.startswith('Bearer ')
-                or len(value) <= 7 or any(ord(char) < 32 or ord(char) > 126 for char in value)):
-            raise AuthorityReadUnavailable('coordinator credential unavailable')
-        return {'Authorization': value, 'Accept': 'application/json', 'Cache-Control': 'no-cache'}
+        return credential_headers(self._header)
 
     async def _json(self, path: str, headers: dict[str, str]) -> dict:
-        async with self._client.stream('GET', path, headers=headers) as response:
-            if (response.status_code != 200 or
-                    response.headers.get('content-type', '').split(';')[0] != 'application/json'):
-                raise AuthorityReadUnavailable('authority HTTP read unavailable')
-            raw = bytearray()
-            async for chunk in response.aiter_bytes():
-                if len(raw) + len(chunk) > 128 * 1024:
-                    raise AuthorityReadUnavailable('authority response exceeds bound')
-                raw.extend(chunk)
-
-            def unique(pairs):
-                value = {}
-                for key, item in pairs:
-                    if key in value:
-                        raise ValueError('duplicate authority field')
-                    value[key] = item
-                return value
-
-            value = json.loads(raw, object_pairs_hook=unique)
-            if not isinstance(value, dict):
-                raise AuthorityReadUnavailable('authority response is not an object')
-            return value
+        return await bounded_json(self._client, 'GET', path, headers)
 
     async def refresh(self) -> GroupObservation:
         async with self._lock:

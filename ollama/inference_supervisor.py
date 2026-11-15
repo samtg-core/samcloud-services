@@ -56,6 +56,8 @@ class Supervisor:
         self.workers = {}
         self.preparations = set()
         self.wakeups = {}
+        self.prepare_demand = None
+        self._demand_failures = set()
 
     def prepare(self, operation):
         """Own a captured-input handoff even when its HTTP waiter disconnects.
@@ -81,6 +83,20 @@ class Supervisor:
         previous = self.wakeups.pop(resource, None)
         if previous is not None:
             previous.cancel()
+        if self.prepare_demand is not None:
+            try:
+                self.prepare_demand(resource)
+            except Exception:
+                # Trusted local metadata preparation failed before dispatch.
+                # Keep the saved call queued; never fall back to direct compute.
+                if resource not in self._demand_failures:
+                    self.journal.capacity_event(resource, None, 'unknown', 'demand_preparation_failed')
+                    self._demand_failures.add(resource)
+                    logging.getLogger(__name__).warning('Queued demand preparation requires reconciliation')
+                return None
+            if resource in self._demand_failures:
+                self.journal.capacity_event(resource, None, 'unknown', 'demand_preparation_reconciled')
+                self._demand_failures.remove(resource)
         if not self.permitted(resource):
             return None
         item = self.journal.dispatch_next(resource,permitted_model=self.permitted_model)

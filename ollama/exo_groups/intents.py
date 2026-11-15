@@ -12,6 +12,7 @@ import time
 
 from ..inference_arbiter import Arbiter, Conflict, NotFound, encoded
 from .plan import GroupPlan, HOST_RESOURCES, check_rank_manifest
+from .member import ExpectedMember
 
 
 class GroupIntents:
@@ -26,10 +27,24 @@ class GroupIntents:
                 plan_json TEXT NOT NULL,
                 request_json TEXT NOT NULL,
                 group_id TEXT UNIQUE,
+                create_started INTEGER NOT NULL DEFAULT 0 CHECK(create_started IN (0,1)),
+                launch_json TEXT,
                 generation INTEGER NOT NULL CHECK(generation=1),
                 created REAL NOT NULL,
                 PRIMARY KEY(owner,request_key)
             )''')
+            columns = {row['name'] for row in journal.db.execute('PRAGMA table_info(exo_group_intents)')}
+            if (not {'create_started', 'launch_json'} <= columns
+                    and journal.db.execute('SELECT 1 FROM exo_group_intents LIMIT 1').fetchone()):
+                # The unreleased draft format did not record whether create was
+                # submitted. Never guess that an old intent was output-free or
+                # unsubmitted and silently reacquire after upgrading it.
+                raise Conflict('legacy EXO intents require explicit reconciliation')
+            for name, declaration in (
+                    ('create_started', 'INTEGER NOT NULL DEFAULT 0 CHECK(create_started IN (0,1))'),
+                    ('launch_json', 'TEXT')):
+                if name not in columns:
+                    journal.db.execute(f'ALTER TABLE exo_group_intents ADD COLUMN {name} {declaration}')
             journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_group_demands (
                 execution_id TEXT PRIMARY KEY REFERENCES executions(id),
                 owner TEXT NOT NULL,
@@ -92,6 +107,7 @@ class GroupIntents:
         # A database observation is provenance, never saved launch authority.
         result['plan'] = json.loads(result.pop('plan_json'))
         result['request'] = json.loads(result.pop('request_json'))
+        result['launches'] = json.loads(result.pop('launch_json') or 'null')
         return result
 
     def create_request(self, owner: str, request_key: str) -> dict | None:
@@ -99,18 +115,55 @@ class GroupIntents:
 
         With a known group id the coordinator reads that exact group instead.
         An uncertain/running/terminal call alone does not initiate acquisition.
+        An already-committed submission decision outlives caller cancellation:
+        its same-key metadata operation must be reconciled, not forgotten.
         The actor still verifies its identity and serializes release/cancel
         against acquisition; this method performs no plane mutation.
         """
         saved = self.snapshot(owner, request_key)
         if saved['group_id'] is not None:
             return None
+        if saved['create_started']:
+            return saved['request']
         pending = self.journal.db.execute('''SELECT 1 FROM exo_group_demands d
             JOIN executions x ON x.id=d.execution_id JOIN grants g ON g.id=x.grant_id
             WHERE d.owner=? AND d.request_key=? AND x.state='queued'
             AND g.state IN ('queued','granted') AND g.release_requested=0 LIMIT 1''',
             (owner, request_key)).fetchone()
         return saved['request'] if pending is not None else None
+
+    def begin_create(self, owner: str, request_key: str) -> dict | None:
+        """Commit service ownership before sending the exact create request."""
+        with self.journal.transaction():
+            request = self.create_request(owner, request_key)
+            if request is not None:
+                self.journal.db.execute('UPDATE exo_group_intents SET create_started=1 '
+                    'WHERE owner=? AND request_key=?', (owner, request_key))
+            return request
+
+    def bind_launches(self, owner: str, request_key: str, launches: tuple) -> dict:
+        """Freeze member identities before rank startup; expiry may be renewed."""
+        with self.journal.transaction():
+            saved = self.snapshot(owner, request_key)
+            plan = GroupPlan.parse(saved['plan'])
+            expected = tuple(ExpectedMember.from_launch(plan, binding) for binding in launches)
+            if (saved['group_id'] is None or len(expected) != 3
+                    or tuple(item.binding.pipeline_rank for item in expected) != (0, 1, 2)
+                    or len({item.binding.lease_id for item in expected}) != 3
+                    or any(item.binding.group_id != saved['group_id']
+                        or type(item.binding.pipeline_rank) is not int
+                        or type(item.binding.generation) is not int
+                        or item.binding.generation != saved['generation'] for item in expected)):
+                raise Conflict('launches differ from the recorded group generation')
+            identity = [{key: value for key, value in asdict(item.binding).items()
+                         if key != 'expires_at'} for item in expected]
+            # Normalize tuple layer ranges through the JSON wire representation.
+            identity = json.loads(encoded(identity))
+            if saved['launches'] is not None and saved['launches'] != identity:
+                raise Conflict('group member identities changed after binding')
+            self.journal.db.execute('UPDATE exo_group_intents SET launch_json=? '
+                'WHERE owner=? AND request_key=?', (encoded(identity), owner, request_key))
+        return self.snapshot(owner, request_key)
 
     def record_group(self, owner: str, request_key: str, group: dict) -> dict:
         """Bind the one reply identity; never adopt a successor generation."""

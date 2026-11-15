@@ -1,0 +1,39 @@
+"""Bounded JSON metadata transport; no provider compute or retry policy."""
+
+import json
+
+
+async def bounded_json(client, method, path, headers, *, payload=None):
+    async with client.stream(method, path, headers=headers, json=payload) as response:
+        if (response.status_code != 200 or
+                response.headers.get('content-type', '').split(';')[0] != 'application/json'):
+            raise ValueError('plane HTTP metadata unavailable')
+        raw = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(raw) + len(chunk) > 128 * 1024:
+                raise ValueError('plane metadata exceeds bound')
+            raw.extend(chunk)
+
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError('duplicate plane field')
+                value[key] = item
+            return value
+
+        def nonfinite(_value):
+            raise ValueError('nonfinite plane field')
+
+        value = json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite)
+        if not isinstance(value, dict):
+            raise ValueError('plane metadata is not an object')
+        return value
+
+
+def credential_headers(header):
+    value = header()
+    if (not isinstance(value, str) or not value.startswith('Bearer ')
+            or len(value) <= 7 or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+        raise ValueError('coordinator credential unavailable')
+    return {'Authorization': value, 'Accept': 'application/json', 'Cache-Control': 'no-cache'}

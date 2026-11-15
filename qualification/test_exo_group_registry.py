@@ -15,10 +15,14 @@ import db
 from test_registry import _register_device
 
 from ollama import test_exo_group_plan as fixtures
+from ollama.exo_groups.acquire import GroupAcquisition
 from ollama.exo_groups.authority import AuthorityReadUnavailable, GroupAuthorityReader
 from ollama.exo_groups.intents import GroupIntents
+from ollama.exo_groups.demand import AcquisitionDemand
+from ollama.exo_groups.plane import CoordinatorPlane
 from ollama.exo_groups.plan import GroupPlan, bind_admitted_group
 from ollama.inference_arbiter import Arbiter
+from ollama.inference_supervisor import Supervisor
 
 pytest_plugins = ["test_registry"]
 
@@ -230,4 +234,196 @@ def test_actual_rotated_host_credential_cannot_take_over_the_coordinator(client,
             assert_still_charged()
         finally:
             await reader.close()
+    asyncio.run(run())
+
+
+def acquisition_for(client, plan, manifest, journal, *, transport=None, header=None):
+    credentials = header or (lambda: client._headers['Authorization'])
+    plane = CoordinatorPlane(plan.owner_id, credentials,
+        transport=transport or httpx.ASGITransport(app=client._client.app))
+    def factory(selected, launches):
+        return GroupAuthorityReader(selected, launches, credentials,
+            transport=httpx.ASGITransport(app=client._client.app))
+    return GroupAcquisition(GroupIntents(journal), plan, manifest, plane, factory)
+
+
+def enqueue(journal, plan):
+    grant = journal.submit('native-caller', 'one', 'claude-services-slice/gpu-0',
+        plan.model_id, lifetime='execution')
+    return grant, journal.enqueue(grant['id'], 'native-caller', 'one', {'operation': 'chat'})
+
+
+def deliver_events(client, actor):
+    notices = client.get('/api/v1/events/recent?limit=100').json()
+    return sum(actor.on_event(event) for event in notices)
+
+
+def test_actual_acquisition_waits_on_obelisk_then_admits_and_fences_without_dispatch(
+        client, placement, tmp_path):
+    plan, manifest = placement
+    response = client.post('/api/v1/resources/' + plan.members[0].resource_id + '/leases',
+        json={'exclusive': True, 'wait': True, 'ttl_seconds': 600, 'max_total_s': 7200})
+    assert response.status_code == 200
+    blocker = response.json()['lease_id']
+
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal)
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            report = await actor.wait()
+            assert report.phase == 'waiting_members'
+            group = client.get('/api/v1/lease-groups/' + report.group_id).json()
+            assert [member['status'] for member in group['members']] == [
+                'queued', 'not_requested', 'not_requested']
+            assert actor.authority is None
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 2
+            assert client.delete('/api/v1/leases/' + blocker).status_code == 200
+            assert deliver_events(client, actor)
+            report = await actor.wait()
+            assert report.phase == 'admitted' and actor.authority.may_start_ranks()
+            assert not actor.authority.may_serve_requests()
+            command(client, {'id': report.group_id}, 'serving',
+                evidence_ref='test:ready', evidence_sha256='b' * 64)
+            assert deliver_events(client, actor)
+            assert not actor.authority.may_start_ranks()  # Withdrawn before async I/O.
+            assert (await actor.wait()).phase == 'lease_serving'
+            command(client, {'id': report.group_id}, 'fence', reason='replace test coordinator')
+            assert deliver_events(client, actor)
+            assert not actor.authority.may_serve_requests()
+            assert (await actor.wait()).phase == 'fenced'
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 4
+            assert db.query_one("SELECT COUNT(*) n FROM leases WHERE status='active'")['n'] == 3
+            assert db.query_one('SELECT COUNT(*) n FROM lease_group_members '
+                'WHERE release_receipt IS NOT NULL')['n'] == 0
+            assert journal.execution(call['id'], 'native-caller')['state'] == 'queued'
+            assert journal.db.execute('SELECT COUNT(*) FROM executions').fetchone()[0] == 1
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_actual_owned_create_recovers_after_reply_loss_and_caller_cancellation(
+        client, placement, tmp_path):
+    plan, manifest = placement
+    class DropFirstReply(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.inner = httpx.ASGITransport(app=client._client.app)
+            self.create_calls = 0
+        async def handle_async_request(self, request):
+            response = await self.inner.handle_async_request(request)
+            if request.method == 'POST' and request.url.path == '/api/v1/lease-groups':
+                self.create_calls += 1
+                if self.create_calls == 1:
+                    await response.aclose()
+                    raise httpx.ReadError('simulated lost committed create reply')
+            return response
+        async def aclose(self):
+            await self.inner.aclose()
+
+    async def run():
+        path = tmp_path / 'inference.sqlite'
+        journal = Arbiter(path)
+        actor = acquisition_for(client, plan, manifest, journal, transport=DropFirstReply())
+        try:
+            grant, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'unknown'
+            group_id = db.query_one('SELECT id FROM lease_groups')['id']
+            assert_still_charged()
+            assert actor.intents.snapshot(plan.owner_id, plan.request_key)['group_id'] is None
+            journal.request_release(grant['id'], 'native-caller')
+            await actor.close()
+            journal.close()
+            journal = Arbiter(path)
+            actor = acquisition_for(client, plan, manifest, journal)
+            actor.events_reconciled()  # Recover the owned metadata operation, not inference.
+            report = await actor.wait()
+            assert report.phase == 'admitted' and report.group_id == group_id
+            assert db.query_one('SELECT COUNT(*) n FROM lease_groups')['n'] == 1
+            assert_still_charged()
+            assert journal.execution(call['id'], 'native-caller')['state'] == 'cancelled'
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_actual_acquisition_wrong_coordinator_credential_makes_no_create(client, placement, tmp_path):
+    plan, manifest = placement
+    response = client.post('/api/v1/users', json={'username': 'other-coordinator',
+        'password': 'test-pw', 'role': 'user', 'scopes': ['device:claude-services-slice']})
+    assert response.status_code == 200
+    login = client.post('/api/v1/auth/login', json={
+        'username': 'other-coordinator', 'password': 'test-pw'})
+    assert login.status_code == 200
+    transport = ObservedRegistry(client)
+    async def run():
+        journal = Arbiter(tmp_path / 'inference.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal, transport=transport,
+            header=lambda: 'Bearer ' + login.json()['token'])
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'unknown'
+            assert transport.requests == [('GET', '/api/v1/auth/verify')]
+            assert actor.intents.snapshot(plan.owner_id, plan.request_key)['create_started'] == 0
+            assert db.query_one('SELECT COUNT(*) n FROM lease_groups')['n'] == 0
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 0
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_existing_supervisor_wakes_acquisition_before_capacity_then_dispatches_once(
+        client, placement, tmp_path):
+    plan, manifest = placement
+    async def run():
+        backend_ready = False
+        executions = []
+        actor = None
+        async def injected_backend(grant, request):
+            # CPU backend injection only, not an EXO runtime qualification.
+            assert backend_ready and actor.authority.may_serve_requests()
+            executions.append(grant['active_execution'])
+            return {'kind': 'json', 'body': {'answer': 'fixture'}}
+        def permitted(_resource):
+            return bool(backend_ready and actor and actor.authority and
+                        actor.authority.may_serve_requests())
+        supervisor = Supervisor(tmp_path / 'inference.sqlite', injected_backend, permitted)
+        actor = acquisition_for(client, plan, manifest, supervisor.journal)
+        AcquisitionDemand(supervisor, {plan.model_id: actor})
+        def changed(report):
+            if report.phase == 'lease_serving':
+                supervisor.capacity_available('claude-services-slice/gpu-0')
+        actor.notify = changed
+        try:
+            actor.events_reconciled()
+            _, call = enqueue(supervisor.journal, plan)
+            # Every existing API/compatibility enqueue already calls pump().
+            assert supervisor.pump('claude-services-slice/gpu-0') is None
+            assert (await actor.wait()).phase == 'admitted'
+            assert executions == []  # Admitted leases alone cannot serve.
+            saved = actor.intents.snapshot(plan.owner_id, plan.request_key)
+            command(client, {'id': saved['group_id']}, 'serving',
+                evidence_ref='test:injected-backend-ready', evidence_sha256='c' * 64)
+            backend_ready = True  # Explicit test backend readiness, separate from leases.
+            assert deliver_events(client, actor)
+            assert (await actor.wait()).phase == 'lease_serving'
+            await asyncio.gather(*tuple(supervisor.workers.values()))
+            assert executions == [call['id']]
+            assert supervisor.journal.execution(call['id'], 'native-caller')['state'] == 'complete'
+            assert_still_charged()  # Call completion is not physical session release.
+            supervisor.pump('claude-services-slice/gpu-0')
+            assert executions == [call['id']]
+        finally:
+            await actor.close()
+            await asyncio.gather(*tuple(supervisor.workers.values()))
+            supervisor.close()
     asyncio.run(run())

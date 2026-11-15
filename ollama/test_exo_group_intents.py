@@ -106,6 +106,54 @@ class ProviderGroupIntents(unittest.TestCase):
                 self.intents.record_group(self.plan.owner_id, self.plan.request_key, bad)
         self.assertIsNone(self.intents.snapshot(self.plan.owner_id, self.plan.request_key)['group_id'])
 
+    def test_owned_create_decision_survives_caller_cancellation_and_restart(self):
+        grant, call = self.enqueue()
+        self.prepare(call)
+        body = self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
+        self.journal.request_release(grant['id'], 'caller')
+        self.journal.close()
+        self.journal = Arbiter(self.path)
+        self.intents = GroupIntents(self.journal)
+        self.assertEqual(self.intents.create_request(self.plan.owner_id, self.plan.request_key), body)
+        self.assertTrue(self.intents.snapshot(self.plan.owner_id, self.plan.request_key)['create_started'])
+        self.assertEqual(self.journal.execution(call['id'], 'caller')['state'], 'cancelled')
+
+    def test_bound_member_identity_survives_renewal_but_not_lease_replacement(self):
+        fixture = fixtures.GroupBindingControls()
+        fixture.setUp()
+        _, call = self.enqueue()
+        self.prepare(call)
+        launches = tuple(replace(b, group_id=self.group['id']) for b in fixture.bind())
+        with self.assertRaises(Conflict):
+            self.intents.bind_launches(self.plan.owner_id, self.plan.request_key, launches)
+        self.intents.record_group(self.plan.owner_id, self.plan.request_key, self.group)
+        first = self.intents.bind_launches(self.plan.owner_id, self.plan.request_key, launches)
+        renewed = tuple(replace(b, expires_at='2026-11-14T10:15:00+00:00') for b in launches)
+        self.assertEqual(self.intents.bind_launches(self.plan.owner_id,
+            self.plan.request_key, renewed)['launches'], first['launches'])
+        for bad in (launches[:2], tuple(reversed(launches)),
+                launches[:2] + (replace(launches[2], lease_id='replacement'),),
+                tuple(replace(b, generation=True) for b in launches)):
+            with self.assertRaises(Conflict):
+                self.intents.bind_launches(self.plan.owner_id, self.plan.request_key, bad)
+
+    def test_populated_legacy_draft_is_not_guessed_to_be_unsubmitted(self):
+        legacy = Arbiter(Path(self.temp.name) / 'legacy.sqlite')
+        try:
+            legacy.db.execute('''CREATE TABLE exo_group_intents (
+                owner TEXT, request_key TEXT, plan_json TEXT, request_json TEXT,
+                group_id TEXT, generation INTEGER, created REAL,
+                PRIMARY KEY(owner,request_key))''')
+            legacy.db.execute("INSERT INTO exo_group_intents VALUES(?,?,?,?,NULL,1,0)",
+                ('user:58', 'unknown-create-outcome', '{}', '{}'))
+            with self.assertRaisesRegex(Conflict, 'explicit reconciliation'):
+                GroupIntents(legacy)
+            self.assertEqual(legacy.db.execute('SELECT COUNT(*) FROM exo_group_intents').fetchone()[0], 1)
+            self.assertNotIn('create_started', {row['name'] for row in legacy.db.execute(
+                'PRAGMA table_info(exo_group_intents)')})
+        finally:
+            legacy.close()
+
     def test_new_intent_requires_exact_queued_slice_model_and_manifest(self):
         for key, model, resource in [('wrong-model', 'other', HOST_RESOURCES['slice']),
                 ('wrong-host', self.plan.model_id, HOST_RESOURCES['wafer'])]:

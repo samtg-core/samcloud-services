@@ -57,17 +57,38 @@ never silently advances the saved generation. Cancelled, running or uncertain
 work alone cannot initiate new acquisition. These rows have no dispatch order
 or scheduler of their own, and they perform no plane writes.
 
+`acquire.py` owns that metadata operation across observer disconnects. It waits
+for the existing event consumer to confirm its cursor, then creates/advances
+through the ordinary host queues. A committed `create_started` decision retains
+ownership of the exact metadata operation even if its reply is lost and the
+original caller subsequently cancels. An explicit event/demand/reconciliation
+wakeup can resolve that same key; there is no timer or failure-driven retry.
+The actor records returned group identity even if its event connection is lost
+in flight. Contact loss withdraws authority until the cursor is reconciled.
+Member identities are frozen in the inference journal before rank startup;
+renewing expiry is permitted, replacing a lease or generation is not. Populated
+unreleased draft journals without submission provenance refuse automatic
+migration rather than guess whether an old create was submitted.
+
+`demand.py` explicitly installs a preparation hook on the existing supervisor.
+Its pump prepares new saved demand **before** checking capacity, so acquisition
+cannot deadlock waiting for the capacity it must establish. It skips already
+linked calls on capacity wakeups. The supervisor owns/drains acquisition tasks,
+and preparation failures leave calls queued without direct-dispatch fallback.
+Failures and recovery write deduplicated metadata events with no exception body.
+The default supervisor path has no hook, so ordinary installed gateways retain
+their existing behavior. The hook creates no public route or extra event loop.
+
 ## Integration still required
 
 This component is **not enabled by startup and is not a complete EXO provider**.
-It does not acquire leases, launch ranks, load a model or run inference. The
-remaining provider integration must:
+The actor can acquire metadata leases when explicitly installed; nothing in this
+PR has been installed on a host. It does not launch ranks, load a model or run
+inference. The remaining provider integration must:
 
-1. Connect the saved intents/demand links to a service-owned acquisition actor
-   before dispatch, without requiring the HTTP observer to stay connected.
-   Persist the exact group, generation, manifest and execution/instance binding
-   before an inference POST. The create-intent store is implemented; the actor
-   and execution/instance binding are not.
+1. Bind the actor/hook to startup's exact configuration, the existing event feed
+   and shutdown lifecycle after the rollout gates. Persist execution/instance
+   binding before an inference POST; group/member intent binding is implemented.
 2. Publish group-covered capacity alongside local-model capacity. Slice's group
    lease must not be mistaken for spare local memory or trigger a second lease.
 3. Bind the pinned EXO runtime, its private namespace/API key and exact explicit
@@ -91,7 +112,8 @@ From the model-service repository:
 ```sh
 python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_member ollama.test_exo_group_clock \
-  ollama.test_exo_group_authority ollama.test_exo_group_intents
+  ollama.test_exo_group_authority ollama.test_exo_group_intents \
+  ollama.test_exo_group_acquire ollama.test_exo_group_demand
 ```
 
 The real registry qualification uses Samcloud PR19's source, currently
@@ -108,4 +130,9 @@ store and authorized-keys paths. These controls use its real authenticated ASGI
 API and SQLite state. No production credential, network, process or GPU is used.
 They cover admitted versus serving, coordinator fencing, a fence between member
 reads, foreign credential rotation, and an expired HOLD member remaining charged
-and unsettled. Only the fixture creates test leases; the provider issues GETs.
+and unsettled. The acquisition controls additionally exercise actual ordinary
+queue assembly behind an Obelisk blocker, same-key recovery of a lost committed
+create reply after caller cancellation, and a logical dispatch through the real
+supervisor only after lease-serving plus explicit injected-backend readiness.
+The final backend is a CPU injection, not EXO/native qualification. No production
+lease or inference is submitted by any of these controls.

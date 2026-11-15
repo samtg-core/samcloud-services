@@ -1,0 +1,215 @@
+"""Service-owned, event-driven assembly of one pinned EXO lease group.
+
+The existing inference journal owns demand and the registry owns each physical
+queue. This actor owns metadata requests across observer disconnects. It never
+loads a model, starts a rank, submits inference or releases physical ownership.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from ..inference_arbiter import NotFound
+from .intents import GroupIntents
+from .plan import GroupPlan, bind_admitted_group, check_rank_manifest
+
+
+@dataclass(frozen=True)
+class AcquisitionReport:
+    phase: str
+    reason: str
+    group_id: str | None = None
+    group_phase: str | None = None
+
+
+class GroupAcquisition:
+    """Explicitly installed by a provider; no timer or automatic retry loop.
+
+    The existing event consumer calls events_reconciled after its cursor is
+    current, on_event for hints, and events_lost on contact/cursor loss. A new
+    demand or an event coalesces a metadata reconciliation. Event fields never
+    grant authority. HTTP observers call wait(), which shields the owned task.
+    """
+
+    def __init__(self, intents: GroupIntents, plan: GroupPlan, manifest: bytes,
+                 plane, authority_factory, *, notify=lambda _report: None,
+                 wall_clock=lambda: datetime.now(timezone.utc)):
+        if not isinstance(intents, GroupIntents) or not isinstance(plan, GroupPlan):
+            raise TypeError('existing journal and provider-owned plan required')
+        if not isinstance(manifest, bytes) or plane.owner_id != plan.owner_id:
+            raise ValueError('exact manifest and coordinator identity required')
+        check_rank_manifest(plan, manifest)
+        self.intents, self.plan, self.manifest = intents, plan, manifest
+        self.plane, self.authority_factory = plane, authority_factory
+        self.notify, self.wall_clock = notify, wall_clock
+        self.authority = None
+        self.report = AcquisitionReport('unknown', 'event_source_unconfirmed')
+        self._task = None
+        self._epoch = 0
+        self._events_ready = False
+        self._closed = False
+        self._drained = False
+        self.task_factory = asyncio.create_task
+
+    def _invalidate(self):
+        if self.authority is not None:
+            self.authority.invalidate()
+
+    def _publish(self, report):
+        self.report = report
+        try:
+            self.notify(report)
+        except Exception:
+            self._invalidate()
+            self.report = AcquisitionReport('unknown', 'notification_failed', report.group_id)
+
+    def _known_group(self):
+        try:
+            return self.intents.snapshot(self.plan.owner_id, self.plan.request_key)['group_id']
+        except Exception:
+            return self.report.group_id
+
+    def note_demand(self, execution_id):
+        if self._closed:
+            raise RuntimeError('acquisition actor closed')
+        self.intents.prepare(execution_id, self.plan, self.manifest)
+        self.wake()
+
+    def events_reconciled(self):
+        if self._closed:
+            raise RuntimeError('acquisition actor closed')
+        self._events_ready = True
+        self.wake()
+
+    def events_lost(self):
+        self._events_ready = False
+        self._epoch += 1
+        self._invalidate()
+        self._publish(AcquisitionReport('unknown', 'event_source_unconfirmed', self.report.group_id))
+
+    def on_event(self, event):
+        if self._closed or not isinstance(event, Mapping):
+            return False
+        data, kind = event.get('data'), event.get('type')
+        resources = {member.resource_id for member in self.plan.members}
+        if (not isinstance(data, Mapping) or not isinstance(kind, str)
+                or not kind.startswith(('resource.', 'lease.'))
+                or data.get('resource_id') not in resources):
+            return False
+        # Other holders on a required host can unblock our ordinary queued
+        # member, so these hints are relevant before our lease id is known too.
+        self.wake()
+        return True
+
+    def wake(self):
+        if self._closed:
+            return
+        self._epoch += 1
+        self._invalidate()  # Withdraw before scheduling, not after awaiting I/O.
+        if not self._events_ready:
+            return
+        if self._task is None or self._task.done():
+            task = self.task_factory(self._drive())
+            self._task = task
+            def finished(done):
+                if self._task is done:
+                    self._task = None
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(finished)
+
+    async def wait(self):
+        task = self._task
+        if task is not None:
+            await asyncio.shield(task)
+        return self.report
+
+    def _current(self, epoch):
+        if self._closed or not self._events_ready or epoch != self._epoch:
+            raise RuntimeError('acquisition observation changed')
+
+    async def _drive(self):
+        while not self._closed and self._events_ready:
+            epoch = self._epoch
+            try:
+                report = await self._reconcile(epoch)
+                self._current(epoch)
+                self._publish(report)
+            except (Exception, asyncio.CancelledError) as error:
+                self._invalidate()
+                self._publish(AcquisitionReport('unknown', 'reconciliation_required', self._known_group()))
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+            # Only a new demand/event requests another read. An error or elapsed
+            # time alone never retries even this idempotent metadata operation.
+            if epoch == self._epoch:
+                break
+
+    async def _reconcile(self, epoch):
+        try:
+            saved = self.intents.snapshot(self.plan.owner_id, self.plan.request_key)
+        except NotFound:
+            return AcquisitionReport('idle', 'no_saved_demand')
+        await self.plane.verify_owner()
+        self._current(epoch)
+        if saved['group_id'] is None:
+            request = self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
+            if request is None:
+                return AcquisitionReport('idle', 'no_queued_demand')
+            group = await self.plane.create(request)
+            # Always persist a returned ownership identity, even if the event
+            # feed was lost or the actor closed while this HTTP operation ran.
+            saved = self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
+        else:
+            group = await self.plane.group(saved['group_id'])
+            self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
+        self._current(epoch)
+        group_id = saved['group_id']
+        if (group.get('phase') not in ('pending', 'acquiring', 'admitted', 'serving',
+                'releasing', 'released', 'uncertain')
+                or type(group.get('release_requested')) is not bool):
+            raise RuntimeError('group state requires reconciliation')
+        if group['generation'] != saved['generation']:
+            return AcquisitionReport('fenced', 'coordinator_generation_changed', group_id, group['phase'])
+        if group.get('release_requested') or group['phase'] in ('releasing', 'released', 'uncertain'):
+            return AcquisitionReport('draining', 'group_not_available', group_id, group['phase'])
+        if group['phase'] in ('pending', 'acquiring'):
+            group = await self.plane.advance(group_id, saved['generation'])
+            self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
+            self._current(epoch)
+        if group['phase'] not in ('admitted', 'serving'):
+            return AcquisitionReport('waiting_members', 'ordinary_host_queue', group_id, group['phase'])
+        leases = {}
+        for member in group['members']:
+            lease_id = member.get('lease_id')
+            leases[lease_id] = await self.plane.lease(lease_id)
+            self._current(epoch)
+        fresh = await self.plane.group(group_id)
+        self._current(epoch)
+        launches = bind_admitted_group(self.plan, fresh, leases,
+            expected_generation=saved['generation'], now=self.wall_clock())
+        self.intents.bind_launches(self.plan.owner_id, self.plan.request_key, launches)
+        if self.authority is None:
+            self.authority = self.authority_factory(self.plan, launches)
+        await self.authority.refresh()
+        self._current(epoch)
+        if not self.authority.may_start_ranks():
+            return AcquisitionReport('unknown', 'fresh_member_authority_unavailable', group_id, fresh['phase'])
+        phase = 'lease_serving' if self.authority.may_serve_requests() else 'admitted'
+        return AcquisitionReport(phase, 'all_member_authority', group_id, fresh['phase'])
+
+    async def close(self):
+        if self._drained:
+            return
+        self._closed = True
+        self.events_lost()
+        await self.wait()  # Drain metadata ownership; never cancel backend work.
+        if self.authority is not None:
+            await self.authority.close()
+        await self.plane.close()
+        self._drained = True
+        # Physical ownership remains recorded until the separate observed
+        # cleanup/settlement path acknowledges it. Closing is not release.
