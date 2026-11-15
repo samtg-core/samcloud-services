@@ -222,6 +222,8 @@ candidate (21a54c5 plus the recorded patch):
   --exo-source "$EXO_SOURCE"
 "$EXO_SOURCE/.venv/bin/python" -B qualification/run_exo_command_types.py \
   --exo-source "$EXO_SOURCE"
+"$EXO_SOURCE/.venv/bin/python" -B qualification/run_exo_private_api_types.py \
+  --exo-source "$EXO_SOURCE"
 ```
 
 The runner checks selected source pins and uses a fresh private EXO root. Network,
@@ -232,6 +234,12 @@ negative bindings without installing EXO into the gateway environment.
 The second runner checks12actual native event-barrier controls under the same
 CPU-only restrictions. The endpoint's whole-runtime/native qualification remains
 separate. Both control sets also pass from the exported/reconstructed source.
+Four further controls use the actual chat/end HTTP handlers with command delivery
+injected and MLX's default device forced to CPU. Network and process launch are
+forbidden. They cover both response modes' command headers, duplicate submission
+refusal, authentication, the event-driven end wait and the ordinary profile's404.
+This handler check permits framework imports; it is distinct from the24controls
+that forbid native compute imports. No model, node or listening server is started.
 
 The real registry qualification uses Samcloud PR19's source, currently
 `9756b01`, and its test dependencies. Set `REGISTRY_SOURCE` to that checkout,

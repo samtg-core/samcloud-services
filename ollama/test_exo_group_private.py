@@ -99,6 +99,9 @@ class PrivateEXOControls(unittest.IsolatedAsyncioTestCase):
         self.key.write_text('Bearer plane-token-not-an-exo-key')
         with self.assertRaises(PrivateEXOUnavailable):
             await client.state()
+        self.key.write_text('A' * 64)
+        with self.assertRaises(PrivateEXOUnavailable):
+            await client.state()
         self.assertEqual(seen, [])
 
     def test_symlink_hardlink_large_key_and_invalid_port_refuse(self):

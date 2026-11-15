@@ -27,7 +27,7 @@ def private_key(path: Path) -> str:
         if len(data) > 258:
             raise ValueError("private EXO key exceeds bound")
         key = data.decode('ascii').strip()
-        if not re.fullmatch(r'[a-fA-F0-9]{64}', key):
+        if not re.fullmatch(r'[a-f0-9]{64}', key):
             raise ValueError("private EXO key has invalid format")
         return key
     finally:
