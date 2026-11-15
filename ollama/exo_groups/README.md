@@ -361,3 +361,46 @@ The final backend is a CPU injection, not EXO/native qualification. No productio
 lease or inference is submitted by any of these controls. Renewal controls also
 keep partial-group active IDs/queue positions, reject a fence racing POST, retain
 expired HOLD without resurrection, and arm the explicit ceiling notification.
+
+## Explicit session closure and exact member settlement
+
+`completion.py` is installed on each `GroupProvider`. Its metadata tasks use the
+same supervisor task factory as acquisition, and HTTP waiters shield them from
+observer cancellation. Closing a session is explicit; there is no idle deadline
+or release/reacquisition policy. All linked queued calls must first be cancelled
+through their existing owner release path, and running/uncertain calls must end
+or undergo their existing operator recovery. A closure cannot declare them dead.
+
+Closure commits in the existing arbiter journal before withdrawing authority.
+It prevents any further demand or advance on that session. An already-owned
+create is recovered by the original idempotent metadata key, including after a
+lost reply; it cannot be forgotten or replaced. Acquisition accepts terminal
+`cancelled` groups as well as `released` groups, so cancellation of a pending or
+queued-only group no longer leaves the provider owning fictional capacity.
+
+The trusted host-start controller calls `provider.completion.pin_launch` with
+`CleanupExpectation` from the actual launch observation **before drain**. This
+freezes the exact child birth identity, runtime/member binding, complete listener
+set and measured memory baseline/explicit tolerance. Cleanup reports cannot
+provide their own expectation or install a new pin after closure. The provider's
+`settle_member` reads a published, bounded plane artifact through the same own-
+credential client, verifies its bytes/hash and `cleanup.py` physical observations,
+then commits an immutable settlement intent before the exact member POST. The
+launch pins, intents and confirmations survive journal reopen. A different proof
+is refused even after a fence; a successor names the current generation explicitly
+while the actual old launch generation stays pinned.
+
+Only an exact acknowledged cleanup proof plus the independent terminal lease
+receipt confirms settlement. An expired HOLD lease without `settled_at` is still
+charged. Lost release replies reconcile the saved member receipt rather than
+releasing another lease or replaying inference. The other members remain owned
+until each is separately confirmed. A final group check reads every allocated
+member's receipt, then independently re-reads before claiming group settlement.
+Core cancels queued-only members itself; these need no invented process cleanup.
+
+This is source preparation, not installed EXO acceptance. Full host/runtime feed
+activation, the actual startup observation-to-pin wiring, publication of host
+artifacts, and negative cleanup proof for an **active member whose rank never
+started** remain unfinished. Such an active member is retained, never settled
+using a fake child or elapsed time. The registry/SQLite controls inject physical
+reports; they do not prove distributed inference or Metal memory return.

@@ -218,13 +218,15 @@ class GroupAcquisition:
         self.ownership_uncertain = False
         group_id = saved['group_id']
         if (group.get('phase') not in ('pending', 'acquiring', 'admitted', 'serving',
-                'releasing', 'released', 'uncertain')
+                'releasing', 'released', 'cancelled', 'uncertain')
                 or type(group.get('release_requested')) is not bool):
             raise RuntimeError('group state requires reconciliation')
         if group['generation'] != saved['generation']:
             self._disarm_renewal()
             return AcquisitionReport('fenced', 'coordinator_generation_changed', group_id, group['phase'])
-        if group.get('release_requested') or group['phase'] in ('releasing', 'released', 'uncertain'):
+        if (self.intents.closing(self.plan.owner_id, self.plan.request_key)
+                or group.get('release_requested')
+                or group['phase'] in ('releasing', 'released', 'cancelled', 'uncertain')):
             self._disarm_renewal()
             return AcquisitionReport('draining', 'group_not_available', group_id, group['phase'])
         if group['phase'] in ('pending', 'acquiring'):

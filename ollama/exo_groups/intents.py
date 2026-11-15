@@ -60,6 +60,12 @@ class GroupIntents:
                 PRIMARY KEY(owner,request_key),
                 FOREIGN KEY(owner,request_key) REFERENCES exo_group_intents(owner,request_key)
             )''')
+            journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_group_closures (
+                owner TEXT NOT NULL, request_key TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK(generation>0), created REAL NOT NULL,
+                PRIMARY KEY(owner,request_key,generation),
+                FOREIGN KEY(owner,request_key) REFERENCES exo_group_intents(owner,request_key)
+            )''')
 
     def prepare(self, execution_id: str, plan: GroupPlan, manifest: bytes) -> dict:
         """Commit the exact create body before a coordinator can submit it.
@@ -91,6 +97,8 @@ class GroupIntents:
                     or execution['model'] != plan.model_id
                     or execution['resource'] != HOST_RESOURCES['slice']):
                 raise Conflict('only a queued exact Slice model call can add group demand')
+            if linked is None and self.closing(plan.owner_id, plan.request_key):
+                raise Conflict('group session is closing; no new demand or reacquisition')
             existing = journal.db.execute('SELECT * FROM exo_group_intents '
                 'WHERE owner=? AND request_key=?', (plan.owner_id, plan.request_key)).fetchone()
             if existing is not None:
@@ -145,12 +153,38 @@ class GroupIntents:
             return None
         if saved['create_started']:
             return saved['request']
+        if self.closing(owner, request_key):
+            return None
         pending = self.journal.db.execute('''SELECT 1 FROM exo_group_demands d
             JOIN executions x ON x.id=d.execution_id JOIN grants g ON g.id=x.grant_id
             WHERE d.owner=? AND d.request_key=? AND x.state='queued'
             AND g.state IN ('queued','granted') AND g.release_requested=0 LIMIT 1''',
             (owner, request_key)).fetchone()
         return saved['request'] if pending is not None else None
+
+    def closing(self, owner, request_key):
+        return self.journal.db.execute('SELECT 1 FROM exo_group_closures '
+            'WHERE owner=? AND request_key=? LIMIT 1', (owner, request_key)).fetchone() is not None
+
+    def begin_drain(self, owner, request_key, generation):
+        """Freeze session closure before any authority withdrawal or plane write.
+
+        Caller release still owns queued cancellation. Running/uncertain work
+        must drain or be recovered; closure cannot turn it into clean work.
+        An in-flight create remains owned and is recovered by its original key.
+        """
+        if type(generation) is not int or generation < 1:
+            raise Conflict('explicit positive coordinator generation required')
+        with self.journal.transaction():
+            self.snapshot(owner, request_key)
+            pending = self.journal.db.execute('''SELECT 1 FROM exo_group_demands d
+                JOIN executions x ON x.id=d.execution_id WHERE d.owner=? AND d.request_key=?
+                AND x.state IN ('queued','running','uncertain') LIMIT 1''',
+                (owner, request_key)).fetchone()
+            if pending is not None:
+                raise Conflict('group calls must end or be explicitly cancelled before closure')
+            self.journal.db.execute('INSERT OR IGNORE INTO exo_group_closures VALUES(?,?,?,?)',
+                (owner, request_key, generation, time.time()))
 
     def begin_create(self, owner: str, request_key: str) -> dict | None:
         """Commit service ownership before sending the exact create request."""

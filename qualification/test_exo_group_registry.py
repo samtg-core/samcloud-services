@@ -866,3 +866,173 @@ def test_actual_host_runtime_stops_on_peer_hold_expiry_and_retains_every_claim(
             runtime.actor.process_exited()
             await runtime.close_after_cleanup()
     asyncio.run(run())
+
+
+def cleanup_controller(client, plan, manifest, group, journal):
+    """Actual registry/SQLite controller with injected physical cleanup artifacts."""
+    from ollama.exo_groups.cleanup import CleanupExpectation
+    from ollama.exo_groups.completion import GroupCompletion
+    from ollama.exo_groups.member import ExpectedMember
+    from ollama.exo_groups.rank_process import (
+        RunBinding, ProcessIdentity, Listener, CleanupObservation, cleanup_evidence,
+    )
+
+    class Artifacts(ObservedRegistry):
+        def __init__(self):
+            super().__init__(client)
+            self.files, self.lose = {}, False
+        async def handle_async_request(self, request):
+            if request.url.path.startswith('/api/v1/files/'):
+                file_id = int(request.url.path.split('/')[4])
+                raw = self.files[file_id]
+                if request.url.path.endswith('/raw'):
+                    return httpx.Response(200, content=raw)
+                import hashlib
+                return httpx.Response(200, json={'id':file_id,'bytes':len(raw),
+                                               'sha256':hashlib.sha256(raw).hexdigest()})
+            response = await super().handle_async_request(request)
+            if self.lose and '/members/' in request.url.path and request.method == 'POST':
+                self.lose = False
+                await response.aread()
+                raise httpx.ReadError('lost exact member reply')
+            return response
+
+    intents = GroupIntents(journal)
+    grant = journal.submit('native', 'one', 'claude-services-slice/gpu-0', plan.model_id)
+    call = journal.enqueue(grant['id'], 'native', 'one', {'operation':'chat'})
+    intents.prepare(call['id'], plan, manifest)
+    staged = fixtures.staging_fixture(plan)
+    intents.record_staging(plan.owner_id, plan.request_key, staged)
+    intents.begin_create(plan.owner_id, plan.request_key)
+    intents.record_group(plan.owner_id, plan.request_key, group)
+    transport = Artifacts()
+    plane = CoordinatorPlane(plan.owner_id, lambda:client._headers['Authorization'], transport=transport)
+    actor = GroupAcquisition(intents, plan, manifest, plane,
+        lambda *_:None, verify_staging=fixtures.staged_fixture)
+    completion = GroupCompletion(actor)
+    proofs = {}
+    if group['phase'] == 'admitted':
+        leases = {m['lease_id']:client.get('/api/v1/leases/'+m['lease_id']).json() for m in group['members']}
+        launches = bind_admitted_group(plan, group, leases, expected_generation=1,
+                                      now=datetime.now(timezone.utc))
+        intents.bind_launches(plan.owner_id, plan.request_key, launches)
+        for i, launch in enumerate(launches):
+            run = RunBinding.from_expected(ExpectedMember.from_launch(plan, launch), staged.runtime_sha256)
+            pin = CleanupExpectation(run, ProcessIdentity(100+i,99,100+i,501,1000+i,1),
+                                     (Listener('127.0.0.1',39999+i),),100,0)
+            completion.pin_launch(pin)
+            raw, digest = cleanup_evidence(CleanupObservation(run,pin.child,0,(),(True,),100,100,0,
+                                                             datetime.now(timezone.utc).isoformat()))
+            transport.files[i+1] = raw
+            proofs[launch.lease_id] = {'file_id':i+1,'sha256':digest}
+    journal.request_release(grant['id'],'native')
+    return actor, completion, transport, proofs
+
+
+def test_actual_cleanup_release_and_all_three_exact_settlements(client, admitted, placement, tmp_path):
+    async def run():
+        plan, group, _ = admitted
+        journal = Arbiter(tmp_path/'settlement.sqlite')
+        actor, completion, transport, proofs = cleanup_controller(client,plan,placement[1],group,journal)
+        try:
+            assert (await completion.begin_release(generation=1))['state'] == 'host_cleanup_required'
+            assert_still_charged()
+            for i, (lease_id, proof) in enumerate(proofs.items()):
+                result = await completion.settle_member(lease_id,generation=1,**proof)
+                assert result['state'] == 'exact_member_settlement_confirmed'
+                assert db.query_one("SELECT COUNT(*) n FROM leases WHERE status='active'")['n'] == 2-i
+                assert db.query_one('SELECT COUNT(*) n FROM lease_group_members '
+                                    'WHERE release_receipt IS NOT NULL')['n'] == i+1
+            assert (await completion.begin_release(generation=1))['state'] == 'group_settlement_confirmed'
+            actor.events_reconciled()
+            assert (await actor.wait()).group_phase == 'released'
+            assert not actor.may_start_ranks()
+            writes=[p for m,p in transport.requests if m=='POST']
+            assert len(writes)==4  # One group drain plus three exact-member settlements.
+            assert all('/release' in p for p in writes)
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_actual_hold_debt_lost_reply_is_settled_once_without_inference_replay(
+        client, admitted, placement, tmp_path):
+    async def run():
+        plan, group, _ = admitted
+        journal = Arbiter(tmp_path/'hold-settlement.sqlite')
+        actor, completion, transport, proofs = cleanup_controller(client,plan,placement[1],group,journal)
+        lease_id=next(iter(proofs))
+        try:
+            db.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (lease_id,))
+            resource=client.get('/api/v1/resources/'+next(m['resource_id'] for m in group['members']
+                                                      if m['lease_id']==lease_id)).json()
+            assert resource['available_memory_mb']==9000
+            assert resource['unsettled'][0]['lease_id']==lease_id
+            transport.lose=True
+            with pytest.raises(Exception):
+                await completion.settle_member(lease_id,generation=1,**proofs[lease_id])
+            receipt=client.get('/api/v1/leases/'+lease_id).json()
+            assert receipt['settled_at'] is not None
+            assert (await completion.settle_member(lease_id,generation=1,**proofs[lease_id]))['state'] \
+                == 'exact_member_settlement_confirmed'
+            assert sum(m=='POST' and '/members/' in p for m,p in transport.requests)==1
+            assert journal.db.execute('SELECT COUNT(*) FROM executions').fetchone()[0]==1
+            assert journal.db.execute("SELECT COUNT(*) FROM executions WHERE state='cancelled'").fetchone()[0]==1
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_actual_pending_group_cancelled_without_member_or_cleanup_fiction(
+        client, admitted, placement, tmp_path):
+    from dataclasses import replace
+    async def run():
+        plan=replace(admitted[0],request_key='second-pending-group')
+        reply=client.post('/api/v1/lease-groups',json=plan.request())
+        assert reply.status_code==200
+        group=reply.json()
+        assert group['phase']=='pending'
+        journal=Arbiter(tmp_path/'pending-close.sqlite')
+        actor,completion,transport,_=cleanup_controller(client,plan,placement[1],group,journal)
+        try:
+            assert (await completion.begin_release(generation=1))['phase']=='cancelled'
+            actor.events_reconciled()
+            report=await actor.wait()
+            assert report.phase=='draining' and report.group_phase=='cancelled'
+            assert not actor.ownership_uncertain
+            assert all(m['lease_id'] is None for m in actor.group_snapshot['members'])
+            assert_still_charged()  # Only the OTHER group's original three claims exist.
+            assert journal.db.execute('SELECT COUNT(*) FROM exo_group_cleanup_pins').fetchone()[0]==0
+            assert sum(m=='POST' for m,p in transport.requests)==1
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_actual_queued_only_partial_group_cancels_without_cleanup_fiction(client, placement, tmp_path):
+    plan, manifest = placement
+    response = client.post('/api/v1/resources/' + plan.members[0].resource_id + '/leases',
+        json={'exclusive':True,'wait':True,'ttl_seconds':600,'max_total_s':7200})
+    assert response.status_code == 200
+    blocker = response.json()['lease_id']
+    group = client.post('/api/v1/lease-groups', json=plan.request()).json()
+    assert group['phase'] == 'acquiring'
+    queued = [m['lease_id'] for m in group['members'] if m['lease_id']]
+    assert len(queued) == 1
+    async def run():
+        journal = Arbiter(tmp_path/'queued-only-close.sqlite')
+        actor, completion, transport, _ = cleanup_controller(client,plan,manifest,group,journal)
+        try:
+            result = await completion.begin_release(generation=1)
+            assert result['state'] == 'group_settlement_confirmed' and result['phase'] == 'cancelled'
+            assert client.get('/api/v1/leases/'+queued[0]).json()['status'] == 'cancelled'
+            assert client.get('/api/v1/leases/'+blocker).json()['status'] == 'active'
+            assert journal.db.execute('SELECT COUNT(*) FROM exo_group_cleanup_pins').fetchone()[0] == 0
+            assert not any('/members/' in p and m=='POST' for m,p in transport.requests)
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())

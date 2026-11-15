@@ -14,21 +14,25 @@ async def bounded_json(client, method, path, headers, *, payload=None):
                 raise ValueError('plane metadata exceeds bound')
             raw.extend(chunk)
 
-        def unique(pairs):
-            value = {}
-            for key, item in pairs:
-                if key in value:
-                    raise ValueError('duplicate plane field')
-                value[key] = item
-            return value
+        return decode_json(raw)
 
-        def nonfinite(_value):
-            raise ValueError('nonfinite plane field')
 
-        value = json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite)
-        if not isinstance(value, dict):
-            raise ValueError('plane metadata is not an object')
+def decode_json(raw):
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('duplicate plane field')
+            value[key] = item
         return value
+
+    def nonfinite(_value):
+        raise ValueError('nonfinite plane field')
+
+    value = json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite)
+    if not isinstance(value, dict):
+        raise ValueError('plane metadata is not an object')
+    return value
 
 
 def credential_headers(header):

@@ -60,6 +60,50 @@ class CoordinatorPlane:
         return await self._request('POST', self._group(group_id) + '/advance',
                                    {'generation': generation})
 
+    async def begin_release(self, group_id, generation):
+        if type(generation) is not int or generation < 1:
+            raise ValueError('explicit generation required')
+        return await self._request('POST', self._group(group_id) + '/release',
+                                   {'generation': generation})
+
+    async def release_member(self, group_id, lease_id, generation, proof):
+        if (not isinstance(lease_id, str) or not re.fullmatch(r'lease_[a-f0-9]{16,64}', lease_id)
+                or type(generation) is not int or generation < 1
+                or not isinstance(proof, dict) or set(proof) != {'evidence_ref', 'evidence_sha256'}
+                or not isinstance(proof['evidence_ref'], str)
+                or not re.fullmatch(r'https://cloud\.samtg\.xyz/api/v1/files/[1-9][0-9]*/raw',
+                                    proof['evidence_ref'])
+                or not isinstance(proof['evidence_sha256'], str)
+                or not re.fullmatch(r'[a-f0-9]{64}', proof['evidence_sha256'])):
+            raise ValueError('exact member, generation and pinned plane evidence required')
+        return await self._request('POST', self._group(group_id) + '/members/' + lease_id + '/release',
+                                   {'generation': generation, **proof})
+
+    @staticmethod
+    def _file(file_id):
+        if type(file_id) is not int or file_id < 1:
+            raise ValueError('exact published plane file id required')
+        return '/api/v1/files/' + str(file_id)
+
+    async def artifact(self, file_id):
+        return await self._request('GET', self._file(file_id))
+
+    async def artifact_bytes(self, file_id):
+        path = self._file(file_id) + '/raw'
+        try:
+            headers = await self.verify_owner()
+            async with self._client.stream('GET', path, headers=headers) as response:
+                if response.status_code != 200:
+                    raise ValueError('evidence unavailable')
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(raw) + len(chunk) > 128 * 1024:
+                        raise ValueError('evidence exceeds bound')
+                    raw.extend(chunk)
+            return bytes(raw)
+        except Exception:
+            raise PlaneUnavailable('coordinator evidence unavailable') from None
+
     async def lease(self, lease_id):
         if not isinstance(lease_id, str) or not re.fullmatch(r'lease_[a-f0-9]{16,64}', lease_id):
             raise ValueError('exact member lease id required')

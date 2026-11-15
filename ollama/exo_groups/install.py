@@ -11,6 +11,7 @@ from ..inference_arbiter import CapacityDeferred, NotFound
 from ..inference_events import source_call
 from .acquire import GroupAcquisition
 from .backend import EXOBackend
+from .completion import GroupCompletion
 from .demand import AcquisitionDemand
 from .plan import HOST_RESOURCES
 
@@ -21,6 +22,7 @@ class GroupProvider:
         self.source, self.queue = installation.source, installation.runtime.queue
         self.model, self.resource = actor.plan.model_id, HOST_RESOURCES['slice']
         self.backend = None
+        self.completion = GroupCompletion(actor)
         self._ready = False
         self._actor_epoch = None
         self._epoch = 0
@@ -60,7 +62,7 @@ class GroupProvider:
         group = self.actor.group_snapshot
         if not isinstance(group, dict):
             return None
-        if group.get('phase') == 'released':
+        if group.get('phase') in ('released', 'cancelled'):
             return True
         members = group.get('members')
         if not isinstance(members, list):
@@ -78,7 +80,7 @@ class GroupProvider:
         saved = self._saved()
         return bool(saved and (saved['create_started'] or saved['group_id']) and not (
             isinstance(self.actor.group_snapshot, dict)
-            and self.actor.group_snapshot.get('phase') == 'released'
+            and self.actor.group_snapshot.get('phase') in ('released', 'cancelled')
             and not self.actor.ownership_uncertain))
 
     def bind_backend(self, backend):
@@ -102,6 +104,13 @@ class GroupProvider:
             JOIN exo_group_demands d ON d.execution_id=x.id
             WHERE d.owner=? AND d.request_key=? AND x.state IN ('running','uncertain') LIMIT 1''',
             (self.actor.plan.owner_id, self.actor.plan.request_key)).fetchone() is not None
+
+    async def release_group(self, *, generation):
+        return await self.completion.begin_release(generation=generation)
+
+    async def settle_member(self, lease_id, *, generation, file_id, sha256):
+        return await self.completion.settle_member(lease_id, generation=generation,
+                                                  file_id=file_id, sha256=sha256)
 
     def permitted(self, resource):
         if (resource != self.resource or self.source.paused or self._closed
@@ -225,6 +234,7 @@ class EXOInstallation:
         self.demand.paused = True
         self.source.pause()
         for provider in self.providers.values():
+            await provider.completion.wait()
             if provider._task is not None:
                 await asyncio.shield(provider._task)
             await provider.actor.wait()
