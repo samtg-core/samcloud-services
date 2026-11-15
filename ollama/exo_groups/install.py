@@ -210,6 +210,10 @@ class EXOInstallation:
         supervisor.on_finished = completed
 
     def owned(self):
+        if self.closed:
+            # close() reached this state only after fresh released-group
+            # observations. Its deliberate event disconnect cannot undo them.
+            return 0
         return sum(provider.owns_group() for provider in self.providers.values())
 
     async def close(self):

@@ -266,6 +266,20 @@ class InstalledControls(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.provider._epoch, epoch)
 
+    async def test_observed_released_group_can_close_without_becoming_owned_again(self):
+        call = await self.enqueue()
+        await self.bind_ready()
+        self.assertEqual(self.state(call), 'complete')
+        # Inject the core's fully released-group result, not local cleanup proof.
+        self.parts.group.update(phase='released', release_requested=True)
+        self.actor.wake()
+        await self.drain()
+        self.assertEqual(self.installation.owned(), 0)
+        await self.runtime.close_exo()
+        self.assertTrue(self.actor._closed)
+        self.assertEqual(self.installation.owned(), 0)
+        self.assertTrue((await self.runtime.quiesce())['drained'])
+
 
 if __name__ == '__main__':
     unittest.main()
