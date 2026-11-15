@@ -479,3 +479,16 @@ The last one needs the child's interpreter. Give it
 ## License
 
 MIT
+
+
+## Agent capability evaluation
+
+The [versioned capability playground](model_eval/README.md) runs the same useful jobs against
+configured model, client, compute and Samcloud identity combinations. It lives in
+this repository and reuses deployed clients/admission; it adds no allocator or
+gateway runtime changes. Start with the small capability baseline; general model
+throughput and host-health benchmarks are separate.
+
+Current queue/native deployments may run pinned source ahead of this repository
+main. Record their exact revisions in the deployment configuration; installing
+this harness does not upgrade a serving gateway or prove rail availability.

@@ -17,8 +17,9 @@ from fastapi.responses import Response, StreamingResponse
 from .inference_api import owner, build_router
 from .inference_arbiter import Conflict
 from .inference_supervisor import BackendEnded, Supervisor
-from .ollama_client import OllamaRefused
+from .ollama_client import OllamaBackendError, OllamaRefused
 from .whisper_client import WhisperFailed
+from .reasoning_request import reasoning_request_error
 from .inference_inputs import InferenceInputs, EmptyInput, InputTooLarge
 
 
@@ -99,6 +100,10 @@ class GatewayQueue:
         return self.models[model], model
 
     def validate_call(self, model, body):
+        # The registered EXO provider forwards native reasoning without an
+        # Ollama output budget. Preserve live validation for local calls.
+        if model not in self.providers and isinstance(body, dict) and reasoning_request_error(body):
+            raise ValueError("reasoning request refused")
         req = self.service.ChatRequest(**body)
         if req.model != model:
             raise ValueError('request model differs from grant')
@@ -184,6 +189,15 @@ class GatewayQueue:
             # response. Nothing here treats arbitrary HTTP errors as proof.
             terminal = True
             raise BackendEnded(error.result) from None
+        except OllamaBackendError as error:
+            # Only a tag the installed backend raises after generation ended is
+            # terminal; every other provider error keeps both ownerships.
+            if not error.completed_generation:
+                raise
+            terminal = True
+            raise BackendEnded({'kind': 'error', 'status': 502, 'code': 'backend_tool_parse',
+                                'detail': 'The model ended on a tool call the backend could not parse',
+                                'diagnostics': error.diagnostics()}) from None
         finally:
             if terminal and claimed:
                 self.service.mgr.release(self.held_claims.pop(grant['active_execution']))
@@ -194,6 +208,8 @@ class GatewayQueue:
         identity = owner(request)
         resource, model = self.resolve(req.model)
         key = self.request_key(request)
+        if operation == "chat" and model not in self.providers and req.reasoning_problem():
+            raise HTTPException(422, "Invalid reasoning request")
         try:
             grant = self.supervisor.journal.submit(identity, operation + ':' + key, resource, model)
             execution = self.supervisor.journal.enqueue(grant['id'], identity, 'call', {

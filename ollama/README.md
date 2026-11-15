@@ -3,6 +3,10 @@
 The core inference gateway. Manages multiple model backends behind a single OpenAI-compatible API
 with SAMcloud resource leasing for GPU memory.
 
+[Backend error diagnostics](BACKEND_ERRORS.md) describes safe cause tags,
+failure framing and the boundary between a failed response and confirmed
+backend termination.
+
 ## Modules
 
 | Module | Responsibility |
@@ -130,3 +134,16 @@ python -m ollama.test_whisper_routing        # from the repo root
 python3 ollama/test_whisper_kill_guard.py
 $WHISPER_PYTHON ollama/test_whisper_child.py
 ```
+
+
+## Agent capability evaluation
+
+The [versioned capability playground](../model_eval/README.md) runs the same useful jobs against
+configured model, client, compute and Samcloud identity combinations. It lives in
+this repository and reuses deployed clients/admission; it adds no allocator or
+gateway runtime changes. Start with the small capability baseline; general model
+throughput and host-health benchmarks are separate.
+
+Current queue/native deployments may run pinned source ahead of this repository
+main. Record their exact revisions in the deployment configuration; installing
+this harness does not upgrade a serving gateway or prove rail availability.

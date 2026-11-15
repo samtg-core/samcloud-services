@@ -11,8 +11,28 @@ import logging
 import os
 from pathlib import Path
 import time
+import traceback
 
 from .inference_arbiter import Arbiter, encoded, CapacityDeferred
+
+
+def exception_shape(exc, *, chain=4, frames=16):
+    """Content-free shape of an exception chain: type names and code locations only.
+
+    No message, args, repr, locals or source text: frames come from code objects
+    (file tail, line number, function name). Exception text may carry prompts or
+    credentials (see BackendEnded), so it is never read here.
+    """
+    shape, seen = [], set()
+    while exc is not None and id(exc) not in seen and len(shape) < chain:
+        seen.add(id(exc))
+        where = [['/'.join(Path(frame.f_code.co_filename).parts[-2:]), lineno, frame.f_code.co_name]
+                 for frame, lineno in traceback.walk_tb(exc.__traceback__)]
+        shape.append({'type': type(exc).__module__ + '.' + type(exc).__qualname__,
+                      'frames': where[-frames:], 'frames_total': len(where)})
+        exc = exc.__cause__ if exc.__cause__ is not None else (
+            None if exc.__suppress_context__ else exc.__context__)
+    return shape
 
 
 class BackendEnded(Exception):
@@ -145,10 +165,21 @@ class Supervisor:
             except Exception:
                 self.journal.uncertain(execution_id)
             return
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
             # Includes uncertain delivery, broken transport, and shutdown.
             # Do not cache raw exceptions, retry inference, or release a grant.
             self.journal.uncertain(execution_id)
+            logging.getLogger(__name__).warning(
+                'Backend execution uncertain execution_id=%s error_type=%s',
+                execution_id, type(exc).__name__)
+            try:
+                # Diagnostic only (task 963): where the generic failure was raised.
+                # It cannot change the saved state above or the return below.
+                logging.getLogger(__name__).warning(
+                    'Backend execution uncertain shape execution_id=%s shape=%s',
+                    execution_id, json.dumps(exception_shape(exc), separators=(',', ':')))
+            except Exception:
+                pass
             return
         else:
             self.journal.finish(execution_id, result, failed=failed)

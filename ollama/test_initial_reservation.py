@@ -284,6 +284,36 @@ class InitialReservation(unittest.TestCase):
             self.reserve(memory_mb=200)
         self.client.request_lease.assert_called_once()
 
+    def test_retired_or_refused_row_accepts_new_dimensions_with_a_new_intent(self):
+        self.reserve()
+        self.client.list_leases.return_value = [self.lease(status='released')]
+        self.store.reconcile_absent('qwen', confirm_absent=lambda model: True)
+        self.client.request_lease.return_value = self.receipt|{'lease_id':'bigger'}
+        self.assertEqual(self.store.snapshot('qwen')['state'],'retired')
+        self.assertEqual(self.reserve(memory_mb=200),'bigger')
+        self.assertEqual(self.client.request_lease.call_args.kwargs['memory_mb'],200)
+        self.assertEqual(self.store.snapshot('qwen')['memory_mb'],200)
+        refused = self.open(models={'other':'gpu'})
+        self.client.request_lease.return_value = {'status_code':409}
+        with self.assertRaises(CapacityDeferred):
+            refused.reserve('other', resource='gpu', service_id='service', memory_mb=100, ttl_seconds=3600)
+        self.assertEqual(refused.snapshot('other')['state'],'refused')
+        self.client.request_lease.return_value = self.receipt|{'lease_id':'other-bigger'}
+        self.assertEqual(refused.reserve('other', resource='gpu', service_id='service',
+                                         memory_mb=300, ttl_seconds=3600),'other-bigger')
+
+    def test_live_or_unknown_row_still_refuses_changed_dimensions_without_post(self):
+        for state in ('unknown','queued','reserved','handed_off'):
+            with self.subTest(state=state):
+                store = self.open(models={state:'gpu'})
+                self.client.request_lease.reset_mock()
+                with closing(sqlite3.connect(self.path)) as db, db:
+                    db.execute('INSERT INTO initial_reservations VALUES(?,?,?,?,?,?,?,?)',
+                               (state,'gpu',100,3600,'intent',state,'exact','2099-01-01T00:00:00Z'))
+                with self.assertRaises(Conflict):
+                    store.reserve(state, resource='gpu', service_id='service', memory_mb=200, ttl_seconds=3600)
+                self.client.request_lease.assert_not_called()
+
     def test_competing_owner_cannot_send_through_same_journal(self):
         with self.store._owned():
             with self.assertRaises(BlockingIOError):
