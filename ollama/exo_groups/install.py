@@ -84,10 +84,12 @@ class GroupProvider:
     def bind_backend(self, backend):
         """Startup controller calls only after exact group/launch binding."""
         saved = self._saved()
+        staged = self.actor.intents.staging(self.actor.plan.owner_id, self.actor.plan.request_key)
         if (not isinstance(backend, EXOBackend) or backend.actor is not self.actor
                 or backend.bindings.journal is not self.queue.supervisor.journal
                 or saved is None or saved['group_id'] != backend.contract.group_id
                 or saved['generation'] != backend.contract.generation
+                or staged is None or staged['runtime_sha256'] != backend.contract.runtime_sha256
                 or self.backend is not None and self.backend is not backend):
             raise ValueError('exact frozen EXO backend required')
         self.actor.intents.bind_launches(self.actor.plan.owner_id,
@@ -185,6 +187,7 @@ class EXOInstallation:
             if (not isinstance(actor, GroupAcquisition)
                     or runtime.settings.models.get(model) != HOST_RESOURCES['slice']
                     or actor.plan.model_id != model or actor.intents.journal is not supervisor.journal
+                    or not callable(actor.verify_staging)
                     or actor._task is not None or actor._closed):
                 raise ValueError('fresh exact queued Slice actors required')
         self.runtime, self.source = runtime, source

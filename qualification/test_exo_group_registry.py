@@ -265,7 +265,7 @@ def acquisition_for(client, plan, manifest, journal, *, transport=None, header=N
     renewals = (GroupRenewals(plan, plane, renew_before_s=renew_before_s)
                 if renew_before_s is not None else None)
     return GroupAcquisition(GroupIntents(journal), plan, manifest, plane, factory,
-        renewals=renewals, renewal_alarm_factory=RenewalAlarm)
+        renewals=renewals, renewal_alarm_factory=RenewalAlarm, verify_staging=fixtures.staged_fixture)
 
 
 def enqueue(journal, plan):
@@ -686,4 +686,65 @@ def test_gateway_group_capacity_uses_three_host_members_without_fourth_slice_lea
             await drain()
             runtime.residency_actor.close()
             runtime.queue.supervisor.close()
+    asyncio.run(run())
+
+
+def test_unverified_staging_cannot_request_any_real_registry_member(client, placement, tmp_path):
+    plan, manifest = placement
+    async def run():
+        journal = Arbiter(tmp_path / 'staging-gate.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal)
+        actor.verify_staging = None
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            report = await actor.wait()
+            assert report.phase == 'unknown' and report.reason == 'staging_unconfirmed'
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 0
+            assert db.query_one('SELECT COUNT(*) n FROM lease_groups')['n'] == 0
+            assert not actor.intents.snapshot(plan.owner_id, plan.request_key)['create_started']
+            actor.verify_staging = fixtures.staged_fixture  # Explicit injected CPU control.
+            actor.wake()
+            assert (await actor.wait()).phase == 'admitted'
+            assert_still_charged()
+        finally:
+            await actor.close()
+            journal.close()
+    asyncio.run(run())
+
+
+def test_partial_group_does_not_advance_after_staged_files_disappear(client, placement, tmp_path):
+    plan, manifest = placement
+    response = client.post('/api/v1/resources/' + plan.members[0].resource_id + '/leases',
+        json={'exclusive': True, 'wait': True, 'ttl_seconds': 600, 'max_total_s': 7200})
+    assert response.status_code == 200
+    blocker = response.json()['lease_id']
+    async def run():
+        journal = Arbiter(tmp_path / 'partial-staging.sqlite')
+        actor = acquisition_for(client, plan, manifest, journal)
+        ready = True
+        async def staging(selected, raw):
+            if not ready:
+                raise FileNotFoundError('assigned rank disappeared')
+            return await fixtures.staged_fixture(selected, raw)
+        actor.verify_staging = staging
+        try:
+            _, call = enqueue(journal, plan)
+            actor.note_demand(call['id'])
+            actor.events_reconciled()
+            assert (await actor.wait()).phase == 'waiting_members'
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 2
+            ready = False
+            assert client.delete('/api/v1/leases/' + blocker).status_code == 200
+            assert deliver_events(client, actor)
+            report = await actor.wait()
+            assert report.phase == 'unknown' and report.reason == 'staging_unconfirmed'
+            assert db.query_one('SELECT COUNT(*) n FROM leases')['n'] == 2
+            assert db.query_one('SELECT COUNT(*) n FROM leases WHERE resource_id!=?',
+                                (plan.members[0].resource_id,))['n'] == 0
+            assert not actor.may_start_ranks()
+        finally:
+            await actor.close()
+            journal.close()
     asyncio.run(run())

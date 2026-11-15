@@ -218,3 +218,18 @@ async def test_actual_private_instance_http_reply_preserves_pinned_card_aliases(
     assert response.json()['model_card'] == card.model_dump(mode='json', by_alias=True)
     assert response.json()['command_id'] == str(api.sent[0].command_id)
     lookup.assert_not_awaited()
+
+
+async def test_leased_creation_accepts_original_frozen_staging_request(tmp_path):
+    from unittest.mock import AsyncMock, patch
+    from exo.api.types.api import CreateInstanceParams
+    from exo.shared.models.model_cards import ModelCard
+    from exo.shared.types.memory import Memory
+    api = make_api(tmp_path)
+    original = json.loads((Path(__file__).parent / 'fixtures/exo-instance-v1.json').read_bytes())
+    payload = CreateInstanceParams.model_validate_json(json.dumps(original['request']))
+    with patch.object(ModelCard, 'load', AsyncMock(side_effect=AssertionError('no name lookup'))), \
+            patch.object(api, '_calculate_total_available_memory', return_value=Memory.from_gb(1000)):
+        result = await api.create_instance(payload)
+    assert str(api.sent[0].instance.instance_id) == '3491a8722cd28904380085110c27af43e36219574fe2b444ab284add0c093511'
+    assert result.model_card.model_id == original['plan']['model_id']

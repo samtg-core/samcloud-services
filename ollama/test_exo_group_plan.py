@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import unittest
+from dataclasses import asdict
+from pathlib import Path
 
 from .exo_groups.plan import (
     BindingRefused,
@@ -12,6 +14,25 @@ from .exo_groups.plan import (
     bind_admitted_group,
     check_rank_manifest,
 )
+
+
+def staging_fixture(plan):
+    """Injected CPU-control evidence, never a claim about a real host."""
+    from .exo_groups.staging import VerifiedStaging
+    from .exo_groups.prepare import canonical, digest
+    from uuid import UUID
+    runtime = json.loads((Path(__file__).resolve().parents[1] /
+                          'qualification/fixtures/exo-instance-v1.json').read_bytes())['runtime_sha256']
+    hosts = tuple((m.rank, m.resource_id) for m in sorted(plan.members,
+        key=lambda item: item.pipeline_rank))
+    reports = [{'rank': rank, 'resource_id': resource, 'boot_id': str(UUID(int=i + 1)), 'uid': 1}
+               for i, (rank, resource) in enumerate(hosts)]
+    return VerifiedStaging(digest(asdict(plan)), plan.rank_manifest_sha256, runtime,
+        'b' * 64, hosts, digest(reports), canonical(reports).decode())
+
+
+async def staged_fixture(plan, _manifest):
+    return staging_fixture(plan)
 
 
 class GroupBindingControls(unittest.TestCase):

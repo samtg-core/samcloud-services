@@ -22,7 +22,7 @@
     "src/exo/utils/leased_commands.py": "96f64895e671ee2cc41a158186158ad1f0302f28a16f73149187e04ab73cdbb8",
     "src/exo/shared/types/events.py": "688025a400fd6e629ef8cc6cd0db403576727ef1c0ab2c950479f6ef254d1e4b",
     "src/exo/worker/runner/runner.py": "c99bc3cf88eccbac90b6709ff3278e4016c6d2284e1032af7abe577b6117858d",
-    "src/exo/utils/leased_instance.py": "2bb8536880c0e679bf7c02a3ebab5b58c4f06248b396efa591b6b5059f4abbf7"
+    "src/exo/utils/leased_instance.py": "c065b5bab1f3944239a7e53e1785d995cacceb2c73434e07960f14d5f4461678"
   },
   "full_runtime_gates": "not passed; this is API/guard configuration qualification only"
 }

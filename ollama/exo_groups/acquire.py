@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from ..inference_arbiter import NotFound
 from .intents import GroupIntents
 from .plan import GroupPlan, bind_admitted_group, check_rank_manifest
+from .staging import StagingUnavailable
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class GroupAcquisition:
     def __init__(self, intents: GroupIntents, plan: GroupPlan, manifest: bytes,
                  plane, authority_factory, *, notify=lambda _report: None,
                  wall_clock=lambda: datetime.now(timezone.utc), renewals=None,
-                 renewal_alarm_factory=None):
+                 renewal_alarm_factory=None, verify_staging=None):
         if not isinstance(intents, GroupIntents) or not isinstance(plan, GroupPlan):
             raise TypeError('existing journal and provider-owned plan required')
         if not isinstance(manifest, bytes) or plane.owner_id != plan.owner_id:
@@ -47,6 +48,9 @@ class GroupAcquisition:
         self.intents, self.plan, self.manifest = intents, plan, manifest
         self.plane, self.authority_factory = plane, authority_factory
         self.notify, self.wall_clock = notify, wall_clock
+        if verify_staging is not None and not callable(verify_staging):
+            raise TypeError('explicit staging verifier required')
+        self.verify_staging = verify_staging
         self.authority = None
         self.group_snapshot = None
         self.ownership_uncertain = False
@@ -174,7 +178,8 @@ class GroupAcquisition:
                 self.ownership_uncertain = True
                 self._invalidate()
                 self._disarm_renewal()
-                self._publish(AcquisitionReport('unknown', 'reconciliation_required', self._known_group()))
+                reason = 'staging_unconfirmed' if isinstance(error, StagingUnavailable) else 'reconciliation_required'
+                self._publish(AcquisitionReport('unknown', reason, self._known_group()))
                 if isinstance(error, asyncio.CancelledError):
                     raise
             # Only a new demand/event requests another read. An error or elapsed
@@ -192,6 +197,11 @@ class GroupAcquisition:
         await self.plane.verify_owner()
         self._current(epoch)
         if saved['group_id'] is None:
+            if not saved['create_started']:
+                if self.intents.create_request(self.plan.owner_id, self.plan.request_key) is None:
+                    return AcquisitionReport('idle', 'no_queued_demand')
+                # All bytes must exist before the first physical request.
+                await self._stage(epoch)
             request = self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
             if request is None:
                 return AcquisitionReport('idle', 'no_queued_demand')
@@ -218,6 +228,7 @@ class GroupAcquisition:
             self._disarm_renewal()
             return AcquisitionReport('draining', 'group_not_available', group_id, group['phase'])
         if group['phase'] in ('pending', 'acquiring'):
+            await self._stage(epoch)  # Fresh files before requesting another member.
             self.ownership_uncertain = True
             group = await self.plane.advance(group_id, saved['generation'])
             self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
@@ -236,6 +247,7 @@ class GroupAcquisition:
                 self.renewal_alarm.arm(self.renewal_report.next_event)
         if group['phase'] not in ('admitted', 'serving'):
             return AcquisitionReport('waiting_members', 'ordinary_host_queue', group_id, group['phase'])
+        await self._stage(epoch)
         leases = {}
         for member in group['members']:
             lease_id = member.get('lease_id')
@@ -256,6 +268,16 @@ class GroupAcquisition:
             return AcquisitionReport('unknown', 'fresh_member_authority_unavailable', group_id, fresh['phase'])
         phase = 'lease_serving' if self.authority.may_serve_requests() else 'admitted'
         return AcquisitionReport(phase, 'all_member_authority', group_id, fresh['phase'])
+
+    async def _stage(self, epoch):
+        if self.verify_staging is None:
+            raise StagingUnavailable('host staging verifier unbound')
+        try:
+            proof = await self.verify_staging(self.plan, self.manifest)
+        except Exception:
+            raise StagingUnavailable('host staging observation unavailable') from None
+        self._current(epoch)
+        self.intents.record_staging(self.plan.owner_id, self.plan.request_key, proof)
 
     async def close(self):
         if self._drained:

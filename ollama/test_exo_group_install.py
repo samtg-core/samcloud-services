@@ -83,7 +83,8 @@ class InstalledControls(unittest.IsolatedAsyncioTestCase):
         self.actor = GroupAcquisition(p.intents, p.plan, p.manifest, Plane(),
             lambda *_: SimpleNamespace(refresh=nothing, close=nothing, invalidate=lambda: None,
                 may_start_ranks=lambda: True, may_serve_requests=lambda: True),
-            wall_clock=lambda: datetime(2026,11,14,10,0,tzinfo=timezone.utc))
+            wall_clock=lambda: datetime(2026,11,14,10,0,tzinfo=timezone.utc),
+            verify_staging=plan_controls.staged_fixture)
         p.actor = self.actor
         p.backend = EXOBackend(self.actor, p.private, p.bindings, p.contract,
                                p.launches, p.verify_runtime)
@@ -152,6 +153,18 @@ class InstalledControls(unittest.IsolatedAsyncioTestCase):
         self.manager.ollama.memory_estimate_mb.assert_not_called()
         self.assertEqual(self.manager.models, {})
         self.assertIsNone(self.manager.initial_reservations.snapshot(self.parts.plan.model_id))
+
+    async def test_missing_staging_keeps_group_queued_and_leaves_local_capacity_usable(self):
+        self.actor.verify_staging = None
+        call = await self.enqueue()
+        self.actor.events_reconciled()
+        await self.drain()
+        self.assertEqual(self.actor.report.reason, 'staging_unconfirmed')
+        self.assertEqual(self.state(call), 'queued')
+        self.assertFalse(self.provider.owns_group())
+        self.assertTrue(self.source.permitted_model(self.resource, 'local'))
+        self.assertEqual(self.created, 0)
+        self.assertEqual(self.parts.posts, 0)
 
     async def test_terminal_failure_refreshes_readiness_for_next_queued_call(self):
         self.parts.mode = 'error'

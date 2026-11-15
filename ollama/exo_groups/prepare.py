@@ -17,8 +17,10 @@ from .plan import BindingRefused, GroupPlan, check_rank_manifest
 
 
 def canonical(value: object) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"),
-                       ensure_ascii=False, allow_nan=False) + "\n").encode()
+    # The staged parent/config manifests and instance identities use these
+    # exact bytes. A trailing newline changes every externally pinned digest.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode()
 
 
 def digest(value: object) -> str:

@@ -109,6 +109,8 @@ class ProviderGroupIntents(unittest.TestCase):
     def test_owned_create_decision_survives_caller_cancellation_and_restart(self):
         grant, call = self.enqueue()
         self.prepare(call)
+        self.intents.record_staging(self.plan.owner_id, self.plan.request_key,
+                                    fixtures.staging_fixture(self.plan))
         body = self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
         self.journal.request_release(grant['id'], 'caller')
         self.journal.close()
@@ -117,6 +119,13 @@ class ProviderGroupIntents(unittest.TestCase):
         self.assertEqual(self.intents.create_request(self.plan.owner_id, self.plan.request_key), body)
         self.assertTrue(self.intents.snapshot(self.plan.owner_id, self.plan.request_key)['create_started'])
         self.assertEqual(self.journal.execution(call['id'], 'caller')['state'], 'cancelled')
+
+    def test_submission_without_verified_staging_is_not_committed(self):
+        _, call = self.enqueue()
+        self.prepare(call)
+        with self.assertRaises(Conflict):
+            self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
+        self.assertFalse(self.intents.snapshot(self.plan.owner_id, self.plan.request_key)['create_started'])
 
     def test_bound_member_identity_survives_renewal_but_not_lease_replacement(self):
         fixture = fixtures.GroupBindingControls()

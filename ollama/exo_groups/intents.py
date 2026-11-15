@@ -53,6 +53,13 @@ class GroupIntents:
                 FOREIGN KEY(owner,request_key)
                     REFERENCES exo_group_intents(owner,request_key)
             )''')
+            journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_group_staging (
+                owner TEXT NOT NULL, request_key TEXT NOT NULL,
+                policy_sha256 TEXT NOT NULL, runtime_sha256 TEXT NOT NULL,
+                proof_json TEXT NOT NULL, observed REAL NOT NULL,
+                PRIMARY KEY(owner,request_key),
+                FOREIGN KEY(owner,request_key) REFERENCES exo_group_intents(owner,request_key)
+            )''')
 
     def prepare(self, execution_id: str, plan: GroupPlan, manifest: bytes) -> dict:
         """Commit the exact create body before a coordinator can submit it.
@@ -150,9 +157,36 @@ class GroupIntents:
         with self.journal.transaction():
             request = self.create_request(owner, request_key)
             if request is not None:
+                if self.staging(owner, request_key) is None:
+                    raise Conflict('verified staging must precede group submission')
                 self.journal.db.execute('UPDATE exo_group_intents SET create_started=1 '
                     'WHERE owner=? AND request_key=?', (owner, request_key))
             return request
+
+    def staging(self, owner, request_key):
+        row = self.journal.db.execute('SELECT * FROM exo_group_staging '
+            'WHERE owner=? AND request_key=?', (owner, request_key)).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_staging(self, owner, request_key, proof):
+        from .staging import VerifiedStaging
+        if not isinstance(proof, VerifiedStaging):
+            raise Conflict('verified host staging proof required')
+        with self.journal.transaction():
+            saved = self.snapshot(owner, request_key)
+            proof.check(GroupPlan.parse(saved['plan']))
+            previous = self.staging(owner, request_key)
+            if previous is not None and (previous['policy_sha256'], previous['runtime_sha256']) != (
+                    proof.policy_sha256, proof.runtime_sha256):
+                raise Conflict('staging policy differs from the frozen group intent')
+            if previous is not None:
+                old = VerifiedStaging(**json.loads(previous['proof_json']))
+                if old.boots != proof.boots:
+                    raise Conflict('staging host boot differs from the frozen group intent')
+            self.journal.db.execute('INSERT OR REPLACE INTO exo_group_staging VALUES(?,?,?,?,?,?)',
+                (owner, request_key, proof.policy_sha256, proof.runtime_sha256,
+                 encoded(asdict(proof)), time.time()))
+        return self.staging(owner, request_key)
 
     def bind_launches(self, owner: str, request_key: str, launches: tuple) -> dict:
         """Freeze member identities before rank startup; expiry may be renewed."""

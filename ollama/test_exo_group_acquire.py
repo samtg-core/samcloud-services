@@ -82,7 +82,7 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
             return reader
 
         self.actor = GroupAcquisition(self.intents, self.plan, self.fixture.manifest,
-            Plane(), factory, wall_clock=lambda: self.fixture.now)
+            Plane(), factory, wall_clock=lambda: self.fixture.now, verify_staging=fixtures.staged_fixture)
         self.grant = self.journal.submit('caller', 'one', 'claude-services-slice/gpu-0',
             self.plan.model_id, lifetime='execution')
         self.call = self.journal.enqueue(self.grant['id'], 'caller', 'one', {'operation': 'chat'})
@@ -111,6 +111,33 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.actor.authority.may_start_ranks())
         self.assertFalse(self.actor.authority.may_serve_requests())
         self.assertEqual(len(self.saved()['launches']), 3)
+
+    async def test_unbound_or_failed_staging_never_submits_a_physical_group(self):
+        self.actor.verify_staging = None
+        self.assertEqual((await self.start()).phase, 'unknown')
+        self.assertFalse(self.saved()['create_started'])
+        self.assertFalse(self.server_created)
+        async def missing(*_):
+            raise OSError('pinned files absent')
+        self.actor.verify_staging = missing
+        self.actor.wake()
+        await self.actor.wait()
+        self.assertFalse(self.saved()['create_started'])
+        self.assertFalse(self.server_created)
+        self.assertIsNone(self.intents.staging(self.plan.owner_id, self.plan.request_key))
+
+    async def test_verified_proof_commits_before_create_and_policy_cannot_change(self):
+        await self.start()
+        saved = self.intents.staging(self.plan.owner_id, self.plan.request_key)
+        self.assertEqual(saved['runtime_sha256'], fixtures.staging_fixture(self.plan).runtime_sha256)
+        from dataclasses import replace
+        async def changed(*_):
+            return replace(fixtures.staging_fixture(self.plan), policy_sha256='f' * 64)
+        self.actor.verify_staging = changed
+        self.actor.wake()
+        self.assertEqual((await self.actor.wait()).phase, 'unknown')
+        self.assertFalse(self.actor.may_start_ranks())
+        self.assertEqual(self.intents.staging(self.plan.owner_id, self.plan.request_key), saved)
 
     async def test_request_permission_requires_serving_current_cursor_and_authority(self):
         self.group['phase'] = 'serving'

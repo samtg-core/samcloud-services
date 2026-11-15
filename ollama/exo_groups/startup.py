@@ -45,10 +45,12 @@ class InstanceStarts:
             saved = self.bindings.intents.snapshot(plan.owner_id, plan.request_key)
             row = self.journal.db.execute('SELECT contract_sha256 FROM exo_private_instances '
                 'WHERE owner=? AND request_key=?', (plan.owner_id, plan.request_key)).fetchone()
+            staged = self.bindings.intents.staging(plan.owner_id, plan.request_key)
             if (row is None or row['contract_sha256'] != contract.sha256
                     or saved['plan'] != json.loads(encoded(asdict(plan)))
                     or saved['group_id'] != contract.group_id
-                    or saved['generation'] != contract.generation or saved['launches'] is None):
+                    or saved['generation'] != contract.generation or saved['launches'] is None
+                    or staged is None or staged['runtime_sha256'] != contract.runtime_sha256):
                 raise Conflict('startup differs from the frozen private instance')
             if self.journal.db.execute('SELECT 1 FROM exo_instance_starts '
                     'WHERE owner=? AND request_key=?', (plan.owner_id, plan.request_key)).fetchone():

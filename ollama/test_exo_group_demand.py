@@ -39,7 +39,7 @@ class DemandControls(unittest.IsolatedAsyncioTestCase):
         def unexpected_authority(*_):
             raise AssertionError('no admitted group in this control')
         self.actor = GroupAcquisition(GroupIntents(self.supervisor.journal), self.plan,
-            fixture.manifest, plane, unexpected_authority)
+            fixture.manifest, plane, unexpected_authority, verify_staging=fixtures.staged_fixture)
 
     async def asyncTearDown(self):
         self.release.set()

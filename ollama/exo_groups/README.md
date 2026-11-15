@@ -169,58 +169,34 @@ pinned-card/ordinary paths and reject changed namespace, runner, endpoint, card,
 layers, timeout, remote-code and image variants before any command. They use MLX
 CPU and an injected command transport; no model/node/listening server.
 
-Current runtime source review: [packet2256](https://cloud.samtg.xyz/api/v1/files/2256/raw),
-SHA256`e8f5e1ea5cdff3c0384ac8224b3425a1740cad9c8b07fcb79d615cdaf523808a`.
-It reconstructs903source files and includes the pinned-card creation change.
-The12placement,12command-end and15actual HTTP-handler controls pass from that
-reconstructed copy. Full native repository gates remain unmet; no commit/install.
+## Staging before physical acquisition
 
-The earlier runtime-end candidate remains an exact historical packet:
-[review packet2254](https://cloud.samtg.xyz/api/v1/files/2254/raw), SHA256
-`4af9caf540450fadfb1ac848354c7415a8221d30a7f503eb02d12ae71155cf9a`.
-Its private `/leased/commands/{id}/end` waits on EXO's existing indexed events for
-the matching task and every assigned runner's Running→Ready transition. HTTP EOF,
-TaskDeleted or one Complete event is insufficient. Event loss/gaps, instance/node
-loss and an election during active work refuse confirmation. No polling loop or
-default compute deadline is added. Observers can cancel their wait without
-cancelling/retrying the owned command. The packet reconstructs902source files
-exactly over21a54c5, including previous candidate changes; dependencies/native
-binaries are not included. Strict typing and Ruff pass, but full repository
-pytest/format/native gates remain unmet, so EXO's required pre-commit checks have
-not been waived. This is not an installation packet or distributed acceptance.
+`staging_files.py` is a standard-library host collector: exact files/aliases,
+streamed hashes, stable inode/size/mtime/ctime, loading-view contents, local Darwin
+filesystem and disk headroom. It follows no unpinned path component and writes
+nothing. A trusted owner's verified cache can reuse a hash only after unchanged
+kernel file identities; the native loader independently hashes all assigned bytes
+before each actual model load. There is no elapsed-time shortcut or polling loop.
 
-## Explicit queue and capacity integration
+`staging.py` binds the real bundle/parent/config/sidecar bytes and three explicit
+host/runtime policies. Its reader must be an authenticated host channel supplied
+by startup. Each host must match uid/boot, readonly files/directories, local APFS/HFS
+and explicit scratch reserve. All observations are retained in the existing
+journal before the first group submission; policy/runtime/host boot cannot change
+under that intent. A missing verifier requests no leases. An already-owned lost
+create reply can reconcile its exact saved key, while unconfirmed staging blocks
+advance/start/serve. Local capacity remains usable before Slice is requested.
 
-`QueueRuntime.bind_exo(actors)` is an explicit trusted-startup operation, after
-binding the manager capacity source and before maintenance/serving. It registers
-exact model actors in `GatewayQueue`, installs demand preparation on that same
-supervisor and uses the same journal, model-specific admission guard and capacity
-publication revisions. Native and compatibility routes still enqueue; a registered
-EXO model bypasses the local model loader and initial-reservation path. No extra
-physical Slice lease or public inference route is created.
+The canonical bytes are the original staging format: sorted compact UTF-8 JSON,
+**without a trailing newline**. A port regression had changed the parent/config
+hashes and instance IDs. Frozen real bundle/parent fixtures now reproduce the
+original request and literal instance ID, not just newly generated test data.
+The native leased instance guard uses the same original identity format.
 
-The backend binds only after the actual group ID and frozen launch identities
-are known. Serving authority alone never publishes EXO capacity: the exact private
-runtime/idle-instance checks must also pass, local manager inventory must be empty,
-and no group-linked execution may remain running or uncertain. Dispatch invalidates
-the scheduling observation; the executor rechecks all prerequisites before its
-once-only POST. A terminal result triggers one event-driven readiness refresh.
-Transport loss leaves the execution uncertain and blocks the next call.
-
-Local models remain usable while a fresh group observation confirms Slice has not
-been requested (for example while Obelisk is queued first). A create/advance with an
-unknown outcome blocks local dispatch until reconciled. A confirmed queued/owned
-Slice member withdraws local capacity while retaining the existing foreign-queue
-residency handoff, so it can drain rather than deadlock. Inventory changes recheck
-native readiness through the existing source; no new polling loop is installed.
-
-Quiescence pauses new acquisition demand and reports outstanding group ownership
-as undrained, even with no active inference. Internal local-residency handoff may
-drain only local manager work; it does not declare the remote group released.
-`close_exo()` drains metadata operations, then refuses over any unconfirmed group
-ownership. Cleanup and exact settlement must be observed separately. Runtime close
-cannot close the journal before this provider lifecycle ends. Closing never serves
-as cleanup proof or releases a physical lease.
+The current native candidate remains uncommitted and uninstalled under full
+repository/native gates. The earlier source packets2254 and2256 are historical;
+2256 contains the superseded newline identity guard. [Packet2257](https://cloud.samtg.xyz/api/v1/files/2257/raw) records
+the corrected903-file candidate (SHA256 `70dce31a552727f008c355ab556498980f83344bbe3cbbf7d7b437b4bb343132`). CPU/type/HTTP controls are not distributed acceptance.
 
 ## Integration still required
 
@@ -230,8 +206,9 @@ ranks or load a model. Tests inject plane/private-runtime/host effects; the actu
 registry qualification uses its isolated HTTP/SQLite implementation, not the fleet.
 Remaining work:
 
-1. Bind exact deployed configuration, staging verification, the existing plane
-   event feed and observed host cleanup into startup/shutdown after rollout gates.
+1. Bind the implemented staging collector to actual authenticated host channels,
+   exact deployed runtime configuration and the existing plane event feed. Model
+   files are sealed; runtime staging/qualification and process provenance remain.
 2. Wire the implemented once-only private-instance submission to host rank startup,
    staging/runtime/file receipts and mark-serving after actual ready observations.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
@@ -264,7 +241,8 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_renew ollama.test_exo_group_alarm \
   ollama.test_exo_group_instance ollama.test_exo_group_calls \
   ollama.test_exo_group_private ollama.test_exo_group_backend \
-  ollama.test_exo_group_install ollama.test_exo_group_startup
+  ollama.test_exo_group_install ollama.test_exo_group_startup \
+  ollama.test_exo_group_staging ollama.test_exo_group_staging_files
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the
@@ -281,18 +259,18 @@ candidate (21a54c5 plus the recorded patch):
 ```
 
 The runner checks selected source pins and uses a fresh private EXO root. Network,
-process launch and native compute imports are forbidden. Twelve controls exercise
+process launch and native compute imports are forbidden. Thirteen controls exercise
 the actual tagged request, State aliases, unequal ranks, ring guards and local
 card round trip. Nine gateway controls exercise the same serialized fixture and
 negative bindings without installing EXO into the gateway environment.
 The second runner checks12actual native event-barrier controls under the same
 CPU-only restrictions. The endpoint's whole-runtime/native qualification remains
 separate. Both control sets also pass from the exported/reconstructed source.
-Four further controls use the actual chat/end HTTP handlers with command delivery
+Sixteen further controls use the actual chat/end HTTP handlers with command delivery
 injected and MLX's default device forced to CPU. Network and process launch are
 forbidden. They cover both response modes' command headers, duplicate submission
 refusal, authentication, the event-driven end wait and the ordinary profile's404.
-This handler check permits framework imports; it is distinct from the24controls
+This handler check permits framework imports; it is distinct from the25controls
 that forbid native compute imports. No model, node or listening server is started.
 
 The real registry qualification uses Samcloud PR19's source, currently

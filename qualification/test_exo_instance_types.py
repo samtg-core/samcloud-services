@@ -133,6 +133,23 @@ class ExplicitInstanceControls(unittest.TestCase):
         ).model_dump(mode="json", by_alias=True)
         self.assertEqual(fixture["state"], state)
 
+    def test_real_staged_bundle_rebuilds_original_request_without_hash_format_drift(self):
+        import hashlib
+        import json
+        directory = Path(__file__).parent / "fixtures"
+        manifest = (directory / "exo-rank-bundle-v1.json").read_bytes()
+        parent = (directory / "exo-parent-v1.json").read_bytes()
+        saved = json.loads((directory / "exo-instance-v1.json").read_bytes())
+        self.assertEqual(hashlib.sha256(manifest).hexdigest(),
+                         "3d50b10277a681b04144ebd1773c3ccb6a70dc3b44ca00e224803ea792b4ff2f")
+        self.assertEqual(digest(json.loads(parent)),
+                         "be6c8f19cb90175aab8f966936f1de0b3b9f487c528379e2f50790c6ba67f817")
+        plan = GroupPlan.parse(saved["plan"])
+        actual = build_explicit_instance(plan, manifest, parent, self.endpoints, **self.options)
+        self.assertEqual(actual, saved["request"])
+        self.assertEqual(actual["instance"]["MlxRingInstance"]["instance_id"],
+                         "3491a8722cd28904380085110c27af43e36219574fe2b444ab284add0c093511")
+
     def test_real_tagged_request_preserves_unequal_assignments(self):
         wire = self.build()
         self.assertIn("MlxRingInstance", wire["instance"])

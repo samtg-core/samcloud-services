@@ -56,7 +56,7 @@ def main():
         os.environ["EXO_RESOURCES_DIR"] = str(source / "resources")
         suite = unittest.defaultTestLoader.discover(str(here), pattern="test_exo_instance_types.py")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
-        if not result.wasSuccessful() or result.testsRun != 12:
+        if not result.wasSuccessful() or result.testsRun != 13:
             raise SystemExit(1)
 
 
