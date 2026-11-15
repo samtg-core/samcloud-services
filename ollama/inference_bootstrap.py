@@ -282,7 +282,8 @@ class QueueStartup:
             try:
                 absent=await asyncio.to_thread(vision_backend_absent,
                     service.config.VLM_HOST,service.config.VLM_PORT)
-                if absent is not True:raise ValueError('vision backend not cold')
+                if absent is not True:
+                    raise ValueError('vision backend not cold')
             except Exception:
                 raise RuntimeError('Durable startup requires confirmed absent vision backend') from None
         runtime = QueueRuntime.install(service,self.settings,registry_owner=owner)
@@ -396,6 +397,47 @@ class QueueRuntime:
                 await source.refresh(await source_call(self.manager._collect_stats))
         self.queue.supervisor.on_finished = completed
 
+    def bind_exo(self, actors):
+        """Explicit trusted provider binding, before serving or maintenance."""
+        from .exo_groups.install import EXOInstallation
+        return EXOInstallation(self, actors)
+
+    async def close_exo(self):
+        installation = getattr(self, 'exo', None)
+        if installation is not None:
+            await installation.close()
+
+    def bind_exo_rank(self, owner):
+        """Explicit host-service role; no public route or implicit activation.
+
+        The group is externally owned. Its host authority reader uses this
+        service's existing verified identity, not the coordinator's bearer.
+        Local dispatch withdraws before any rank start can be attempted.
+        """
+        from .exo_groups.rank_runtime import HostRankRuntime, record_host_attempt
+        previous = getattr(self, 'host_rank', None)
+        if (not isinstance(owner, HostRankRuntime) or owner.closed
+                or previous is not None and not previous.closed
+                or getattr(owner, '_queue_runtime', None) is not None
+                or self.capacity_source is None or self.manager.models
+                or owner.actor.launch_attempted
+                or set(self.settings.models.values()) != {owner.actor.spec.binding.resource_id}
+                or owner.adapter.reader.owner_id != self.manager.initial_reservations.owner
+                or self.queue.supervisor.journal.db.execute(
+                    "SELECT 1 FROM executions WHERE state IN ('running','uncertain') LIMIT 1"
+                ).fetchone() is not None):
+            raise RuntimeError('cold exact host runtime and own service identity required')
+        record_host_attempt(owner, self.queue.supervisor.journal)
+        self.host_rank, owner._queue_runtime = owner, self
+        self.capacity_source.invalidate('exo_host_rank_bound')
+        return owner
+
+    async def close_exo_rank(self):
+        owner = getattr(self, 'host_rank', None)
+        if owner is not None:
+            await owner.close_after_cleanup()  # Refuses running/uncertain child.
+            self.capacity_source.invalidate('exo_host_rank_closed')
+
     async def quiesce(self, *, _resource_handoff=False):
         """Drain known workers with no age deadline; report unresolved ownership.
 
@@ -406,6 +448,9 @@ class QueueRuntime:
         """
         if not _resource_handoff:
             self._external_quiesce = True
+            installation = getattr(self, 'exo', None)
+            if installation is not None:
+                installation.demand.paused = True
         self.capacity.pause()
         handoff = getattr(self, 'shared_resource', None)
         if (not _resource_handoff and handoff is not None and handoff.task is not None
@@ -435,17 +480,32 @@ class QueueRuntime:
             manager_claims = sum(max(0,mm.in_flight) for mm in self.manager.models.values())
         handoff_pending = (not _resource_handoff and handoff is not None and
                            handoff.snapshot()['phase'] != 'idle')
-        return {'drained':not (counts.get('running', 0) or counts.get('uncertain', 0)
-                              or claims or manager_claims or handoff_pending),
+        installation = getattr(self, 'exo', None)
+        groups = installation.owned() if installation is not None else 0
+        host_rank = getattr(self, 'host_rank', None)
+        host_owned = host_rank is not None and not host_rank.closed
+        result = {'drained':not (counts.get('running', 0) or counts.get('uncertain', 0)
+                              or claims or manager_claims or handoff_pending
+                              or (groups or host_owned) and not _resource_handoff),
                 'running':counts.get('running', 0), 'uncertain':counts.get('uncertain', 0),
                 'queued':counts.get('queued', 0), 'held_claims':claims,
                 'manager_claims':manager_claims}
+        if installation is not None:
+            result['groups_owned'] = groups
+        if host_rank is not None:
+            result['host_rank_owned'] = host_owned
+        return result
 
     def resume(self):
         handoff = getattr(self, 'shared_resource', None)
         if handoff is not None and handoff.snapshot()['phase'] != 'idle':
             raise RuntimeError('Physical handoff requires reconciliation before resume')
         self._external_quiesce = False
+        installation = getattr(self, 'exo', None)
+        if installation is not None:
+            if installation.closed:
+                raise RuntimeError('EXO provider closed; fresh runtime required')
+            installation.demand.paused = False
         binding = getattr(self.manager,'residency_renewal',None)
         if binding is not None:
             binding.resume()
@@ -455,6 +515,12 @@ class QueueRuntime:
 
     def close(self):
         """Only after quiescence and manager cleanup, never on uncertain work."""
+        host_rank = getattr(self, 'host_rank', None)
+        if host_rank is not None and not host_rank.closed:
+            raise RuntimeError('Host rank must retain its owner until observed cleanup')
+        installation = getattr(self, 'exo', None)
+        if installation is not None and not installation.closed:
+            raise RuntimeError('EXO provider must drain after observed group settlement before close')
         handoff = getattr(self, 'shared_resource', None)
         if handoff is not None and handoff.task is not None and not handoff.task.done():
             raise RuntimeError('Owned physical handoff must finish before closing its journal')
