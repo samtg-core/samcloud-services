@@ -179,13 +179,34 @@ kernel file identities; the native loader independently hashes all assigned byte
 before each actual model load. There is no elapsed-time shortcut or polling loop.
 
 `staging.py` binds the real bundle/parent/config/sidecar bytes and three explicit
-host/runtime policies. Its reader must be an authenticated host channel supplied
+host/runtime policies. Each host supplies its own complete qualified runtime file
+set: equal package versions do not imply equal native binary hashes. Runtime
+directory entries, including the root, must match exactly; an extra importable
+module refuses staging. Its reader must be an authenticated host channel supplied
 by startup. Each host must match uid/boot, readonly files/directories, local APFS/HFS
 and explicit scratch reserve. All observations are retained in the existing
 journal before the first group submission; policy/runtime/host boot cannot change
 under that intent. A missing verifier requests no leases. An already-owned lost
 create reply can reconcile its exact saved key, while unconfirmed staging blocks
 advance/start/serve. Local capacity remains usable before Slice is requested.
+
+`host_channel.py` supplies that reader over explicit trusted host routes. Startup
+pins the collector source, route/uid per host, interpreter and minimal local
+environment. The fixed isolated stdlib probe receives policy JSON over stdin;
+it never receives a plane bearer or inference body. Each bounded response must
+match a fresh request nonce and collector pin. There is no shell interpolation of
+policy data, default observation deadline, automatic retry or cached response.
+Cancellation/oversized output reaps only this owned read-only observer. SSH key
+and host-key trust configuration belong to the existing operator/service route;
+neither queued callers nor this module select credentials or change host trust.
+
+The attended route was exercised on all three real hosts: their exact12-entry
+small-model copies and903-file candidate source copies are readonly, hash-matching
+and host-local. A second fresh read reused only unchanged kernel identities.
+The source copies live in new isolated directories; no node/model was started,
+no lease was requested and no standing runtime was changed. This is source/model
+file preparation, **not** the complete runtime qualification: interpreter,
+dependencies/native libraries/config and host process provenance remain required.
 
 The canonical bytes are the original staging format: sorted compact UTF-8 JSON,
 **without a trailing newline**. A port regression had changed the parent/config
@@ -206,9 +227,10 @@ ranks or load a model. Tests inject plane/private-runtime/host effects; the actu
 registry qualification uses its isolated HTTP/SQLite implementation, not the fleet.
 Remaining work:
 
-1. Bind the implemented staging collector to actual authenticated host channels,
-   exact deployed runtime configuration and the existing plane event feed. Model
-   files are sealed; runtime staging/qualification and process provenance remain.
+1. Configure the implemented authenticated host reader for the service's exact
+   complete deployed runtime and the existing plane event feed. Model/source
+   files are sealed; dependency/native runtime qualification and process provenance
+   remain. The attended operator route is not an unattended service credential.
 2. Wire the implemented once-only private-instance submission to host rank startup,
    staging/runtime/file receipts and mark-serving after actual ready observations.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
@@ -242,7 +264,8 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_instance ollama.test_exo_group_calls \
   ollama.test_exo_group_private ollama.test_exo_group_backend \
   ollama.test_exo_group_install ollama.test_exo_group_startup \
-  ollama.test_exo_group_staging ollama.test_exo_group_staging_files
+  ollama.test_exo_group_staging ollama.test_exo_group_staging_files \
+  ollama.test_exo_group_host_channel
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the

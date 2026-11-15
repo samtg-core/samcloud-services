@@ -112,10 +112,11 @@ def model_file_policy(plan, manifest, parent_bytes, rank_name, root):
 class StagingVerifier:
     def __init__(self, plan, manifest, parent_bytes, runtime_sha256, runtime_files, hosts, reader):
         check_rank_manifest(plan, manifest)
-        if (not re.fullmatch('[a-f0-9]{64}', runtime_sha256) or not runtime_files or not callable(reader)):
+        if (not re.fullmatch('[a-f0-9]{64}', runtime_sha256)
+                or not isinstance(runtime_files, dict) or not callable(reader)):
             raise BindingRefused('pinned runtime policy and authenticated host reader required')
         ranks = sorted(plan.members, key=lambda member: member.pipeline_rank)
-        if set(hosts) != {member.rank for member in ranks}:
+        if set(hosts) != {member.rank for member in ranks} or set(runtime_files) != set(hosts):
             raise BindingRefused('exact three host staging configurations required')
         self.plan, self.manifest, self.runtime_sha256 = plan, manifest, runtime_sha256
         self.reader, self.previous = reader, {}
@@ -127,8 +128,9 @@ class StagingVerifier:
                     or type(setting['scratch_bytes']) is not int or setting['scratch_bytes'] < 0):
                 raise BindingRefused('explicit host uid and scratch reserve required')
             model = model_file_policy(plan, manifest, parent_bytes, member.rank, setting['model_root'])
-            runtime = {'root': setting['runtime_root'], 'files': runtime_files, 'views': {}}
-            validate_policy(runtime)
+            # Qualified native artifacts can differ per host build; they must
+            # each be pinned, never assumed equal from a version string alone.
+            runtime = runtime_file_policy(setting['runtime_root'], runtime_files[member.rank])
             policies.append(HostFiles(member.rank, member.resource_id, setting['uid'],
                                       setting['scratch_bytes'], model, runtime))
         # Canonical serialization freezes mutable input dictionaries/lists.
@@ -150,7 +152,7 @@ class StagingVerifier:
             raise BindingRefused('fresh local readonly files and disk headroom unconfirmed')
         if not StagingVerifier._identity_valid(actual.get('root_identity')):
             raise BindingRefused('staging root readonly identity unconfirmed')
-        required = set(expected['views'])
+        required = set(expected['views']) - {'.'}  # Root has its own identity.
         for pin in expected['files']:
             parts = PurePosixPath(pin['path']).parts[:-1]
             required.update('/'.join(parts[:count]) for count in range(1, len(parts) + 1))
@@ -210,3 +212,22 @@ class StagingVerifier:
         self.previous = json.loads(canonical({host.rank: report for host, report in zip(
             policies, reports, strict=True)}))
         return proof
+
+
+def runtime_file_policy(root, files):
+    """Every runtime directory, including root, has an exact entry set.
+
+    A manifest of selected pinned files cannot exclude an extra importable
+    module. Deployment must supply its complete qualified runtime file set,
+    including interpreter/dependencies/config, not just selected source pins.
+    """
+    views = {'.': set()}
+    for pin in files:
+        parts = PurePosixPath(pin['path']).parts
+        for index, name in enumerate(parts):
+            directory = '/'.join(parts[:index]) if index else '.'
+            views.setdefault(directory, set()).add(name)
+    policy = {'root': root, 'files': files,
+              'views': {directory: sorted(names) for directory, names in views.items()}}
+    validate_policy(policy)
+    return policy

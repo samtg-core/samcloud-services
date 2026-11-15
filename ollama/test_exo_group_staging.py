@@ -43,6 +43,7 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
             view = model / name
             view.mkdir(parents=True)
             runtime.mkdir()
+            (runtime / 'native.dylib').write_bytes(name.encode())
             (model / 'rank-bundle.json').write_bytes(self.manifest)
             (model / 'parent-manifest.json').write_bytes(canonical(self.parent))
             (model / 'VERIFIED').write_text(self.plan.rank_manifest_sha256 + '\n')
@@ -58,8 +59,12 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
                 root.chmod(0o500)
             self.settings[name] = {'model_root': str(model), 'runtime_root': str(runtime),
                                    'uid': os.getuid(), 'scratch_bytes': 100}
-        self.runtime_files = [{'path': 'main.py', 'bytes': 17,
-                              'sha256': hashlib.sha256(b'# fixture source\n').hexdigest(), 'link': None}]
+        self.runtime_files = {name: [
+            {'path': 'main.py', 'bytes': 17,
+             'sha256': hashlib.sha256(b'# fixture source\n').hexdigest(), 'link': None},
+            {'path': 'native.dylib', 'bytes': len(name.encode()),
+             'sha256': hashlib.sha256(name.encode()).hexdigest(), 'link': None}]
+            for name, _ in self.ranks}
         self.reports = []
         self.boot = str(UUID(int=123))
         self.local, self.free = True, 1000
@@ -98,6 +103,16 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BindingRefused):
             await self.verifier.verify(self.plan, self.manifest)
 
+    async def test_unlisted_runtime_import_at_root_is_not_qualified(self):
+        await self.verifier.verify(self.plan, self.manifest)
+        runtime = self.root / 'slice/runtime'
+        runtime.chmod(0o700)
+        (runtime / 'sitecustomize.py').write_text('raise RuntimeError("unlisted import")\n')
+        (runtime / 'sitecustomize.py').chmod(0o400)
+        runtime.chmod(0o500)
+        with self.assertRaises(BindingRefused):
+            await self.verifier.verify(self.plan, self.manifest)
+
     async def test_writable_tree_remote_filesystem_or_no_disk_headroom_is_not_ready(self):
         self.local = False
         with self.assertRaises(BindingRefused):
@@ -118,7 +133,7 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
 
     async def test_policy_is_detached_from_callers_mutable_dictionaries(self):
         self.settings['slice']['model_root'] = '/foreign'
-        self.runtime_files[0]['sha256'] = 'a' * 64
+        self.runtime_files['slice'][0]['sha256'] = 'a' * 64
         proof = await self.verifier.verify(self.plan, self.manifest)
         proof.check(self.plan)
 
@@ -131,6 +146,20 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
         with self.assertRaises(BindingRefused):
             await self.verifier.verify(replace(self.plan, request_key='different'), self.manifest)
+
+    async def test_each_host_native_artifact_is_pinned_and_not_inferred_from_other_hosts(self):
+        await self.verifier.verify(self.plan, self.manifest)
+        native = self.root / 'wafer/runtime/native.dylib'
+        native.chmod(0o600)
+        native.write_bytes(b'slice')  # A different host's valid artifact is not this host's pin.
+        native.chmod(0o400)
+        with self.assertRaises(BindingRefused):
+            await self.verifier.verify(self.plan, self.manifest)
+        files = dict(self.runtime_files)
+        files.pop('obelisk')
+        with self.assertRaises(BindingRefused):
+            StagingVerifier(self.plan, self.manifest, canonical(self.parent),
+                'f' * 64, files, self.settings, self.verifier.reader)
 
 
 if __name__ == '__main__':

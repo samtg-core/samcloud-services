@@ -129,7 +129,8 @@ def validate_policy(policy):
         if pin['link'] is not None and len(_parts(pin['link'])) != 1:
             raise StagingFilesUnavailable('only exact same-directory file aliases allowed')
     for view, entries in views.items():
-        _parts(view)
+        if view != '.':  # Explicit root loading view, never a file path alias.
+            _parts(view)
         if (not isinstance(entries, list) or any(not isinstance(name, str)
                 or len(_parts(name)) != 1 for name in entries) or len(set(entries)) != len(entries)):
             raise StagingFilesUnavailable('invalid exact loading view')
@@ -206,7 +207,7 @@ def collect_files(policy, *, filesystem=darwin_filesystem, previous=None):
             finally:
                 os.close(parent)
         for view, entries in views.items():
-            directory = _directory(root, _parts(view), directories)
+            directory = _directory(root, () if view == '.' else _parts(view), directories)
             try:
                 if set(os.listdir(directory)) != set(entries):
                     raise StagingFilesUnavailable('loading view contains missing or extra files')
