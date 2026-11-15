@@ -161,6 +161,46 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
             StagingVerifier(self.plan, self.manifest, canonical(self.parent),
                 'f' * 64, files, self.settings, self.verifier.reader)
 
+    async def test_explicit_empty_resource_directory_is_preserved_and_checked(self):
+        runtime=self.root/'slice/runtime'
+        runtime.chmod(0o700)
+        (runtime/'assets').mkdir()
+        (runtime/'assets').chmod(0o500)
+        runtime.chmod(0o500)
+        with self.assertRaises(BindingRefused):
+            await self.verifier.verify(self.plan,self.manifest)
+        self.runtime_files['slice']={'files':self.runtime_files['slice'],'directories':['assets']}
+        verifier=StagingVerifier(self.plan,self.manifest,canonical(self.parent),'f'*64,
+            self.runtime_files,self.settings,self.verifier.reader)
+        (await verifier.verify(self.plan,self.manifest)).check(self.plan)
+        (runtime/'assets').chmod(0o700)
+        (runtime/'assets/new_module.py').write_text('unlisted')
+        (runtime/'assets/new_module.py').chmod(0o400)
+        (runtime/'assets').chmod(0o500)
+        with self.assertRaises(BindingRefused):
+            await verifier.verify(self.plan,self.manifest)
+
+    def test_runtime_directory_names_are_exact_relative_and_unique(self):
+        from .exo_groups.staging import runtime_file_policy
+        for directories in ('assets',['../escape'],['/absolute'],['.'],['a//b'],
+                            ['assets','assets'],['a/../b'],['bad\x00name']):
+            with self.subTest(directories=directories),self.assertRaises(ValueError):
+                runtime_file_policy('/runtime',self.runtime_files['slice'],directories=directories)
+
+    def test_runtime_directory_declaration_is_detached_and_complete(self):
+        from .exo_groups.staging import runtime_file_policy
+        directories=['a/b']
+        policy=runtime_file_policy('/runtime',self.runtime_files['slice'],directories=directories)
+        directories.append('foreign')
+        self.assertEqual(policy['views']['a/b'],[])
+        self.assertEqual(policy['views']['a'],['b'])
+        self.assertNotIn('foreign',policy['views']['.'])
+        supplied=dict(self.runtime_files)
+        supplied['slice']={'files':supplied['slice'],'directories':[],'unknown':True}
+        with self.assertRaises(BindingRefused):
+            StagingVerifier(self.plan,self.manifest,canonical(self.parent),'f'*64,
+                supplied,self.settings,self.verifier.reader)
+
 
 if __name__ == '__main__':
     unittest.main()

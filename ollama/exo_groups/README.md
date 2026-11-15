@@ -249,6 +249,35 @@ repository/native gates. The earlier source packets2254 and2256 are historical;
 2256 contains the superseded newline identity guard. [Packet2257](https://cloud.samtg.xyz/api/v1/files/2257/raw) records
 the corrected903-file candidate (SHA256 `70dce31a552727f008c355ab556498980f83344bbe3cbbf7d7b437b4bb343132`). CPU/type/HTTP controls are not distributed acceptance.
 
+## Complete frozen runtime candidates
+
+Private snapshots now exist on Slice, Wafer and Obelisk, independently of their
+standing services. Each combines portable Python3.13.1, that host's existing
+pinned dependency files and the903-file candidate source. The isolated launcher
+uses `-I -S -B` and explicit frozen source/dependency paths; `.pth` execution and
+external Homebrew interpreter paths are disabled. Original editable-origin
+metadata is retained as provenance, not followed as an import hook.
+
+Actual authenticated file audits checked41,608files on Slice,41,595on Wafer and
+27,457on Obelisk, plus each12-entry small-model view. Each readonly APFS tree
+matched its declared bytes and paths; fresh identity-cache reads rehashed zero
+bytes. These are file/preparation observations, not native/M5/model qualification.
+Original environments and running services are unchanged.
+
+Full runtime reports exceed the earlier source-only8MiB transport bound (8.67MB
+on Obelisk,13.85MB on Slice/Wafer). Request and response bounds are now32MiB,
+including the previous verified identity cache. This remains a metadata resource
+limit, not an inference/lease/observation deadline. Oversized/ambiguous frames
+still establish no observation. Runtime policies also declare empty resource
+directories explicitly, preserving them while rejecting any unlisted contents.
+
+Static Mach-O inventory found no absolute non-OS library dependencies in these
+snapshots. Some MLX/PyTorch references require inherited loader-path/native
+qualification; static candidate resolution does not prove dynamic loading.
+Native build/parity/M5/private-network and repository full-test/format gates still
+apply. No service has selected these candidates, no EXO node/model was started,
+and no physical lease or distributed/200GB acceptance follows from file audits.
+
 ## Integration still required
 
 ### Host rank lifecycle

@@ -130,7 +130,14 @@ class StagingVerifier:
             model = model_file_policy(plan, manifest, parent_bytes, member.rank, setting['model_root'])
             # Qualified native artifacts can differ per host build; they must
             # each be pinned, never assumed equal from a version string alone.
-            runtime = runtime_file_policy(setting['runtime_root'], runtime_files[member.rank])
+            supplied = runtime_files[member.rank]
+            if isinstance(supplied, dict):
+                if set(supplied) != {'files', 'directories'}:
+                    raise BindingRefused('exact runtime files and directories required')
+                runtime = runtime_file_policy(setting['runtime_root'], supplied['files'],
+                                              directories=supplied['directories'])
+            else:
+                runtime = runtime_file_policy(setting['runtime_root'], supplied)
             policies.append(HostFiles(member.rank, member.resource_id, setting['uid'],
                                       setting['scratch_bytes'], model, runtime))
         # Canonical serialization freezes mutable input dictionaries/lists.
@@ -214,14 +221,27 @@ class StagingVerifier:
         return proof
 
 
-def runtime_file_policy(root, files):
+def runtime_file_policy(root, files, *, directories=()):
     """Every runtime directory, including root, has an exact entry set.
 
     A manifest of selected pinned files cannot exclude an extra importable
     module. Deployment must supply its complete qualified runtime file set,
     including interpreter/dependencies/config, not just selected source pins.
+    Empty resource directories are preserved and pinned explicitly too.
     """
+    if (not isinstance(directories, (tuple, list))
+            or any(not isinstance(path, str) or not path or path in ('.', '/')
+                   or str(PurePosixPath(path)) != path or PurePosixPath(path).is_absolute()
+                   or any(part in ('.', '..') for part in PurePosixPath(path).parts)
+                   for path in directories) or len(set(directories)) != len(directories)):
+        raise BindingRefused('exact relative runtime directory names required')
     views = {'.': set()}
+    for directory in directories:
+        parts = PurePosixPath(directory).parts
+        for index, name in enumerate(parts):
+            parent = '/'.join(parts[:index]) if index else '.'
+            views.setdefault(parent, set()).add(name)
+        views.setdefault(directory, set())
     for pin in files:
         parts = PurePosixPath(pin['path']).parts
         for index, name in enumerate(parts):

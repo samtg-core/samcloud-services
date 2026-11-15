@@ -57,6 +57,21 @@ class HostChannelControls(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(json.loads(self.calls[0][1])['request_id'],
                             json.loads(self.calls[1][1])['request_id'])
 
+    async def test_complete_runtime_report_and_previous_cache_exceed_old_source_only_bound(self):
+        original = self.reply
+        def full_report(request):
+            response = original(request)
+            response['report']['identity_cache'] = 'x' * (9 * 1024 * 1024)
+            return response
+        self.reply = full_report
+        reader = self.reader()
+        first = await reader(self.host,None)
+        self.assertGreater(len(self.calls[0][1]),0)
+        self.assertGreater(len(json.dumps(first)),8 * 1024 * 1024)
+        await reader(self.host,first)
+        self.assertGreater(len(self.calls[1][1]),8 * 1024 * 1024)
+        self.assertLess(len(self.calls[1][1]),MAX_FRAME)
+
     async def test_wrong_route_or_principal_refuses_before_any_process(self):
         for host in (replace(self.host, uid=os.getuid() + 1),
                      replace(self.host, rank='wafer'),
@@ -133,6 +148,10 @@ class HostChannelControls(unittest.IsolatedAsyncioTestCase):
                 report = await reader(spec, None)
                 self.assertTrue(report['model']['readonly'])
                 self.assertEqual(report['model']['hashed_bytes'], 11)
+                # A complete runtime's prior identities can exceed the old
+                # 8MiB source-only request bound. Exercise the actual remote
+                # stdlib reader, not only the injected transport.
+                report['extra_identity_cache'] = 'x' * (9 * 1024 * 1024)
                 cached = await reader(spec, report)
                 self.assertEqual(cached['model']['hashed_bytes'], 0)
                 self.assertEqual(cached['boot_id'], report['boot_id'])

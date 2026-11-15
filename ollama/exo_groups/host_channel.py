@@ -22,7 +22,10 @@ from .staging import HostFiles, StagingUnavailable
 
 # A metadata bound, not an observation or compute deadline. One frame contains
 # file identities for a complete runtime; weight bytes never cross this channel.
-MAX_FRAME = 8 * 1024 * 1024
+# A complete frozen interpreter + dependency tree is larger than selected
+# source pins. The observed 27,457-file runtime returned 8.67MB; a request
+# carries both the exact policy and its prior verified identity cache.
+MAX_FRAME = 32 * 1024 * 1024
 MAX_DIAGNOSTICS = 32 * 1024
 PREFIX = b'EXO_STAGING_V1:'
 
@@ -71,8 +74,8 @@ def _program(source):
     return source + '''
 if __name__ == '__main__':
     import sys
-    raw = sys.stdin.buffer.read(8 * 1024 * 1024 + 1)
-    if len(raw) > 8 * 1024 * 1024:
+    raw = sys.stdin.buffer.read(__MAX_STAGING_FRAME__ + 1)
+    if len(raw) > __MAX_STAGING_FRAME__:
         raise ValueError('staging request exceeds bound')
     request = json.loads(raw)
     if set(request) != {'request_id', 'collector_sha256', 'spec', 'previous'}:
@@ -82,7 +85,7 @@ if __name__ == '__main__':
              'collector_sha256': request['collector_sha256'], 'report': report}
     print('EXO_STAGING_V1:' + json.dumps(value, sort_keys=True, separators=(',', ':'),
           ensure_ascii=False, allow_nan=False), flush=True)
-'''
+'''.replace('__MAX_STAGING_FRAME__',str(MAX_FRAME))
 
 
 async def _bounded(stream, limit):
