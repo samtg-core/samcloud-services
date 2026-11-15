@@ -1,5 +1,23 @@
 # Changelog & Working Notes
 
+## Unreleased — safe Ollama error diagnostics
+
+Capture bounded HTTP error details and detect error-only records inside accepted streams. Log fixed cause tags, captured lengths and hashes without raw backend text. Chat streaming callers receive a failure frame and `[DONE]`; the NDJSON completions stream gets a final safe error line. Synchronous generation uses the same typed error. Non-streaming routes now raise HTTP 500 for in-band errors rather than returning truncated successful chat content or a raw error dictionary with HTTP 200. Existing generation deadlines, retry, admission and cleanup policies are unchanged; a backend error remains uncertainty, not evidence of returned capacity. See `ollama/BACKEND_ERRORS.md` for timeout and truncation limits.
+
+## Unreleased — independent repair scoring
+
+The capability repair checker now compares raw function outputs, input preservation and exception observations in the parent process. Agent code printing an all-true verdict and exiting no longer passes. Output type metadata preserves the list contract across JSON serialization. Parse the probe's final JSON line so debug prints do not fail a correct function. This is a new checker-source cohort; existing run results remain unchanged, and this is still not an adversarial sandbox.
+
+## Unreleased — terminal stream payloads
+
+Preserve content and tool calls attached to an Ollama terminal done frame before emitting the OpenAI finish frame. Previously these payloads were discarded, producing an empty successful response for some tool callers.
+
+## Unreleased — capability playground
+
+PR81 review repairs: allowlisted agent/checker environments, secret-bearing evidence redaction and failure, source-bound resume, refusal of unimplemented rail delivery, explicit comparison cohorts and unknown/attested assistance. Audit checker accepts valid source subsets and reports unchecked requirements.
+
+Version useful agent jobs, independent checks, immutable model/client/compute/identity manifests and comparison reports. Configured native/rail clients retain their existing service-owned queue lifecycle; no inference or allocator change.
+
 Project history and current state. This is a living document.
 
 ## 2026-10-09 — A short ring is not an outage: the tier declines through the capacity model (#870, #33)

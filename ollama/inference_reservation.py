@@ -252,7 +252,10 @@ class InitialReservations:
             raise ValueError('exact configured allocation and positive size/TTL required')
         with self._owned() as db:
             row = db.execute('SELECT * FROM initial_reservations WHERE model=?', (model,)).fetchone()
-            if row is not None:
+            if row is not None and row['state'] not in ('refused', 'retired'):
+                # A refused or retired row holds no live allocation, so a new
+                # demand may carry new configured dimensions (e.g. a raised
+                # budget). A live or unknown row keeps its exact dimensions.
                 if (row['resource'], row['memory_mb'], row['ttl_seconds']) != (
                         resource, memory_mb, ttl_seconds):
                     raise Conflict('reservation dimensions changed; reconcile saved allocation')

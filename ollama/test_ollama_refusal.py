@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 
-from .ollama_client import OllamaClient
+from .ollama_client import OllamaClient, OllamaBackendError, OllamaRefused
 
 
 class RefusalClient(unittest.TestCase):
@@ -16,8 +16,8 @@ class RefusalClient(unittest.TestCase):
         from .ollama_client import OllamaRefused
         cases = [(400, {'error': 'PRIVATE invalid input'}, OllamaRefused),
                  (404, {'error': 'PRIVATE model path'}, OllamaRefused),
-                 (400, {'detail': 'not Ollama'}, httpx.HTTPStatusError),
-                 (500, {'error': 'PRIVATE runner crashed'}, httpx.HTTPStatusError)]
+                 (400, {'detail': 'not Ollama'}, OllamaBackendError),
+                 (500, {'error': 'PRIVATE runner crashed'}, OllamaBackendError)]
         for method in ('chat', 'generate'):
             for status, body, kind in cases:
                 with self.subTest(method=method, status=status, body=body):
@@ -28,6 +28,9 @@ class RefusalClient(unittest.TestCase):
                     try:
                         with self.assertRaises(kind) as caught:
                             list(getattr(client, method)('qwen', [] if method == 'chat' else 'prompt'))
+                        if kind is OllamaBackendError:
+                            self.assertNotIsInstance(caught.exception, OllamaRefused)
+                            self.assertNotIn('PRIVATE', str(caught.exception))
                         if kind is OllamaRefused:
                             self.assertEqual(caught.exception.result['status'], status)
                             self.assertNotIn('PRIVATE', str(caught.exception.result))
@@ -89,8 +92,12 @@ class RefusalClient(unittest.TestCase):
             client.base_url = 'http://fake'
             fake = SimpleNamespace(ClientSession=Session, ClientTimeout=lambda **kw: None)
             with patch.dict(sys.modules, {'aiohttp': fake}):
-                rows = [c async for c in client._stream_with_deadlines('/api/chat', {'model':'qwen'})]
-                self.assertEqual(rows, [{'error': 'PRIVATE runner error'}])
+                for owned in (False, True):
+                    with self.assertRaises(OllamaBackendError) as caught:
+                        _ = [c async for c in client._stream_with_deadlines(
+                            '/api/chat', {'model':'qwen'}, service_owned=owned)]
+                    self.assertNotIsInstance(caught.exception, OllamaRefused)
+                    self.assertNotIn('PRIVATE', str(caught.exception))
         asyncio.run(run())
 
 

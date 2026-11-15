@@ -1,3 +1,28 @@
+## Obelisk compatibility candidate
+
+This stacked candidate reconciles provider commit `0073e4f` with Obelisk's
+installed package, whose 115 Python files independently match PR98 `111b89f`.
+It preserves the live XML/harmony terminal classifier, reclaimable memory
+accounting, reservation transitions, local reasoning validation, terminal/error
+frames, startup retirement and content-free uncertainty diagnostics. EXO keeps
+its native unbudgeted reasoning path. Foreground/compaction and provider ownership
+remain from the candidate. This merge selects no fleet service or seat overlay;
+the separately deployed PR97 fresh-call arm remains separate.
+
+Validation: 348 EXO controls; 357 critical gateway/SDK controls; 32 isolated core
+checks against PR19; 32 inherited model-eval controls; separate terminal-delta6,
+reclaimable-memory14, in-flight22 and stream/timing128 controls. On Obelisk's own
+Python3.14.10, 604 controls pass with external DNS/connects forbidden and no
+MLX/native compute import. These counts overlap and must not be summed. Ten
+legacy diagnostic fixture errors reproduce on verbatim PR98; the test-only repair
+selects the direct provider frame body and its correct dependencies. Nine Ruff
+findings remain byte-identical in inherited live server/capacity files; changed
+integration files pass. The startup log now says "retired" for both retirement
+paths, instead of implying a release call occurred in the already-ended case.
+
+This is an uninstalled compatibility candidate. The live network enforcement
+and actual small queued three-host model proof still precede large staging.
+
 # EXO provider integration
 
 ## Current native qualification

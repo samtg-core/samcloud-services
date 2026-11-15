@@ -42,7 +42,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 
@@ -50,6 +50,7 @@ from . import capacity
 from . import config
 from . import prompt_size
 from .inference_arbiter import CapacityDeferred
+from .reasoning_request import reasoning_request_error, ollama_think
 from .manager import (
     backend_serves,
     backend_is_exclusive,
@@ -59,7 +60,7 @@ from .manager import (
 )
 from .manager import TranscriberBusy
 from .exo_client import ExoUnavailable, ExoRequestFailed, ExoStalled
-from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaRefused
+from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaRefused, OllamaBackendError
 from .samcloud import SamcloudClient
 from .ollama_client import OllamaClient
 from .llama_client import LlamaServerClient
@@ -512,6 +513,25 @@ class ChatRequest(BaseModel):
     # is the better answer and is deliberately NOT done here — see the note on
     # the ticket.
     response_format: Optional[dict] = None
+
+    # The raw-input reasoning verdict (task 965), kept aside and never raised
+    # here: Exo forwards reasoning_effort unbudgeted and its accepted inputs stay
+    # exactly as they were. Ollama entry points refuse on it, so "64", 64.0 or
+    # True cannot become a budget through pydantic's coercion.
+    _reasoning_problem: Optional[str] = PrivateAttr(default=None)
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def _keep_raw_reasoning_verdict(cls, data, handler):
+        model = handler(data)
+        if isinstance(data, dict):
+            model._reasoning_problem = reasoning_request_error(data)
+        return model
+
+    def reasoning_problem(self):
+        """Raw-input verdict, else the parsed values (a model built without a dict)."""
+        return self._reasoning_problem or reasoning_request_error(
+            {"reasoning_effort": self.reasoning_effort, "max_tokens": self.max_tokens})
 
 class CompletionRequest(BaseModel):
     model: str
@@ -1969,7 +1989,14 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
         # message.content), which both wastes the inference slot for minutes
         # (the #97 hang) and starves any num_predict budget below. Disable it so
         # tokens go to the content we actually return.
-        ollama_kwargs["think"] = False
+        # Opt-in: an explicit, budgeted level turns it on; absent or `none`
+        # sends exactly the old `False` (task 965). Queued calls were already
+        # checked on enqueue; this covers the direct route, before any backend
+        # call or prompt work.
+        problem = req.reasoning_problem()
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        ollama_kwargs["think"] = ollama_think(req.reasoning_effort)
         # Bound generation length: Ollama takes this under options.num_predict,
         # not the OpenAI-style top-level max_tokens. Without this an unbounded
         # generation can occupy the single inference slot for minutes and starve
@@ -2017,6 +2044,7 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
         if req.stream:
             async def stream():
                 saw_tool_calls = False
+                diagnostic_started = time.monotonic()
                 try:
                     async for chunk in mgr.ollama.chat_stream(
                         mm.name, ollama_messages,
@@ -2028,6 +2056,11 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                         if "message" in chunk and chunk["message"].get("tool_calls"):
                             delta["tool_calls"] = _fix_tool_calls(chunk["message"]["tool_calls"])
                             saw_tool_calls = True
+                        if delta:
+                            yield "data: " + json.dumps({
+                                "choices": [{"delta": delta, "finish_reason": None}],
+                                "model": mm.name,
+                            }) + "\n\n"
                         if chunk.get("done"):
                             _log_ollama_timings(mm.name, chunk, n_prompt)
                             finish = "tool_calls" if saw_tool_calls else "stop"
@@ -2045,11 +2078,6 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                                                  'completion_tokens':completion,
                                                  'total_tokens':prompt+completion}})+'\n\n'
                             yield "data: [DONE]\n\n"
-                        elif delta:
-                            yield "data: " + json.dumps({
-                                "choices": [{"delta": delta, "finish_reason": None}],
-                                "model": mm.name,
-                            }) + "\n\n"
                 except asyncio.CancelledError:
                     log.info(f"Client disconnected during stream for {mm.name}")
                     raise
@@ -2079,6 +2107,18 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                 # relative to every other timeout on the path, and the one that
                 # fires first should be the one that reports best. Ours fires
                 # first and used to report worst.
+                except OllamaBackendError as e:
+                    if queue_owned:
+                        raise  # owning scheduler retains uncertainty; client logged safe diagnostics
+                    detail = e.diagnostics()
+                    detail["elapsed_s"] = round(time.monotonic() - diagnostic_started, 3)
+                    log.warning("Ollama backend_error %s", json.dumps(detail, sort_keys=True))
+                    for frame in _failure_frames(
+                        "backend_error", "Ollama backend reported an error; execution needs reconciliation",
+                        detail,
+                    ):
+                        yield "data: " + json.dumps(frame) + "\n\n"
+                    yield "data: [DONE]\n\n"
                 except OllamaStalled as e:
                     if queue_owned:
                         raise  # scheduler records uncertainty, not a model delta
@@ -2664,8 +2704,15 @@ async def _completions_direct(req: CompletionRequest, resolved=None, queue_owned
     if mm.backend == Backend.OLLAMA:
         if req.stream:
             def stream():
-                for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned):
-                    yield json.dumps(chunk) + "\n"
+                try:
+                    for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned):
+                        yield json.dumps(chunk) + "\n"
+                except OllamaBackendError as e:
+                    if queue_owned:
+                        raise  # owning scheduler retains uncertainty
+                    yield json.dumps({"error": "backend_error",
+                                      "diagnostics": e.diagnostics(), "done": True,
+                                      "done_reason": "error"}) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
             # In a thread, for the reason the chat route carries in full
