@@ -1,5 +1,38 @@
 # EXO provider integration
 
+## Current native qualification
+
+Core PR19 is merged and live as **0.13.11 / 1d396f5**; the exact-member authority
+handler was independently checked. The native candidate is committed as
+`5646e165caeda1e9e13bbeaf5732907509f06bf3`, with a clean working tree. Its default
+`uv run pytest` passed **591 tests**, three existing skips and 190 slow cases
+excluded by the repository defaults, under Wafer's ordinary exclusive GPU lease.
+There was no CPU plugin or selection override. Owned process/group absence and
+memory return within the original bound preceded exact release. The literal
+`nix fmt` passed in a pinned official Nix container with zero file changes;
+Basedpyright reports zero errors against the same tested interpreter, and Ruff
+passes. Type checking needs that interpreter rather than the old dev environment
+with its stale native extension stubs.
+
+[Source, incremental Git bundle, wheel and native qualification evidence2270](https://cloud.samtg.xyz/api/v1/files/2270/raw),
+SHA256 `1dcb3e3ee8d3352b882eed8df135345874ad358c8e658ee50c20767d47fd0bf6`,
+keeps the earlier UV-cache launch failure separate from the successful native
+run. Both leases are terminal. The source has not been pushed to public upstream;
+no fleet native library or standing service was switched.
+
+This proves **Wafer/M4 native unit checks**, not M5/model loading or distributed
+inference. [Frozen-v2 file evidence2268](https://cloud.samtg.xyz/api/v1/files/2268/raw)
+includes complete host runtime audits and built dashboard assets, but retains
+the old native binary. A paired final runtime, actual host/feed configuration,
+fresh process provenance, enforced private transport, M5/model loading,
+numerical parity and the small three-host run remain before deployment. The
+235B model then needs measured memory/context fit and the same full21 evals.
+Sam's interactive identity covers attended small qualification; a dedicated
+identity is a separate prerequisite for unattended pooled service.
+
+Earlier dated sections below retain the implementation history.
+
+
 This package belongs to **model-service**. Model-service remains the caller's
 inference endpoint and the EXO coordinator. Samcloud's registry owns physical
 resource admission, durable lease groups, fencing and settlement. EXO workers
