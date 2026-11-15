@@ -1193,3 +1193,54 @@ def test_actual_cleanup_upload_then_exact_member_settlement(
             await actor.close()
             journal.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('lost_reply,fence_first', [(False,False),(True,False),(False,True)])
+def test_actual_journal_readiness_attestation_transport_is_exact_and_fenced(
+        client, admitted, tmp_path, lost_reply, fence_first):
+    """Real core attestation contract; host/runtime checks have separate controls."""
+    from ollama.exo_groups.prepare import canonical, digest
+    from ollama.exo_groups.plane import PlaneUnavailable
+    plan, group, _ = admitted
+    evidence = {'group_id':group['id'],'generation':1,'kind':'injected-test-readiness'}
+    raw = canonical(evidence)
+    proof = {'evidence_ref':'model-service-journal:exo_group_readiness:'+digest(evidence),
+             'evidence_sha256':digest(evidence)}
+    (tmp_path/'injected-readiness.json').write_bytes(raw)
+    class ServingRegistry(ObservedRegistry):
+        async def handle_async_request(self, request):
+            response = await super().handle_async_request(request)
+            if self.lose and request.url.path.endswith('/serving') and request.method=='POST':
+                self.lose=False
+                await response.aread()
+                await response.aclose()
+                raise httpx.ReadError('lost serving metadata reply after commit')
+            return response
+    if fence_first:
+        command(client,group,'fence',reason='test stale serving owner')
+    async def run():
+        transport=ServingRegistry(client)
+        transport.lose=lost_reply
+        plane=CoordinatorPlane(plan.owner_id,lambda:client._headers['Authorization'],transport=transport)
+        try:
+            if fence_first or lost_reply:
+                with pytest.raises(PlaneUnavailable):
+                    await plane.mark_serving(group['id'],1,proof)
+            else:
+                assert (await plane.mark_serving(group['id'],1,proof))['phase']=='serving'
+            after=await plane.group(group['id'])
+            if fence_first:
+                assert after['generation']==2 and after['serving_evidence'] is None
+            else:
+                assert after['phase']=='serving'
+                assert after['serving_evidence']=={'generation':1,'attested_by':plan.owner_id,**proof}
+                # Exact same metadata is idempotent; another proof is refused.
+                assert (await plane.mark_serving(group['id'],1,proof))['serving_evidence']==after['serving_evidence']
+                changed={'evidence_ref':'model-service-journal:exo_group_readiness:'+'f'*64,
+                         'evidence_sha256':'f'*64}
+                with pytest.raises(PlaneUnavailable):
+                    await plane.mark_serving(group['id'],1,changed)
+            assert_still_charged()
+        finally:
+            await plane.close()
+    asyncio.run(run())

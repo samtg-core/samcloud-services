@@ -65,6 +65,17 @@ class CoordinatorPlane:
         return await self._request('POST', self._group(group_id) + '/advance',
                                    {'generation': generation})
 
+    async def mark_serving(self, group_id, generation, proof):
+        if (type(generation) is not int or generation < 1 or not isinstance(proof,dict)
+                or set(proof) != {'evidence_ref','evidence_sha256'}
+                or not isinstance(proof['evidence_ref'],str)
+                or not re.fullmatch(r'model-service-journal:exo_group_readiness:[a-f0-9]{64}',proof['evidence_ref'])
+                or not isinstance(proof['evidence_sha256'],str)
+                or proof['evidence_ref'].rsplit(':',1)[-1] != proof['evidence_sha256']):
+            raise ValueError('exact journaled readiness proof required')
+        return await self._request('POST',self._group(group_id)+'/serving',
+                                   {'generation':generation,**proof})
+
     async def begin_release(self, group_id, generation):
         if type(generation) is not int or generation < 1:
             raise ValueError('explicit generation required')

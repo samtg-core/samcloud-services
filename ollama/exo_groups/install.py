@@ -24,6 +24,8 @@ class GroupProvider:
         self.backend = None
         self.completion = GroupCompletion(actor)
         self.publication = None
+        self.receipts = None
+        self.readiness = None
         self._ready = False
         self._actor_epoch = None
         self._epoch = 0
@@ -127,6 +129,27 @@ class GroupProvider:
         if self.publication is None:
             raise RuntimeError('cleanup publication audience is unconfigured')
         return await self.publication.complete_member(lease_id, raw, generation=generation)
+
+    def bind_receipts(self, routes):
+        """Bind deployment-owned host routes; callers cannot supply them."""
+        from .receipts import GroupReceipts
+        if self.publication is None:
+            raise RuntimeError('cleanup publication audience is unconfigured')
+        if self.receipts is not None:
+            if tuple(self.receipts.routes.values()) != routes:
+                raise ValueError('host receipt routes are already configured')
+            return self.receipts
+        self.receipts = GroupReceipts(self.completion,self.publication,routes)
+        return self.receipts
+
+    def bind_readiness(self, startup):
+        from .readiness import GroupReadiness
+        if self.readiness is not None:
+            if self.readiness.startup is not startup:
+                raise ValueError('private readiness owner is already configured')
+            return self.readiness
+        self.readiness = GroupReadiness(self,startup)
+        return self.readiness
 
     def permitted(self, resource):
         if (resource != self.resource or self.source.paused or self._closed

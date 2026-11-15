@@ -160,7 +160,7 @@ and the exact empty three-host namespace. The frozen contract/baseline commits
 before the sole POST /instance; acceptance records the server command and matching
 card, never runner readiness or serving permission. Crash, lost reply, malformed
 acceptance and a second concurrent startup owner cannot re-post. GET reconciliation,
-host launch and mark-serving remain separate integration work.
+host launch and installed fleet orchestration remain separate integration work.
 
 The leased runtime candidate also validates the prepared explicit pipeline/card
 at POST /instance and avoids ModelCard.load's name-based fallback to Hugging Face
@@ -168,6 +168,36 @@ main. Ordinary EXO profiles retain their lookup. Actual handler tests cover the
 pinned-card/ordinary paths and reject changed namespace, runner, endpoint, card,
 layers, timeout, remote-code and image variants before any command. They use MLX
 CPU and an injected command transport; no model/node/listening server.
+
+## Host receipts, readiness and closure orchestration
+
+`receipts.py` binds deployment-owned authenticated reader routes to exact host
+attempts. Observation pins preparation or actual-child receipts independently of
+cleanup. Before group drain it requires a route and receipt for every allocated
+member, rereads the generation, then freezes closure. Missing/changed receipts
+keep the group held. Later settlement rereads that host, requires its previously
+saved pin, validates the exact cleanup bytes, publishes them once and acknowledges
+only that member. A receipt learned after closure cannot invent a missing pin.
+The existing supervisor owns these operations across observer disconnects.
+
+`readiness.py` connects the once-submitted private instance to the ordinary core
+serving transition. It requires all three actual host-start receipts, no host
+cleanup, fresh complete-runtime verification, exact private placement/ready idle
+state and a state event index not older than instance submission. The exact first
+readiness evidence commits in the existing model-service journal before POST.
+Core records `model-service-journal:exo_group_readiness:<sha256>` and its hash;
+this reference names retained journal evidence, **not an uploaded plane file**.
+Its group, generation, contract/runtime and actual-child identities are immutable.
+A later state-history event cannot replace that original proof. Lost metadata
+replies reconcile the same exact acknowledgement; they never replay instance or
+inference POSTs. Generation changes, contact loss, unknown/running inference and
+wrong acknowledgement cannot confirm readiness. Actual dispatch still performs
+fresh authority/runtime/private-state checks; saved readiness is not permission.
+
+These opt-in provider bindings remain uninstalled. Fleet feed/configuration and
+native runtime qualification are still required. The tests inject host/runtime
+reports and separately exercise the real core serving-API contract; they do not
+prove a three-host model run.
 
 ## Staging before physical acquisition
 
