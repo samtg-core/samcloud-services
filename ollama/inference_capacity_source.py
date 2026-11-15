@@ -52,6 +52,9 @@ class ManagerCapacitySource:
         provider = self.external.get(model)
         if provider is not None:
             return provider.permitted(resource)
+        host_rank = getattr(self.runtime, 'host_rank', None)
+        if host_rank is not None and not host_rank.closed:
+            return False  # Group-owned host cannot run an ordinary local load.
         boundaries = [provider.local_permission() for provider in self.external.values()]
         if any(value is False for value in boundaries):
             return False
@@ -64,7 +67,8 @@ class ManagerCapacitySource:
             return None
         model,observed,lease = self.observed_residency[key]
         current = self.runtime.manager.models
-        if set(current)-set(self.runtime.settings.models):return None
+        if set(current)-set(self.runtime.settings.models):
+            return None
         if observed is None:
             return True if model not in current else None
         return (True if current.get(model) is observed and
@@ -72,15 +76,21 @@ class ManagerCapacitySource:
 
     def publish(self,resource,state,reason,*,model=None):
         self.revision += 1
-        value={'state':state,'reason':reason,'revision':self.revision}
         names=[model] if model is not None else [name for name,target in
                     self.runtime.settings.models.items() if target==resource]
         queue=getattr(self.runtime,'queue',None)
         journal=getattr(getattr(queue,'supervisor',None),'journal',None)
-        if journal is not None:
-            for name in names:
-                journal.capacity_event(resource,name,state,reason)
-        for name in names:self.last_model[resource,name]=value
+        host_rank = getattr(self.runtime, 'host_rank', None)
+        value={'state':state,'reason':reason,'revision':self.revision}
+        for name in names:
+            selected_state, selected_reason = state, reason
+            if (state == 'available' and host_rank is not None and not host_rank.closed
+                    and name not in self.external):
+                selected_state, selected_reason = 'unavailable', 'exo_host_rank_owned'
+            value={'state':selected_state,'reason':selected_reason,'revision':self.revision}
+            if journal is not None:
+                journal.capacity_event(resource,name,selected_state,selected_reason)
+            self.last_model[resource,name]=value
         self.last[resource]=value
         states=[self.last_model.get((resource,name),{}).get('state','unknown')
                 for name,target in self.runtime.settings.models.items() if target==resource]
@@ -135,7 +145,8 @@ class ManagerCapacitySource:
     async def _refresh(self,physical,epoch):
         manager,settings = self.runtime.manager,self.runtime.settings
         for model,resource in settings.models.items():
-            publish=lambda state,reason:self.publish(resource,state,reason,model=model)
+            def publish(state,reason):
+                self.publish(resource,state,reason,model=model)
             publish('unknown','observing')
             if self.permission is not True:
                 publish('unavailable' if self.permission is False else 'unknown',
@@ -184,8 +195,10 @@ class ManagerCapacitySource:
                 if mm is None:
                     from .inference_arbiter import Conflict
                     store=self.binding.actor.store
-                    try:former=store.snapshot(self.binding.allocation(model))
-                    except Conflict:former=None
+                    try:
+                        former=store.snapshot(self.binding.allocation(model))
+                    except Conflict:
+                        former=None
                     initial = getattr(manager, 'initial_reservations', None)
                     prior_intent = initial.snapshot(model) if initial is not None else None
                     needs_initial_retirement = (handoff is not None and former is not None and prior_intent is not None
@@ -202,7 +215,8 @@ class ManagerCapacitySource:
                             running=[] if absent is True else None
                         else:
                             running=await source_call(manager.ollama.list_running)
-                        if self.paused or epoch!=self.epoch:return
+                        if self.paused or epoch!=self.epoch:
+                            return
                         if (model in manager.models or not isinstance(running,list)
                                 or any(not isinstance(item,dict) or not isinstance(item.get('name'),str)
                                     or item['name'].removesuffix(':latest')==model.removesuffix(':latest')

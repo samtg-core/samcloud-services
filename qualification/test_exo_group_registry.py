@@ -748,3 +748,121 @@ def test_partial_group_does_not_advance_after_staged_files_disappear(client, pla
             await actor.close()
             journal.close()
     asyncio.run(run())
+
+
+def host_runtime_for(client, admitted, tmp_path, *, rank='slice'):
+    """Actual scoped HTTP authority; host process/runtime effects are CPU fakes."""
+    import os
+    import sys
+    from uuid import UUID
+    from ollama.exo_groups.host_authority import HostAuthorityAdapter, HostPlaneReader
+    from ollama.exo_groups.member import ExpectedMember
+    from ollama.exo_groups.rank_lifecycle import RankLifecycle, RankSpec
+    from ollama.exo_groups.rank_process import Listener, RunBinding
+    from ollama.exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256
+    from ollama.test_exo_group_host_authority import FakeAlarm
+    from ollama.test_exo_group_rank_lifecycle import FakeProcess
+    plan, group, launches = admitted
+    response = client.post('/api/v1/users', json={
+        'username': 'host-rank-runtime', 'password': 'test-pw', 'role': 'user',
+        'scopes': ['device:claude-services-slice'],
+    })
+    assert response.status_code == 200
+    login = client.post('/api/v1/auth/login', json={
+        'username': 'host-rank-runtime', 'password': 'test-pw'})
+    assert login.status_code == 200
+    header = {'Authorization': 'Bearer ' + login.json()['token']}
+    principal = client._client.get('/api/v1/auth/verify', headers=header).json()['owner_id']
+    assert principal != plan.owner_id
+    expected = ExpectedMember.from_launch(plan, next(value for value in launches if value.rank == rank))
+    binding = RunBinding.from_expected(expected, 'b' * 64)
+    child = FakeProcess(binding)
+    boot = str(UUID(int=123))
+    actor = RankLifecycle(expected, RankSpec(binding, (sys.executable, '-c', 'pass'),
+        tmp_path, (Listener('127.0.0.1', 39999),), 0), tmp_path / 'host-run',
+        memory_reader=lambda: 100, port_reader=lambda _: True, boot_reader=lambda: boot,
+        monotonic=lambda: 100.1, spawner=lambda *a, **kw: child, emit=lambda _: None)
+    reader = HostPlaneReader(lambda: header['Authorization'], owner_id=principal,
+                            transport=httpx.ASGITransport(app=client._client.app))
+    adapter = HostAuthorityAdapter(actor, reader, alarm_factory=FakeAlarm)
+    environment = {}
+    async def verify_runtime():
+        return RuntimeObservation('b' * 64, launch_sha256(actor, environment), boot, os.getuid())
+    class Watch:
+        def __init__(self, process, notify, failed):
+            self.notify = notify
+        def close(self):
+            pass
+    runtime = HostRankRuntime(actor, adapter, verify_runtime=verify_runtime,
+        environment=environment, boot_id=boot, watcher_factory=Watch)
+    return runtime, child, header
+
+
+def test_actual_host_runtime_uses_scoped_authority_then_fence_stops_without_settlement(
+        client, admitted, tmp_path):
+    async def run():
+        runtime, child, header = host_runtime_for(client, admitted, tmp_path)
+        try:
+            assert client._client.get('/api/v1/lease-groups/' + admitted[1]['id'],
+                                      headers=header).status_code == 404
+            await runtime.on_connect()
+            await runtime.start()
+            assert runtime.actor.phase == 'running' and not await runtime.may_admit()
+            command(client, admitted[1], 'serving', evidence_ref='test:all-ready',
+                    evidence_sha256='b' * 64)
+            assert await runtime.may_admit()
+            command(client, admitted[1], 'fence', reason='host controller test fence')
+            notices = client._client.get('/api/v1/events/recent?limit=100', headers=header)
+            assert notices.status_code == 200
+            for notice in notices.json():
+                await runtime.on_event(notice)
+            assert child.stop_count == 1 and runtime.actor.draining
+            assert_still_charged()
+            child.code = 0
+            runtime.exit_watch.notify()
+            assert runtime.actor.receipt['lease_released'] is False
+            assert_still_charged()
+        finally:
+            if runtime.actor.process is not None:
+                child.code = 0
+                runtime.actor.process_exited()
+            await runtime.close_after_cleanup()
+    asyncio.run(run())
+
+
+def test_actual_host_runtime_cannot_use_slice_credential_for_wafer(client, admitted, tmp_path):
+    from ollama.exo_groups.rank_process import ObservationUnknown
+    async def run():
+        runtime, child, _ = host_runtime_for(client, admitted, tmp_path, rank='wafer')
+        try:
+            with pytest.raises(ObservationUnknown):
+                await runtime.on_connect()
+                await runtime.start()
+            assert runtime.actor.process is None and child.stop_count == 0
+            assert_still_charged()
+        finally:
+            await runtime.close_after_cleanup()
+    asyncio.run(run())
+
+
+def test_actual_host_runtime_stops_on_peer_hold_expiry_and_retains_every_claim(
+        client, admitted, tmp_path):
+    async def run():
+        runtime, child, _ = host_runtime_for(client, admitted, tmp_path)
+        try:
+            await runtime.on_connect()
+            await runtime.start()
+            peer = next(value for value in admitted[2] if value.rank == 'obelisk')
+            db.execute("UPDATE leases SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                       (peer.lease_id,))
+            await runtime.on_heartbeat()
+            assert child.stop_count == 1 and runtime.actor.receipt is None
+            resource = client.get('/api/v1/resources/' + peer.resource_id).json()
+            assert resource['available_memory_mb'] == 9000
+            assert [value['lease_id'] for value in resource['unsettled']] == [peer.lease_id]
+            assert_still_charged(expired=1)
+        finally:
+            child.code = 0
+            runtime.actor.process_exited()
+            await runtime.close_after_cleanup()
+    asyncio.run(run())

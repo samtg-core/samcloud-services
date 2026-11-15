@@ -221,6 +221,45 @@ the corrected903-file candidate (SHA256 `70dce31a552727f008c355ab556498980f83344
 
 ## Integration still required
 
+### Host rank lifecycle
+
+The qualified host lifecycle now lives in this package, with no workspace-helper
+imports. `rank_process.py` owns one birth-pinned foreground process group;
+`rank_lifeline.py` uses controller-pipe loss to request TERM for that same group.
+No controller descriptor reaches the native rank, no process is adopted by PID
+from disk, and no restart or forced-kill timer is provided. Process/group,
+declared listeners and a measured device-memory return must all agree before
+`rank_lifecycle.py` persists cleanup evidence. Evidence still releases nothing.
+
+`host_authority.py` uses the host service's own verified credential for scoped
+member projections. The coordinator bearer is not installed on a host. The
+existing event feed's callbacks invalidate permission before reconciliation;
+stream loss withdraws admission while retaining the same child and last explicit
+sleep-inclusive expiry alarm. Fencing/expiry requests stop, not lease settlement.
+
+`rank_runtime.py` owns these components on the service loop. It requires an
+explicit fresh complete-runtime/uid/boot/launch-spec verifier and reconciled event
+feed. Snapshot GET alone cannot bypass a disconnected feed. Native Darwin
+EVFILT_PROC/NOTE_EXIT drives child completion, including exit before watch
+registration; cleanup can be revisited on existing inventory events. There is no
+new poller/SSE subscription or default deadline in this owner.
+
+`QueueRuntime.bind_exo_rank` explicitly installs the host role with its own
+verified service identity, empty manager and no running/uncertain local call.
+The existing inference journal records the exact member/generation/boot/launch
+before binding. Reopening or using a new controller cannot launch that member
+again, even if its original launch was never observed. Local model capacity is
+withdrawn; a co-located registered EXO provider retains its separate group checks.
+Quiescence reports host ownership as undrained without killing compute. Close
+refuses an open/uncertain host owner; observed cleanup closes it but forces fresh
+capacity before local dispatch. A later distinct member can bind on the same
+service without reusing the old attempt. No lease is requested/released here.
+
+Controls use real CPU child groups/pipes/listeners and the native exit event,
+with device memory injected; separate real isolated registry tests show scoped
+host permission, fence/peer-expiry shutdown and all leases still charged. They
+are not native-model or deployed-host qualification.
+
 This component is **not enabled by default startup and is not a complete EXO
 provider**. Nothing in this PR has been installed on a host. It does not yet launch
 ranks or load a model. Tests inject plane/private-runtime/host effects; the actual
@@ -231,8 +270,9 @@ Remaining work:
    complete deployed runtime and the existing plane event feed. Model/source
    files are sealed; dependency/native runtime qualification and process provenance
    remain. The attended operator route is not an unattended service credential.
-2. Wire the implemented once-only private-instance submission to host rank startup,
-   staging/runtime/file receipts and mark-serving after actual ready observations.
+2. Configure the implemented host service role/runtime verifier and existing
+   event-feed callbacks on the fleet. Connect its observed startup to the
+   once-only private-instance submission and mark-serving after actual readiness.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
    authenticated API and host/file receipts. EXO's chat API selects by model, not
    a caller-supplied instance ID; check exact state before dispatch and persist
@@ -265,7 +305,10 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_private ollama.test_exo_group_backend \
   ollama.test_exo_group_install ollama.test_exo_group_startup \
   ollama.test_exo_group_staging ollama.test_exo_group_staging_files \
-  ollama.test_exo_group_host_channel
+  ollama.test_exo_group_host_channel ollama.test_exo_group_rank_process \
+  ollama.test_exo_group_rank_lifeline ollama.test_exo_group_rank_lifecycle \
+  ollama.test_exo_group_host_authority ollama.test_exo_group_rank_runtime \
+  ollama.test_exo_group_host_install
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the
