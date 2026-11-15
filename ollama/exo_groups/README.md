@@ -99,7 +99,9 @@ inference. The remaining provider integration must:
    neither reconnect nor elapsed time retries inference or releases the group.
 5. Keep call completion distinct from the residency session. Release only after
    observed rank cleanup, exact evidence publication and acknowledged settlement
-   of every member. There is no default idle-release timer.
+   of every member. Wire member renewal to the explicitly declared lease/session
+   authority before longer runs. Standing long arcs still need their recorded
+   protocol decision; there is no default idle-release/reacquire timer.
 
 Production integration remains gated by the small-model native and multi-host
 qualification, network confinement and the existing campaign boundary. CPU and
