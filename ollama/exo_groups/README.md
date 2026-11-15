@@ -102,6 +102,28 @@ installed SDK and its registration/disarm/replacement controls run against the
 real native timer. An alarm failure withdraws permission. No timer kills compute
 in this coordinator; host authority/cleanup remains a separate contract.
 
+## Private instance preparation and observation
+
+`prepare.py` migrates the qualified explicit placement builder. It uses the real
+pinned EXO types in a preparation environment, validates the model's parent and
+rank manifests, and assigns deterministic instance/runner IDs per group generation.
+`instance.py` preserves both actual wire forms: snake_case for creating an instance,
+and camelCase aliases for observing it. The gateway checker imports no EXO or MLX.
+
+The immutable contract checks the exact plan/runtime pin and three launch bindings,
+then refuses an extra instance (even of the same model), changed node/rank/card,
+missing/extra/unready runner, prefill listener, instance link, unrelated/unfinished
+task, or mismatched read-only discovery. EXO retains completed discovery records;
+each must match that node's assigned shard. Historical terminal tasks are allowed,
+including failed ones: idle is not evidence that any request succeeded.
+
+These are configuration/observation checks, not a private HTTP client or persistent
+execution binding yet. Runtime pin provenance, host identity/filesystem receipts,
+fresh authenticated state and current lease authority must be verified separately.
+No saved readiness result authorizes a later dispatch. The fixture is actual-type
+serialization with synthetic node IDs, not observed running hosts. Its selected
+source-pin manifest checks this API surface; it is not full runtime qualification.
+
 ## Integration still required
 
 This component is **not enabled by startup and is not a complete EXO provider**.
@@ -114,9 +136,10 @@ inference. The remaining provider integration must:
    binding before an inference POST; group/member intent binding is implemented.
 2. Publish group-covered capacity alongside local-model capacity. Slice's group
    lease must not be mistaken for spare local memory or trigger a second lease.
-3. Bind the pinned EXO runtime, its private namespace/API key and exact explicit
-   instance. EXO's chat API selects by model, not a caller-supplied instance ID;
-   its state must contain only the expected instance and assigned runners.
+3. Wire the prepared instance contract to the pinned runtime's private namespace,
+   authenticated API and host/file receipts. EXO's chat API selects by model, not
+   a caller-supplied instance ID; check exact state before dispatch and persist
+   execution-to-instance/command identity before posting inference.
 4. Execute through the existing supervisor. Transport loss, a missing terminal
    frame or unconfirmed backend end retains uncertainty and physical HOLD;
    neither reconnect nor elapsed time retries inference or releases the group.
@@ -139,8 +162,24 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_member ollama.test_exo_group_clock \
   ollama.test_exo_group_authority ollama.test_exo_group_intents \
   ollama.test_exo_group_acquire ollama.test_exo_group_demand \
-  ollama.test_exo_group_renew ollama.test_exo_group_alarm
+  ollama.test_exo_group_renew ollama.test_exo_group_alarm \
+  ollama.test_exo_group_instance
 ```
+
+Actual EXO-type controls require that candidate's Python environment, not the
+gateway venv. From this repository, with `EXO_SOURCE` pointing at the qualified
+candidate (21a54c5 plus the recorded patch):
+
+```sh
+"$EXO_SOURCE/.venv/bin/python" -B qualification/run_exo_instance_types.py \
+  --exo-source "$EXO_SOURCE"
+```
+
+The runner checks selected source pins and uses a fresh private EXO root. Network,
+process launch and native compute imports are forbidden. Twelve controls exercise
+the actual tagged request, State aliases, unequal ranks, ring guards and local
+card round trip. Nine gateway controls exercise the same serialized fixture and
+negative bindings without installing EXO into the gateway environment.
 
 The real registry qualification uses Samcloud PR19's source, currently
 `9756b01`, and its test dependencies. Set `REGISTRY_SOURCE` to that checkout,

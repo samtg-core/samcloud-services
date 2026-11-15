@@ -1,0 +1,691 @@
+{
+  "provenance": "Actual EXO 21a54c5 + pinned qualification patch; CPU serialization only, not observed runtime readiness.",
+  "plan": {
+    "request_key": "codex-m1-qwen3-06b-73e3e38-v1",
+    "owner_id": "user:58",
+    "model_id": "mlx-community/Qwen3-0.6B-4bit",
+    "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+    "rank_manifest_sha256": "3d50b10277a681b04144ebd1773c3ccb6a70dc3b44ca00e224803ea792b4ff2f",
+    "members": [
+      {
+        "rank": "obelisk",
+        "resource_id": "obelisk-services/gpu-0",
+        "pipeline_rank": 2,
+        "layers": [
+          12,
+          28
+        ],
+        "memory_mb": 4096,
+        "ttl_seconds": 7200,
+        "max_total_s": 7200
+      },
+      {
+        "rank": "slice",
+        "resource_id": "claude-services-slice/gpu-0",
+        "pipeline_rank": 0,
+        "layers": [
+          0,
+          7
+        ],
+        "memory_mb": 4096,
+        "ttl_seconds": 7200,
+        "max_total_s": 7200
+      },
+      {
+        "rank": "wafer",
+        "resource_id": "wafer-services/gpu-metal",
+        "pipeline_rank": 1,
+        "layers": [
+          7,
+          12
+        ],
+        "memory_mb": 4096,
+        "ttl_seconds": 7200,
+        "max_total_s": 7200
+      }
+    ]
+  },
+  "request": {
+    "instance": {
+      "MlxRingInstance": {
+        "instance_id": "3491a8722cd28904380085110c27af43e36219574fe2b444ab284add0c093511",
+        "shard_assignments": {
+          "model_id": "mlx-community/Qwen3-0.6B-4bit",
+          "runner_to_shard": {
+            "b08fef622fd68c77b26181f76ca2fecb636f7f804291e1a8615585a9ecdbcfc7": {
+              "PipelineShardMetadata": {
+                "model_card": {
+                  "model_id": "mlx-community/Qwen3-0.6B-4bit",
+                  "storage_size": {
+                    "in_bytes": 335450584
+                  },
+                  "n_layers": 28,
+                  "hidden_size": 1024,
+                  "supports_tensor": false,
+                  "num_key_value_heads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "base_model": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoning_dialect": "none",
+                  "context_length": 40960,
+                  "uses_cfg": false,
+                  "trust_remote_code": false,
+                  "is_custom": false,
+                  "vision": null,
+                  "sampling_defaults": {
+                    "temperature": null,
+                    "top_p": null,
+                    "top_k": null,
+                    "min_p": null,
+                    "repetition_penalty": null,
+                    "presence_penalty": null,
+                    "frequency_penalty": null,
+                    "thinking": null,
+                    "non_thinking": null
+                  }
+                },
+                "device_rank": 0,
+                "world_size": 3,
+                "immediate_exception": false,
+                "should_timeout": null,
+                "start_layer": 0,
+                "end_layer": 7,
+                "n_layers": 28
+              }
+            },
+            "1e2ce1666d37f838c5e5735ad460c0f0beefcb9b3b0af1b0539f708beddc57b4": {
+              "PipelineShardMetadata": {
+                "model_card": {
+                  "model_id": "mlx-community/Qwen3-0.6B-4bit",
+                  "storage_size": {
+                    "in_bytes": 335450584
+                  },
+                  "n_layers": 28,
+                  "hidden_size": 1024,
+                  "supports_tensor": false,
+                  "num_key_value_heads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "base_model": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoning_dialect": "none",
+                  "context_length": 40960,
+                  "uses_cfg": false,
+                  "trust_remote_code": false,
+                  "is_custom": false,
+                  "vision": null,
+                  "sampling_defaults": {
+                    "temperature": null,
+                    "top_p": null,
+                    "top_k": null,
+                    "min_p": null,
+                    "repetition_penalty": null,
+                    "presence_penalty": null,
+                    "frequency_penalty": null,
+                    "thinking": null,
+                    "non_thinking": null
+                  }
+                },
+                "device_rank": 1,
+                "world_size": 3,
+                "immediate_exception": false,
+                "should_timeout": null,
+                "start_layer": 7,
+                "end_layer": 12,
+                "n_layers": 28
+              }
+            },
+            "eccf618fb89deb9b04ad67d8ba57777a5b15fa8ea0a7a4c4accb035e0c324466": {
+              "PipelineShardMetadata": {
+                "model_card": {
+                  "model_id": "mlx-community/Qwen3-0.6B-4bit",
+                  "storage_size": {
+                    "in_bytes": 335450584
+                  },
+                  "n_layers": 28,
+                  "hidden_size": 1024,
+                  "supports_tensor": false,
+                  "num_key_value_heads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "base_model": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoning_dialect": "none",
+                  "context_length": 40960,
+                  "uses_cfg": false,
+                  "trust_remote_code": false,
+                  "is_custom": false,
+                  "vision": null,
+                  "sampling_defaults": {
+                    "temperature": null,
+                    "top_p": null,
+                    "top_k": null,
+                    "min_p": null,
+                    "repetition_penalty": null,
+                    "presence_penalty": null,
+                    "frequency_penalty": null,
+                    "thinking": null,
+                    "non_thinking": null
+                  }
+                },
+                "device_rank": 2,
+                "world_size": 3,
+                "immediate_exception": false,
+                "should_timeout": null,
+                "start_layer": 12,
+                "end_layer": 28,
+                "n_layers": 28
+              }
+            }
+          },
+          "node_to_runner": {
+            "11111111111111111111111111111111": "b08fef622fd68c77b26181f76ca2fecb636f7f804291e1a8615585a9ecdbcfc7",
+            "22222222222222222222222222222222": "1e2ce1666d37f838c5e5735ad460c0f0beefcb9b3b0af1b0539f708beddc57b4",
+            "33333333333333333333333333333333": "eccf618fb89deb9b04ad67d8ba57777a5b15fa8ea0a7a4c4accb035e0c324466"
+          }
+        },
+        "hosts_by_node": {
+          "11111111111111111111111111111111": [
+            {
+              "ip": "192.168.50.11",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.12",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.13",
+              "port": 52518
+            }
+          ],
+          "22222222222222222222222222222222": [
+            {
+              "ip": "192.168.50.11",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.12",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.13",
+              "port": 52518
+            }
+          ],
+          "33333333333333333333333333333333": [
+            {
+              "ip": "192.168.50.11",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.12",
+              "port": 52518
+            },
+            {
+              "ip": "192.168.50.13",
+              "port": 52518
+            }
+          ]
+        },
+        "ephemeral_port": 52518
+      }
+    }
+  },
+  "state": {
+    "instances": {
+      "3491a8722cd28904380085110c27af43e36219574fe2b444ab284add0c093511": {
+        "MlxRingInstance": {
+          "instanceId": "3491a8722cd28904380085110c27af43e36219574fe2b444ab284add0c093511",
+          "shardAssignments": {
+            "modelId": "mlx-community/Qwen3-0.6B-4bit",
+            "runnerToShard": {
+              "b08fef622fd68c77b26181f76ca2fecb636f7f804291e1a8615585a9ecdbcfc7": {
+                "PipelineShardMetadata": {
+                  "modelCard": {
+                    "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                    "storageSize": {
+                      "inBytes": 335450584
+                    },
+                    "nLayers": 28,
+                    "hiddenSize": 1024,
+                    "supportsTensor": false,
+                    "numKeyValueHeads": 8,
+                    "tasks": [
+                      "TextGeneration"
+                    ],
+                    "components": null,
+                    "family": "qwen3",
+                    "quantization": "",
+                    "baseModel": "",
+                    "capabilities": [],
+                    "backends": [
+                      "MlxMetal"
+                    ],
+                    "reasoningDialect": "none",
+                    "contextLength": 40960,
+                    "usesCfg": false,
+                    "trustRemoteCode": false,
+                    "isCustom": false,
+                    "vision": null,
+                    "samplingDefaults": {
+                      "temperature": null,
+                      "topP": null,
+                      "topK": null,
+                      "minP": null,
+                      "repetitionPenalty": null,
+                      "presencePenalty": null,
+                      "frequencyPenalty": null,
+                      "thinking": null,
+                      "nonThinking": null
+                    }
+                  },
+                  "deviceRank": 0,
+                  "worldSize": 3,
+                  "immediateException": false,
+                  "shouldTimeout": null,
+                  "startLayer": 0,
+                  "endLayer": 7,
+                  "nLayers": 28
+                }
+              },
+              "1e2ce1666d37f838c5e5735ad460c0f0beefcb9b3b0af1b0539f708beddc57b4": {
+                "PipelineShardMetadata": {
+                  "modelCard": {
+                    "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                    "storageSize": {
+                      "inBytes": 335450584
+                    },
+                    "nLayers": 28,
+                    "hiddenSize": 1024,
+                    "supportsTensor": false,
+                    "numKeyValueHeads": 8,
+                    "tasks": [
+                      "TextGeneration"
+                    ],
+                    "components": null,
+                    "family": "qwen3",
+                    "quantization": "",
+                    "baseModel": "",
+                    "capabilities": [],
+                    "backends": [
+                      "MlxMetal"
+                    ],
+                    "reasoningDialect": "none",
+                    "contextLength": 40960,
+                    "usesCfg": false,
+                    "trustRemoteCode": false,
+                    "isCustom": false,
+                    "vision": null,
+                    "samplingDefaults": {
+                      "temperature": null,
+                      "topP": null,
+                      "topK": null,
+                      "minP": null,
+                      "repetitionPenalty": null,
+                      "presencePenalty": null,
+                      "frequencyPenalty": null,
+                      "thinking": null,
+                      "nonThinking": null
+                    }
+                  },
+                  "deviceRank": 1,
+                  "worldSize": 3,
+                  "immediateException": false,
+                  "shouldTimeout": null,
+                  "startLayer": 7,
+                  "endLayer": 12,
+                  "nLayers": 28
+                }
+              },
+              "eccf618fb89deb9b04ad67d8ba57777a5b15fa8ea0a7a4c4accb035e0c324466": {
+                "PipelineShardMetadata": {
+                  "modelCard": {
+                    "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                    "storageSize": {
+                      "inBytes": 335450584
+                    },
+                    "nLayers": 28,
+                    "hiddenSize": 1024,
+                    "supportsTensor": false,
+                    "numKeyValueHeads": 8,
+                    "tasks": [
+                      "TextGeneration"
+                    ],
+                    "components": null,
+                    "family": "qwen3",
+                    "quantization": "",
+                    "baseModel": "",
+                    "capabilities": [],
+                    "backends": [
+                      "MlxMetal"
+                    ],
+                    "reasoningDialect": "none",
+                    "contextLength": 40960,
+                    "usesCfg": false,
+                    "trustRemoteCode": false,
+                    "isCustom": false,
+                    "vision": null,
+                    "samplingDefaults": {
+                      "temperature": null,
+                      "topP": null,
+                      "topK": null,
+                      "minP": null,
+                      "repetitionPenalty": null,
+                      "presencePenalty": null,
+                      "frequencyPenalty": null,
+                      "thinking": null,
+                      "nonThinking": null
+                    }
+                  },
+                  "deviceRank": 2,
+                  "worldSize": 3,
+                  "immediateException": false,
+                  "shouldTimeout": null,
+                  "startLayer": 12,
+                  "endLayer": 28,
+                  "nLayers": 28
+                }
+              }
+            },
+            "nodeToRunner": {
+              "11111111111111111111111111111111": "b08fef622fd68c77b26181f76ca2fecb636f7f804291e1a8615585a9ecdbcfc7",
+              "22222222222222222222222222222222": "1e2ce1666d37f838c5e5735ad460c0f0beefcb9b3b0af1b0539f708beddc57b4",
+              "33333333333333333333333333333333": "eccf618fb89deb9b04ad67d8ba57777a5b15fa8ea0a7a4c4accb035e0c324466"
+            }
+          },
+          "hostsByNode": {
+            "11111111111111111111111111111111": [
+              {
+                "ip": "192.168.50.11",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.12",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.13",
+                "port": 52518
+              }
+            ],
+            "22222222222222222222222222222222": [
+              {
+                "ip": "192.168.50.11",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.12",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.13",
+                "port": 52518
+              }
+            ],
+            "33333333333333333333333333333333": [
+              {
+                "ip": "192.168.50.11",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.12",
+                "port": 52518
+              },
+              {
+                "ip": "192.168.50.13",
+                "port": 52518
+              }
+            ]
+          },
+          "ephemeralPort": 52518
+        }
+      }
+    },
+    "runners": {
+      "b08fef622fd68c77b26181f76ca2fecb636f7f804291e1a8615585a9ecdbcfc7": {
+        "RunnerReady": {
+          "prefillServerPort": null
+        }
+      },
+      "1e2ce1666d37f838c5e5735ad460c0f0beefcb9b3b0af1b0539f708beddc57b4": {
+        "RunnerReady": {
+          "prefillServerPort": null
+        }
+      },
+      "eccf618fb89deb9b04ad67d8ba57777a5b15fa8ea0a7a4c4accb035e0c324466": {
+        "RunnerReady": {
+          "prefillServerPort": null
+        }
+      }
+    },
+    "downloads": {
+      "11111111111111111111111111111111": [
+        {
+          "DownloadCompleted": {
+            "nodeId": "11111111111111111111111111111111",
+            "shardMetadata": {
+              "PipelineShardMetadata": {
+                "modelCard": {
+                  "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                  "storageSize": {
+                    "inBytes": 335450584
+                  },
+                  "nLayers": 28,
+                  "hiddenSize": 1024,
+                  "supportsTensor": false,
+                  "numKeyValueHeads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "baseModel": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoningDialect": "none",
+                  "contextLength": 40960,
+                  "usesCfg": false,
+                  "trustRemoteCode": false,
+                  "isCustom": false,
+                  "vision": null,
+                  "samplingDefaults": {
+                    "temperature": null,
+                    "topP": null,
+                    "topK": null,
+                    "minP": null,
+                    "repetitionPenalty": null,
+                    "presencePenalty": null,
+                    "frequencyPenalty": null,
+                    "thinking": null,
+                    "nonThinking": null
+                  }
+                },
+                "deviceRank": 0,
+                "worldSize": 3,
+                "immediateException": false,
+                "shouldTimeout": null,
+                "startLayer": 0,
+                "endLayer": 7,
+                "nLayers": 28
+              }
+            },
+            "modelDirectory": "/private/ranks/11111111111111111111111111111111",
+            "total": {
+              "inBytes": 335450584
+            },
+            "readOnly": true
+          }
+        }
+      ],
+      "22222222222222222222222222222222": [
+        {
+          "DownloadCompleted": {
+            "nodeId": "22222222222222222222222222222222",
+            "shardMetadata": {
+              "PipelineShardMetadata": {
+                "modelCard": {
+                  "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                  "storageSize": {
+                    "inBytes": 335450584
+                  },
+                  "nLayers": 28,
+                  "hiddenSize": 1024,
+                  "supportsTensor": false,
+                  "numKeyValueHeads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "baseModel": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoningDialect": "none",
+                  "contextLength": 40960,
+                  "usesCfg": false,
+                  "trustRemoteCode": false,
+                  "isCustom": false,
+                  "vision": null,
+                  "samplingDefaults": {
+                    "temperature": null,
+                    "topP": null,
+                    "topK": null,
+                    "minP": null,
+                    "repetitionPenalty": null,
+                    "presencePenalty": null,
+                    "frequencyPenalty": null,
+                    "thinking": null,
+                    "nonThinking": null
+                  }
+                },
+                "deviceRank": 1,
+                "worldSize": 3,
+                "immediateException": false,
+                "shouldTimeout": null,
+                "startLayer": 7,
+                "endLayer": 12,
+                "nLayers": 28
+              }
+            },
+            "modelDirectory": "/private/ranks/22222222222222222222222222222222",
+            "total": {
+              "inBytes": 335450584
+            },
+            "readOnly": true
+          }
+        }
+      ],
+      "33333333333333333333333333333333": [
+        {
+          "DownloadCompleted": {
+            "nodeId": "33333333333333333333333333333333",
+            "shardMetadata": {
+              "PipelineShardMetadata": {
+                "modelCard": {
+                  "modelId": "mlx-community/Qwen3-0.6B-4bit",
+                  "storageSize": {
+                    "inBytes": 335450584
+                  },
+                  "nLayers": 28,
+                  "hiddenSize": 1024,
+                  "supportsTensor": false,
+                  "numKeyValueHeads": 8,
+                  "tasks": [
+                    "TextGeneration"
+                  ],
+                  "components": null,
+                  "family": "qwen3",
+                  "quantization": "",
+                  "baseModel": "",
+                  "capabilities": [],
+                  "backends": [
+                    "MlxMetal"
+                  ],
+                  "reasoningDialect": "none",
+                  "contextLength": 40960,
+                  "usesCfg": false,
+                  "trustRemoteCode": false,
+                  "isCustom": false,
+                  "vision": null,
+                  "samplingDefaults": {
+                    "temperature": null,
+                    "topP": null,
+                    "topK": null,
+                    "minP": null,
+                    "repetitionPenalty": null,
+                    "presencePenalty": null,
+                    "frequencyPenalty": null,
+                    "thinking": null,
+                    "nonThinking": null
+                  }
+                },
+                "deviceRank": 2,
+                "worldSize": 3,
+                "immediateException": false,
+                "shouldTimeout": null,
+                "startLayer": 12,
+                "endLayer": 28,
+                "nLayers": 28
+              }
+            },
+            "modelDirectory": "/private/ranks/33333333333333333333333333333333",
+            "total": {
+              "inBytes": 335450584
+            },
+            "readOnly": true
+          }
+        }
+      ]
+    },
+    "tasks": {},
+    "lastSeen": {},
+    "topology": {
+      "nodes": [],
+      "connections": {}
+    },
+    "lastEventAppliedIdx": -1,
+    "nodeIdentities": {},
+    "nodeMemory": {},
+    "nodeDisk": {},
+    "nodeSystem": {},
+    "nodeNetwork": {},
+    "nodeThunderbolt": {},
+    "nodeThunderboltBridge": {},
+    "nodeRdmaCtl": {},
+    "nodeBackends": {},
+    "thunderboltBridgeCycles": [],
+    "instanceLinks": {},
+    "prefillServerPorts": {},
+    "customModelCards": {}
+  },
+  "runtime_sha256": "0ec88eda74b9f724a8436a9bb1200a9ac89f1790b9e0f6d8944e3323bf7bf1f0"
+}
