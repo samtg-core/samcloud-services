@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import httpx
@@ -45,6 +46,21 @@ class CoordinatorPlane:
         except Exception:
             # No credentials, remote response body or arbitrary exception text.
             raise PlaneUnavailable('coordinator metadata unavailable') from None
+
+    @asynccontextmanager
+    async def events(self, cursor):
+        """The owning service drives one subscription; no reconnect or timer."""
+        headers = dict(await self.verify_owner())
+        headers['Accept'] = 'text/event-stream'
+        if cursor is not None:
+            if not isinstance(cursor, str) or not cursor.isascii() or not cursor.isdecimal():
+                raise PlaneUnavailable('coordinator event cursor unavailable')
+            headers['Last-Event-ID'] = cursor
+        async with self._client.stream('GET', '/api/v1/events', headers=headers) as response:
+            if (response.status_code != 200 or
+                    response.headers.get('content-type', '').split(';')[0] != 'text/event-stream'):
+                raise PlaneUnavailable('coordinator event stream unavailable')
+            yield response
 
     @staticmethod
     def _group(group_id):

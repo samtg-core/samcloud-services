@@ -267,6 +267,17 @@ class EXOInstallation:
             return 0
         return sum(provider.owns_group() for provider in self.providers.values())
 
+    async def consume_events_once(self):
+        """One explicit subscription shared by this principal's model actors."""
+        from .events import RegistryEventFeed
+        if self.closed:
+            raise RuntimeError('EXO installation is closed')
+        feed = getattr(self, '_event_feed', None)
+        if feed is None:
+            actors = tuple(provider.actor for provider in self.providers.values())
+            feed = self._event_feed = RegistryEventFeed.coordinator(actors[0].plane, actors)
+        return await feed.consume_once()
+
     async def close(self):
         if self.closed:
             return

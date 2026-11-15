@@ -354,6 +354,14 @@ class HostRankRuntime:
         self.inventory_changed()
         return result
 
+    async def consume_events_once(self):
+        """Explicit service-owned subscription, including this runtime's gates."""
+        from .events import RegistryEventFeed
+        feed = getattr(self, '_event_feed', None)
+        if feed is None:
+            feed = self._event_feed = RegistryEventFeed.host(self)
+        return await feed.consume_once()
+
     async def on_event(self, event):
         result = await self.adapter.on_event(event)
         self.inventory_changed()

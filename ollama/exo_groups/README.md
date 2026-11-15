@@ -354,6 +354,32 @@ EVFILT_PROC/NOTE_EXIT drives child completion, including exit before watch
 registration; cleanup can be revisited on existing inventory events. There is no
 new poller/SSE subscription or default deadline in this owner.
 
+`events.py` supplies the explicit service composition for those callbacks.
+The service awaits `EXOInstallation.consume_events_once()` for all model actors
+sharing one exact `CoordinatorPlane`, or
+`HostRankRuntime.consume_events_once()` for the host's existing principal. It
+owns one subscription per configured principal reader. The host entrypoint
+updates the runtime's event epoch as well as its authority adapter; calling
+the adapter's older optional consumer cannot bypass a registered feed.
+
+There is no automatic startup, reconnect, extra watchdog, timer or inference
+retry. Stream loss/cancellation withdraws admission while retaining the same
+child, metadata intent and explicit expiry. An explicit reconnect retains the
+cursor and first reconciles exact state. Core's IDs are monotonic per process,
+so a freshly reconciled connection can accept a lower epoch after a registry
+restart; a cursor rewind within one connection refuses. Cursor acknowledgement
+follows successful callbacks. Unrelated visible activity also requests fresh
+authority reads, since it can suppress server keepalives. Invalid UTF-8,
+duplicate/nonfinite JSON, mismatched types and oversized frames refuse without
+logging credentials or response contents.
+
+The service owner must await/report this coroutine's failure and decide any
+explicit reconnection. Binding the provider alone still does not open a feed,
+start ranks, create leases or deploy this profile. CPU controls include the real
+host runtime and gateway installation callbacks; an isolated registry check uses
+the actual SSE route, token validator, serializer, inference journal and fence.
+Its stream transport is finite, not a production socket or native model proof.
+
 `QueueRuntime.bind_exo_rank` explicitly installs the host role with its own
 verified service identity, empty manager and no running/uncertain local call.
 The existing inference journal records the exact member/generation/boot/launch

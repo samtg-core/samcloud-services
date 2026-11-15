@@ -1,6 +1,7 @@
 """Bounded JSON metadata transport; no provider compute or retry policy."""
 
 import json
+import math
 
 
 async def bounded_json(client, method, path, headers, *, payload=None):
@@ -32,7 +33,14 @@ def decode_json(raw):
     def nonfinite(_value):
         raise ValueError('nonfinite plane field')
 
-    value = json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite)
+    def finite_float(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError('nonfinite plane field')
+        return value
+
+    value = json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite,
+                       parse_float=finite_float)
     if not isinstance(value, dict):
         raise ValueError('plane metadata is not an object')
     return value

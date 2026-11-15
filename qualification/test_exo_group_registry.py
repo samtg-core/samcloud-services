@@ -6,6 +6,7 @@ workspace credentials or contacts the production plane; leases are test rows.
 """
 
 import asyncio
+import json
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +20,7 @@ from ollama.exo_groups.acquire import GroupAcquisition
 from ollama.exo_groups.authority import AuthorityReadUnavailable, GroupAuthorityReader
 from ollama.exo_groups.intents import GroupIntents
 from ollama.exo_groups.demand import AcquisitionDemand
+from ollama.exo_groups.events import EventStreamUnavailable, RegistryEventFeed
 from ollama.exo_groups.plane import CoordinatorPlane
 from ollama.exo_groups.renew import GroupRenewals
 from ollama.exo_groups.plan import GroupPlan, bind_admitted_group
@@ -26,6 +28,90 @@ from ollama.inference_arbiter import Arbiter
 from ollama.inference_supervisor import Supervisor
 
 pytest_plugins = ["test_registry"]
+
+
+def test_real_registry_sse_serializer_and_auth_drive_fence_without_settlement(client, admitted, tmp_path):
+    """Actual route/generator/serializer, finite transport; no production socket.
+
+    ASGITransport buffers an infinite SSE body, so this transport invokes that
+    one real route with its actual token validator and closes the generator
+    after one emitted frame. All JSON registry calls still use the real ASGI app.
+    """
+    import main
+    from events import bus
+    from starlette.requests import Request
+
+    async def run():
+        plan, group, _ = admitted
+        journal = Arbiter(tmp_path / 'sse-inference.sqlite')
+        intents = GroupIntents(journal)
+        grant = journal.submit('caller', 'one', 'claude-services-slice/gpu-0', plan.model_id)
+        call = journal.enqueue(grant['id'], 'caller', 'one', {'operation': 'chat'})
+        intents.prepare(call['id'], plan, placement_manifest)
+        intents.record_group(plan.owner_id, plan.request_key, group)
+        seen, phases = [], []
+        actor = None
+
+        class Frames(httpx.AsyncByteStream):
+            def __init__(self, iterator):
+                self.iterator = iterator
+
+            async def __aiter__(self):
+                try:
+                    frame = await self.iterator.__anext__()
+                    seen.append(frame)
+                    yield frame.encode() if isinstance(frame, str) else frame
+                    await actor.wait()
+                    phases.append(actor.report.phase)
+                finally:
+                    await self.iterator.aclose()
+
+        class RegistrySSE(ObservedRegistry):
+            async def handle_async_request(self, request):
+                if request.url.path != '/api/v1/events':
+                    return await super().handle_async_request(request)
+                self.requests.append((request.method, request.url.path))
+                auth = main.get_auth(request.headers['Authorization'])
+                scope = {'type': 'http', 'method': 'GET', 'path': '/api/v1/events',
+                         'headers': [(name.lower(), value) for name, value in request.headers.raw],
+                         'query_string': b''}
+                response = await main.event_stream(Request(scope), for_conversation=None, auth=auth)
+                return httpx.Response(response.status_code, headers=dict(response.headers),
+                                      stream=Frames(response.body_iterator))
+
+        transport = RegistrySSE(client)
+        plane = CoordinatorPlane(plan.owner_id, lambda: client._headers['Authorization'], transport=transport)
+        def factory(plan, launches):
+            reader = GroupAuthorityReader(plan, launches, lambda: client._headers['Authorization'],
+                                          transport=ObservedRegistry(client))
+            return reader
+        actor = GroupAcquisition(intents, plan, placement_manifest, plane, factory,
+                                 verify_staging=fixtures.staged_fixture)
+        feed = RegistryEventFeed.coordinator(plane, (actor,))
+        feed.cursor = str(bus._seq)
+        command(client, group, 'fence', reason='isolated stream fence')
+        try:
+            with pytest.raises(EventStreamUnavailable):
+                await feed.consume_once()
+            await actor.wait()
+            assert len(seen) == 1 and 'event: lease_group.fenced\n' in seen[0]
+            payload = json.loads(next(line[6:] for line in seen[0].splitlines() if line.startswith('data: ')))
+            assert payload['data']['group_id'] == group['id'] and payload['data']['generation'] == 2
+            assert phases == ['fenced']
+            assert feed.cursor == seen[0].splitlines()[0].removeprefix('id: ')
+            assert not actor.may_start_ranks() and not actor._events_ready
+            assert journal.execution(call['id'], 'caller')['state'] == 'queued'
+            assert all(method == 'GET' for method, _ in transport.requests)
+            assert_still_charged()
+        finally:
+            await actor.close()
+            journal.close()
+
+    # Same actual placement/manifest bytes as the admitted group fixture.
+    f = fixtures.GroupBindingControls()
+    f.setUp()
+    placement_manifest = f.manifest
+    asyncio.run(run())
 
 
 @pytest.fixture

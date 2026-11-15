@@ -224,7 +224,7 @@ class HostAuthorityAdapter:
         Every stream frame is a reconciliation opportunity, including unrelated
         visible activity which can suppress the server's keepalive comments.
         """
-        if self._stream_running or self._closed:
+        if self._stream_running or self._closed or getattr(self.reader, '_event_feed_owner', None) is not None:
             raise ObservationUnknown("one existing event subscription only")
         self._stream_running = True
         self.invalidate("opening event stream")
