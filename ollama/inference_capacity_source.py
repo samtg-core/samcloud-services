@@ -27,6 +27,7 @@ class ManagerCapacitySource:
         self.last_model = {}
         self.observed_residency = {}
         self.epoch = 0
+        self.external = {}
         self.lock = asyncio.Lock()
         runtime.capacity.guard = self.guard
         if hasattr(runtime,'queue'):
@@ -47,6 +48,14 @@ class ManagerCapacitySource:
         """
         key=(resource,model)
         if self.paused:
+            return None
+        provider = self.external.get(model)
+        if provider is not None:
+            return provider.permitted(resource)
+        boundaries = [provider.local_permission() for provider in self.external.values()]
+        if any(value is False for value in boundaries):
+            return False
+        if any(value is None for value in boundaries):
             return None
         state = self.last_model.get(key,{}).get('state')
         if state == 'unavailable':
@@ -81,6 +90,8 @@ class ManagerCapacitySource:
 
     def pause(self):
         self.paused = True
+        for provider in self.external.values():
+            provider.invalidate('source_paused')
         self.invalidate('source_paused')
 
     def invalidate(self,reason='observing'):
@@ -91,6 +102,8 @@ class ManagerCapacitySource:
 
     def resume(self):
         self.paused = False  # permission stays unknown until a new observation
+        for provider in self.external.values():
+            provider.wake()
 
     async def refresh(self,physical):
         if self.paused:
@@ -128,6 +141,15 @@ class ManagerCapacitySource:
                 publish('unavailable' if self.permission is False else 'unknown',
                              'work_mode' if self.permission is False else 'work_permission_unknown')
                 continue
+            provider = self.external.get(model)
+            if provider is not None:
+                provider.observe_manager()
+                provider.publish()
+                continue
+            boundaries = [provider.local_permission() for provider in self.external.values()]
+            if any(value is None for value in boundaries) and not any(value is False for value in boundaries):
+                publish('unknown', 'exo_group_ownership_unconfirmed')
+                continue
             mm = manager.models.get(model)
             lease = getattr(mm,'lease_id',None)
             try:
@@ -154,6 +176,11 @@ class ManagerCapacitySource:
                         if ended is not None:
                             handoff.begin()
                             return
+                if any(value is False for value in boundaries):
+                    # Still run the existing foreign-queue handoff above: a
+                    # queued group member must let local residency drain.
+                    publish('unavailable', 'exo_group_ownership')
+                    continue
                 if mm is None:
                     from .inference_arbiter import Conflict
                     store=self.binding.actor.store

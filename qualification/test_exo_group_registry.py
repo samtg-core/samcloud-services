@@ -611,3 +611,79 @@ def test_explicit_member_ceiling_arms_end_notification_without_renewal(client, p
             await actor.close()
             journal.close()
     asyncio.run(run())
+
+
+def test_gateway_group_capacity_uses_three_host_members_without_fourth_slice_lease(
+        client, placement, tmp_path):
+    """Real registry, GatewayQueue/router and manager source; no native backend."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from fastapi import FastAPI
+    from ollama import server
+    from ollama.inference_bootstrap import QueueRuntime, QueueSettings
+
+    plan, manifest = placement
+    resource = 'claude-services-slice/gpu-0'
+    async def run():
+        manager = SimpleNamespace(models={}, residency_renewal=None,
+            sc=SimpleNamespace(request_lease=Mock(side_effect=AssertionError('fourth lease'))),
+            ollama=SimpleNamespace(memory_estimate_mb=Mock(side_effect=AssertionError('local EXO path'))),
+            _collect_stats=lambda: {'memory_available_mb': 10000, 'memory_device_inuse_mb': 0})
+        service = SimpleNamespace(app=FastAPI(), mgr=manager, ChatRequest=server.ChatRequest,
+            config=SimpleNamespace(WHISPER_MAX_UPLOAD_MB=1, SC_RESOURCE_ID=resource,
+                                   SC_SERVICE_ID='fixture-service'))
+        runtime = QueueRuntime.install(service, QueueSettings(tmp_path / 'gateway.sqlite',
+            {plan.model_id: resource}), registry_owner=plan.owner_id)
+        runtime.bind_capacity_source(work_permitted=True)
+        actor = acquisition_for(client, plan, manifest, runtime.queue.supervisor.journal)
+        installation = runtime.bind_exo({plan.model_id: actor})
+        @service.app.middleware('http')
+        async def identify(request, call_next):
+            request.state.caller = {'username': 'caller'}
+            return await call_next(request)
+        async def drain():
+            async with asyncio.timeout(3):
+                while tasks := [task for task in runtime.queue.supervisor.preparations if not task.done()]:
+                    await asyncio.gather(*tasks)
+        try:
+            actor.events_reconciled()
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=service.app),
+                                        base_url='http://fixture') as http:
+                grant = await http.post('/v1/inference/grants', json={
+                    'key': 'one', 'model': plan.model_id, 'lifetime': 'execution'})
+                assert grant.status_code == 202
+                call = await http.post('/v1/inference/grants/' + grant.json()['id'] + '/executions',
+                    json={'key': 'one', 'request': {'model': plan.model_id,
+                        'messages': [{'role': 'user', 'content': 'hello'}]}})
+                assert call.status_code == 202
+            await drain()
+            assert actor.report.phase == 'admitted'
+            saved = actor.intents.snapshot(plan.owner_id, plan.request_key)
+            command(client, {'id': saved['group_id']}, 'serving',
+                evidence_ref='test:injected-ready', evidence_sha256='c' * 64)
+            assert deliver_events(client, actor)
+            await drain()
+            assert actor.report.phase == 'lease_serving'
+            # Serving authority is necessary, never enough without native state.
+            assert runtime.queue.supervisor.journal.execution(call.json()['id'], 'caller')['state'] == 'queued'
+            assert runtime.capacity_source.permitted_model(resource, plan.model_id) is None
+            assert runtime.queue.supervisor.pump(resource) is None
+            rows = db.query('SELECT * FROM leases')
+            assert len(rows) == 3
+            assert {row['resource_id'] for row in rows} == {m.resource_id for m in plan.members}
+            assert all(row['exclusive'] == 1 and row['status'] == 'active' for row in rows)
+            manager.sc.request_lease.assert_not_called()
+            manager.ollama.memory_estimate_mb.assert_not_called()
+            assert manager.models == {}
+            assert manager.initial_reservations.snapshot(plan.model_id) is None
+            assert not (await runtime.quiesce())['drained']
+        finally:
+            runtime.capacity_source.pause()
+            await drain()
+            for provider in installation.providers.values():
+                provider._closed = True
+            await actor.close()  # Fixture cleanup only, not production settlement.
+            await drain()
+            runtime.residency_actor.close()
+            runtime.queue.supervisor.close()
+    asyncio.run(run())

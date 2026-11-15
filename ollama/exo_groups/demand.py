@@ -16,6 +16,7 @@ class AcquisitionDemand:
     def __init__(self, supervisor, actors):
         self.supervisor = supervisor
         self.actors = dict(actors)
+        self.paused = False
         if not self.actors or supervisor.prepare_demand is not None:
             raise ValueError('demand preparation already installed')
         for model, actor in self.actors.items():
@@ -29,6 +30,8 @@ class AcquisitionDemand:
         supervisor.prepare_demand = self.prepare
 
     def prepare(self, resource):
+        if self.paused:
+            return
         journal = self.supervisor.journal
         rows = journal.db.execute('''SELECT x.id,g.model FROM executions x
             JOIN grants g ON g.id=x.grant_id

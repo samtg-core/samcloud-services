@@ -85,6 +85,7 @@ class GatewayQueue:
         """models is trusted exact-name -> resource configuration, never a client field."""
         self.service = service
         self.models = dict(models)
+        self.providers = {}
         self.held_claims = {}
         self.input_handoff = asyncio.Lock()
         self.inputs = InferenceInputs(Path(path).parent/'inputs',
@@ -106,9 +107,21 @@ class GatewayQueue:
     def router(self):
         return build_router(self.supervisor, self.resolve, self.validate_call)
 
+    def bind_provider(self, model, provider):
+        """Trusted startup only; every native/compatibility route still queues."""
+        if (model not in self.models or model in self.providers
+                or provider.actor.plan.model_id != model
+                or provider.actor.intents.journal is not self.supervisor.journal
+                or self.supervisor.workers):
+            raise ValueError('fresh exact queued provider binding required')
+        self.providers[model] = provider
+
     async def execute(self, grant, call):
         if call.get('release_after'):
             self.supervisor.journal.request_release(grant['id'], grant['owner'])
+        provider = self.providers.get(grant['model'])
+        if provider is not None:
+            return await provider.execute(grant, call)
         if call['operation']=='transcription':
             return await self.execute_transcription(grant,call['body'])
         if call['operation'] in ('model_load', 'model_unload'):

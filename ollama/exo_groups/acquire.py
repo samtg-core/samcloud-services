@@ -8,6 +8,7 @@ loads a model, starts a rank, submits inference or releases physical ownership.
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +48,8 @@ class GroupAcquisition:
         self.plane, self.authority_factory = plane, authority_factory
         self.notify, self.wall_clock = notify, wall_clock
         self.authority = None
+        self.group_snapshot = None
+        self.ownership_uncertain = False
         self.report = AcquisitionReport('unknown', 'event_source_unconfirmed')
         self._task = None
         self._epoch = 0
@@ -101,6 +104,7 @@ class GroupAcquisition:
         self.wake()
 
     def events_lost(self):
+        self.ownership_uncertain = True
         self._events_ready = False
         self._epoch += 1
         self._invalidate()
@@ -162,6 +166,7 @@ class GroupAcquisition:
                 self._current(epoch)
                 self._publish(report)
             except (Exception, asyncio.CancelledError) as error:
+                self.ownership_uncertain = True
                 self._invalidate()
                 self._disarm_renewal()
                 self._publish(AcquisitionReport('unknown', 'reconciliation_required', self._known_group()))
@@ -185,6 +190,7 @@ class GroupAcquisition:
             request = self.intents.begin_create(self.plan.owner_id, self.plan.request_key)
             if request is None:
                 return AcquisitionReport('idle', 'no_queued_demand')
+            self.ownership_uncertain = True
             group = await self.plane.create(request)
             # Always persist a returned ownership identity, even if the event
             # feed was lost or the actor closed while this HTTP operation ran.
@@ -193,6 +199,8 @@ class GroupAcquisition:
             group = await self.plane.group(saved['group_id'])
             self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
         self._current(epoch)
+        self.group_snapshot = copy.deepcopy(group)
+        self.ownership_uncertain = False
         group_id = saved['group_id']
         if (group.get('phase') not in ('pending', 'acquiring', 'admitted', 'serving',
                 'releasing', 'released', 'uncertain')
@@ -205,9 +213,12 @@ class GroupAcquisition:
             self._disarm_renewal()
             return AcquisitionReport('draining', 'group_not_available', group_id, group['phase'])
         if group['phase'] in ('pending', 'acquiring'):
+            self.ownership_uncertain = True
             group = await self.plane.advance(group_id, saved['generation'])
             self.intents.record_group(self.plan.owner_id, self.plan.request_key, group)
             self._current(epoch)
+            self.group_snapshot = copy.deepcopy(group)
+            self.ownership_uncertain = False
         if self.renewals is not None:
             self.renewal_report = await self.renewals.maintain(group,
                 generation=saved['generation'], current=lambda: self._current(epoch))
@@ -227,6 +238,8 @@ class GroupAcquisition:
             self._current(epoch)
         fresh = await self.plane.group(group_id)
         self._current(epoch)
+        self.group_snapshot = copy.deepcopy(fresh)
+        self.ownership_uncertain = False
         launches = bind_admitted_group(self.plan, fresh, leases,
             expected_generation=saved['generation'], now=self.wall_clock())
         self.intents.bind_launches(self.plan.owner_id, self.plan.request_key, launches)

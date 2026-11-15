@@ -168,19 +168,51 @@ binaries are not included. Strict typing and Ruff pass, but full repository
 pytest/format/native gates remain unmet, so EXO's required pre-commit checks have
 not been waived. This is not an installation packet or distributed acceptance.
 
+## Explicit queue and capacity integration
+
+`QueueRuntime.bind_exo(actors)` is an explicit trusted-startup operation, after
+binding the manager capacity source and before maintenance/serving. It registers
+exact model actors in `GatewayQueue`, installs demand preparation on that same
+supervisor and uses the same journal, model-specific admission guard and capacity
+publication revisions. Native and compatibility routes still enqueue; a registered
+EXO model bypasses the local model loader and initial-reservation path. No extra
+physical Slice lease or public inference route is created.
+
+The backend binds only after the actual group ID and frozen launch identities
+are known. Serving authority alone never publishes EXO capacity: the exact private
+runtime/idle-instance checks must also pass, local manager inventory must be empty,
+and no group-linked execution may remain running or uncertain. Dispatch invalidates
+the scheduling observation; the executor rechecks all prerequisites before its
+once-only POST. A terminal result triggers one event-driven readiness refresh.
+Transport loss leaves the execution uncertain and blocks the next call.
+
+Local models remain usable while a fresh group observation confirms Slice has not
+been requested (for example while Obelisk is queued first). A create/advance with an
+unknown outcome blocks local dispatch until reconciled. A confirmed queued/owned
+Slice member withdraws local capacity while retaining the existing foreign-queue
+residency handoff, so it can drain rather than deadlock. Inventory changes recheck
+native readiness through the existing source; no new polling loop is installed.
+
+Quiescence pauses new acquisition demand and reports outstanding group ownership
+as undrained, even with no active inference. Internal local-residency handoff may
+drain only local manager work; it does not declare the remote group released.
+`close_exo()` drains metadata operations, then refuses over any unconfirmed group
+ownership. Cleanup and exact settlement must be observed separately. Runtime close
+cannot close the journal before this provider lifecycle ends. Closing never serves
+as cleanup proof or releases a physical lease.
+
 ## Integration still required
 
-This component is **not enabled by startup and is not a complete EXO provider**.
-The actor can acquire metadata leases when explicitly installed; nothing in this
-PR has been installed on a host. It does not launch ranks or load a model. The
-executor is exercised through the real supervisor with an injected private HTTP
-runtime; it is not wired into GatewayQueue or production startup. Remaining work:
+This component is **not enabled by default startup and is not a complete EXO
+provider**. Nothing in this PR has been installed on a host. It does not yet launch
+ranks or load a model. Tests inject plane/private-runtime/host effects; the actual
+registry qualification uses its isolated HTTP/SQLite implementation, not the fleet.
+Remaining work:
 
-1. Bind the actor/hook to startup's exact configuration, the existing event feed
-   and shutdown lifecycle after the rollout gates. Wire the implemented instance/
-   executor into GatewayQueue, and verify rank staging before acquisition.
-2. Publish group-covered capacity alongside local-model capacity. Slice's group
-   lease must not be mistaken for spare local memory or trigger a second lease.
+1. Bind exact deployed configuration, staging verification, the existing plane
+   event feed and observed host cleanup into startup/shutdown after rollout gates.
+2. Implement once-only private-instance/rank startup and runtime/file receipt
+   verification before binding the prepared backend or marking the group serving.
 3. Wire the prepared instance contract to the pinned runtime's private namespace,
    authenticated API and host/file receipts. EXO's chat API selects by model, not
    a caller-supplied instance ID; check exact state before dispatch and persist
@@ -210,7 +242,8 @@ python -B -m unittest -v ollama.test_exo_group_plan \
   ollama.test_exo_group_acquire ollama.test_exo_group_demand \
   ollama.test_exo_group_renew ollama.test_exo_group_alarm \
   ollama.test_exo_group_instance ollama.test_exo_group_calls \
-  ollama.test_exo_group_private ollama.test_exo_group_backend
+  ollama.test_exo_group_private ollama.test_exo_group_backend \
+  ollama.test_exo_group_install
 ```
 
 Actual EXO-type controls require that candidate's Python environment, not the

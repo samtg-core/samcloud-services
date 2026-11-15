@@ -97,6 +97,17 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.capacity.permitted('gpu'))
         self.assertEqual(self.source.last['gpu']['reason'],'registry_capacity')
 
+    async def test_queued_group_member_still_triggers_existing_local_residency_handoff(self):
+        from unittest.mock import Mock
+        self.resident()
+        self.source.external['group'] = SimpleNamespace(local_permission=lambda: False)
+        handoff = SimpleNamespace(initial=SimpleNamespace(service='service'),
+            _foreign=Mock(return_value={'id': 'queued-group-member'}), begin=Mock())
+        self.runtime.shared_resource = handoff
+        await self.source.refresh(self.physical)
+        handoff.begin.assert_called_once_with()
+        self.assertIs(self.source.permitted_model('gpu', 'qwen'), False)
+
     async def test_smaller_vision_can_fit_without_the_large_text_estimate_fitting(self):
         vision='mlx-community/Qwen2.5-VL-7B-Instruct-4bit'
         self.runtime.settings=QueueSettings(Path(self.tmp.name)/'queue.sqlite',{'qwen':'gpu',vision:'gpu'})

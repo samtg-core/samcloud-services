@@ -396,6 +396,16 @@ class QueueRuntime:
                 await source.refresh(await source_call(self.manager._collect_stats))
         self.queue.supervisor.on_finished = completed
 
+    def bind_exo(self, actors):
+        """Explicit trusted provider binding, before serving or maintenance."""
+        from .exo_groups.install import EXOInstallation
+        return EXOInstallation(self, actors)
+
+    async def close_exo(self):
+        installation = getattr(self, 'exo', None)
+        if installation is not None:
+            await installation.close()
+
     async def quiesce(self, *, _resource_handoff=False):
         """Drain known workers with no age deadline; report unresolved ownership.
 
@@ -406,6 +416,9 @@ class QueueRuntime:
         """
         if not _resource_handoff:
             self._external_quiesce = True
+            installation = getattr(self, 'exo', None)
+            if installation is not None:
+                installation.demand.paused = True
         self.capacity.pause()
         handoff = getattr(self, 'shared_resource', None)
         if (not _resource_handoff and handoff is not None and handoff.task is not None
@@ -435,17 +448,28 @@ class QueueRuntime:
             manager_claims = sum(max(0,mm.in_flight) for mm in self.manager.models.values())
         handoff_pending = (not _resource_handoff and handoff is not None and
                            handoff.snapshot()['phase'] != 'idle')
-        return {'drained':not (counts.get('running', 0) or counts.get('uncertain', 0)
-                              or claims or manager_claims or handoff_pending),
+        installation = getattr(self, 'exo', None)
+        groups = installation.owned() if installation is not None else 0
+        result = {'drained':not (counts.get('running', 0) or counts.get('uncertain', 0)
+                              or claims or manager_claims or handoff_pending
+                              or groups and not _resource_handoff),
                 'running':counts.get('running', 0), 'uncertain':counts.get('uncertain', 0),
                 'queued':counts.get('queued', 0), 'held_claims':claims,
                 'manager_claims':manager_claims}
+        if installation is not None:
+            result['groups_owned'] = groups
+        return result
 
     def resume(self):
         handoff = getattr(self, 'shared_resource', None)
         if handoff is not None and handoff.snapshot()['phase'] != 'idle':
             raise RuntimeError('Physical handoff requires reconciliation before resume')
         self._external_quiesce = False
+        installation = getattr(self, 'exo', None)
+        if installation is not None:
+            if installation.closed:
+                raise RuntimeError('EXO provider closed; fresh runtime required')
+            installation.demand.paused = False
         binding = getattr(self.manager,'residency_renewal',None)
         if binding is not None:
             binding.resume()
@@ -455,6 +479,9 @@ class QueueRuntime:
 
     def close(self):
         """Only after quiescence and manager cleanup, never on uncertain work."""
+        installation = getattr(self, 'exo', None)
+        if installation is not None and not installation.closed:
+            raise RuntimeError('EXO provider must drain after observed group settlement before close')
         handoff = getattr(self, 'shared_resource', None)
         if handoff is not None and handoff.task is not None and not handoff.task.done():
             raise RuntimeError('Owned physical handoff must finish before closing its journal')
