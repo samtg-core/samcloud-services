@@ -993,7 +993,7 @@ and the admitted distributed model remain separate deployment evidence.
 
 ## Coordinator liveness during long file audits
 
-Registry keepalives and unrelated events coalesce into an active coordinator
+Registry keepalives, utilisation-only `resource.stats`, and unrelated events coalesce into an active coordinator
 reconciliation. They do not change its observation epoch: the three-host file
 audit can outlast several keepalives. When no reconciliation is active they
 still request a fresh read. Exact resource/lease changes, new demand and event

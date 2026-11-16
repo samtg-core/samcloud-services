@@ -124,6 +124,10 @@ class GroupAcquisition:
                 or not kind.startswith(('resource.', 'lease.'))
                 or data.get('resource_id') not in resources):
             return False
+        if kind == 'resource.stats':
+            # Utilisation telemetry is not an ownership/capacity mutation.
+            # The feed coalesces it as liveness, like a keepalive.
+            return False
         # Other holders on a required host can unblock our ordinary queued
         # member, so these hints are relevant before our lease id is known too.
         self.wake()

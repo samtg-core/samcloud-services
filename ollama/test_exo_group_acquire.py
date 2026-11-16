@@ -234,6 +234,9 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
             await feed._heartbeat()
             await feed._event({'type': 'resource.changed',
                 'data': {'resource_id': 'unrelated/gpu-0'}})
+            await feed._event({'type': 'resource.stats',
+                'data': {'resource_id': self.plan.members[0].resource_id,
+                         'memory_pct': 20, 'compute_pct': 0, 'health': 'green'}})
         try:
             self.assertEqual(self.actor._epoch, epoch)
             self.assertFalse(self.saved()['create_started'])
