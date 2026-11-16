@@ -84,8 +84,11 @@ class DeploymentControls(unittest.IsolatedAsyncioTestCase):
         service = SimpleNamespace(app=FastAPI(), mgr=self.manager, ChatRequest=server.ChatRequest,
             config=SimpleNamespace(WHISPER_MAX_UPLOAD_MB=1, SC_RESOURCE_ID=member.resource_id,
                                    SC_SERVICE_ID='host-fixture'))
+        models = {'local': member.resource_id}
+        if getattr(self, 'include_group_model', False):
+            models[self.plan.model_id] = member.resource_id
         self.runtime = QueueRuntime.install(service, QueueSettings(self.root / 'host.sqlite',
-            {'local': member.resource_id}, reservation_mb={'local': 100}), registry_owner='user:9999')
+            models, reservation_mb={model: 100 for model in models}), registry_owner='user:9999')
         self.runtime.bind_capacity_source(work_permitted=False)
         self.owner = None
         self.spawner = Mock(side_effect=AssertionError('native child forbidden in deployment controls'))
@@ -147,6 +150,25 @@ class DeploymentControls(unittest.IsolatedAsyncioTestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 HostDeployment(self.plan, self.files, **(self.options | values))
         self.assertFalse(list(self.state_base.iterdir()))
+
+    async def test_missing_or_redirected_private_state_is_rejected_during_preflight(self):
+        self.state_base.rmdir()
+        with self.assertRaises(FileNotFoundError):
+            await self.config.observe(self.config.compile(self.binding))
+        self.state_base.symlink_to(self.root, target_is_directory=True)
+        try:
+            with self.assertRaises(ValueError):
+                await self.config.observe(self.config.compile(self.binding))
+        finally:
+            self.state_base.unlink()
+            self.state_base.mkdir(mode=0o700)
+        self.state_base.chmod(0o500)
+        try:
+            with self.assertRaises(ValueError):
+                await self.config.observe(self.config.compile(self.binding))
+        finally:
+            self.state_base.chmod(0o700)
+        self.assertFalse(self.transport_observations)
 
     async def test_real_sealed_files_are_rechecked_and_hash_cache_is_not_permission(self):
         compiled = self.config.compile(self.binding)

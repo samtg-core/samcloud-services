@@ -50,6 +50,7 @@ class EXOService:
             self.roles['host'] = host
         self.tasks = {}
         self.commands = []
+        self.host_clients = []
         self.failures = {}
         self.started = self.closed = self.closing = False
         self.draining = False
@@ -94,6 +95,14 @@ class EXOService:
                 or commands.actor.task_factory != self.runtime.queue.supervisor.prepare):
             raise ValueError('host commands must belong to this installed queue coordinator')
         self.commands.append(commands)
+
+    def own_host_client(self, client):
+        from .host_http import HostControlClient
+        if (not isinstance(client, HostControlClient) or self.closed or self.closing or self.draining
+                or 'coordinator' not in self.roles):
+            raise ValueError('configured coordinator host client required')
+        if client not in self.host_clients:
+            self.host_clients.append(client)
 
     def _subscribe(self, role):
         task = asyncio.create_task(self._consume(role))
@@ -181,8 +190,10 @@ class EXOService:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
             if host is not None and not host.closed:
                 await self.runtime.close_exo_rank()
-            for commands in self.commands:
-                await commands.client.close()
+            clients = {id(client): client for client in self.host_clients}
+            clients.update({id(commands.client): commands.client for commands in self.commands})
+            for client in clients.values():
+                await client.close()
             self.closed = True
 
 

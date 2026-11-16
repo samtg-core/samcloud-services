@@ -32,10 +32,14 @@ class RuntimeObservation:
 
 
 def launch_sha256(actor, environment):
+    return spec_launch_sha256(actor.spec, environment)
+
+
+def spec_launch_sha256(spec, environment):
     # Do not publish raw environment values, which can contain the private EXO
     # API configuration. The coordinator's plane credential never belongs here.
-    return digest({'binding': asdict(actor.spec.binding), 'argv': list(actor.spec.argv),
-                   'cwd': str(actor.spec.cwd), 'environment_sha256': digest(environment)})
+    return digest({'binding': asdict(spec.binding), 'argv': list(spec.argv),
+                   'cwd': str(spec.cwd), 'environment_sha256': digest(environment)})
 
 
 def record_host_attempt(owner, journal):

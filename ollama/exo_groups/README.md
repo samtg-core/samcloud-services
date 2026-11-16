@@ -794,5 +794,54 @@ Nine assembly controls cover the full sequence, both kinds of lost reply,
 unknown start without a receipt, observer cancellation, failed configuration,
 drain and unavailable private API. Group controls410 and gateway/SDK357 pass.
 They use isolated transports and physical fixtures, not a distributed model.
-The fleet's fixed async factory, frozen-interpreter contract compiler and actual
-network enforcement are still deployment work; no default factory is selected.
+No default factory is selected; actual transport enforcement and the admitted
+small three-host model remain deployment qualification gates.
+
+## Fixed fleet and frozen contract compiler
+
+`HostFleet` takes all three exact `HostDeployment` objects, pinned HTTPS host
+endpoints, the coordinator's own `CoordinatorPlane`, manifests and each host's
+existing inference-journal path. It reconstructs and compares the complete file
+policies. Its `verify` callback must be the acquisition actor's staging verifier:
+all three hosts must freshly verify their files and live transport before the
+first group request. There is no guessed journal path or credential fallback.
+
+In the trusted startup configure function, construct the fleet and acquisition
+actor, bind that actor through `runtime.bind_exo`, then construct `EXOService`
+with Slice's local deployment. Bind `AssemblyFactory(fleet, service,
+ContractCompiler(fleet.local, runtime.queue.supervisor), group_scope=...)` to
+that installed provider. Return the service to the existing startup lifecycle;
+the factory runs only later, inside the admitted provider's owned task. The
+scope is an explicit existing audience, not a membership change. Coordinator
+headers stay in authenticated model-service clients; each host's independent
+member reader still uses its own manager credential.
+
+The admitted factory re-reads the exact group and members, freezes their launch
+bindings, compiles the contract, and checks its node and ring endpoints against
+the host deployments. It wires the existing private client, backend, independent
+receipt routes, host commands and readiness owner. The private API key is read
+only after host preparation creates it. The service also owns and closes the
+fleet's clients if no group was acquired. A private metadata workspace must exist,
+be owned by the host uid and be writable/searchable only by that owner before
+acquisition; a missing or redirected directory fails preflight.
+
+`ContractCompiler` uses the same queue supervisor to own one finite CPU helper
+across observer cancellation. The helper is the pinned frozen Python3.13 with
+`-I -S -B`, exact provider-source pins and the existing frozen bootstrap. It
+imports the real EXO API types, rather than guessing their wire aliases. Input,
+output and diagnostics are bounded; metadata bytes, nonce and contract digests
+are checked. The minimal child environment excludes inherited credentials.
+Native compute imports, networking, child creation and file writes are forbidden
+in the helper. Only this retained metadata child can be killed and reaped after
+a protocol violation; inference ranks keep their separate lifecycle. A failed
+compiler operation remains the same failed operation, never an automatic rerun.
+
+Fourteen compiler/factory controls plus one deployment-preflight control bring
+the group suite to425; the critical gateway/SDK suite remains357, passing
+serially. The actual shipping compiler also ran on Slice's frozen3.13.1 with
+real complete staged files and its own scratch supervisor: its contract exactly
+matches the earlier real-EXO-type reference. No model, group, physical lease,
+rank or network operation was performed. These are source and CPU integration
+results, not distributed inference or a measured memory-fit result. The fixed
+startup selection, live transport enforcement and small-model qualification
+still precede activation and large-model staging.

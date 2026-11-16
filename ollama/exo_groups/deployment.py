@@ -48,7 +48,9 @@ def _owned_directory(path, uid, *, private):
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError('unredirected deployment directory required')
     info = path.lstat()
-    if info.st_uid != uid or private and stat.S_IMODE(info.st_mode) & 0o077:
+    if (info.st_uid != uid or private and (
+            stat.S_IMODE(info.st_mode) & 0o077 or stat.S_IMODE(info.st_mode) & 0o700 != 0o700
+            or not os.access(path, os.W_OK | os.X_OK))):
         raise ValueError('owned private deployment directory required')
 
 
@@ -169,6 +171,8 @@ class HostDeployment:
                 or compiled != self.compile(compiled.expected.binding)
                 or os.getuid() != files.uid):
             raise ValueError('exact own-host compiled deployment required')
+        _owned_directory(self.home, files.uid, private=False)
+        _owned_directory(self.state_base, files.uid, private=True)
         observed = await asyncio.to_thread(self.collector, asdict(files), self.previous)
         if observed.get('uid') != files.uid or observed.get('boot_id') != self.boot_id:
             raise ValueError('host uid or boot changed')
