@@ -27,7 +27,7 @@ from .receipt_files import collect_attempt
 from .token_receipts import collect_tokens
 
 
-_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py')
+_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py', 'pf_transport.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
 SOURCE_SHA256 = digest(_SOURCE)
@@ -45,7 +45,8 @@ def configuration_sha256(deployment):
         'home': str(deployment.home), 'state_base': str(deployment.state_base),
         'peer_ips': deployment.peer_ips, 'ports': deployment.ports,
         'cleanup_tolerance_bytes': deployment.cleanup_tolerance_bytes,
-        'qualification_token_limit': deployment.qualification_token_limit})
+        'qualification_token_limit': deployment.qualification_token_limit,
+        'transport_sha256': deployment.transport_sha256})
 
 
 class HostControl:

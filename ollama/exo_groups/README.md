@@ -947,3 +947,46 @@ rank or network operation was performed. These are source and CPU integration
 results, not distributed inference or a measured memory-fit result. The fixed
 startup selection, live transport enforcement and small-model qualification
 still precede activation and large-model staging.
+
+## Explicit Darwin PF transport qualification
+
+`PFPolicy` pins the host uid and boot, LAN interface, three peer IPv4 addresses
+and all four ports. `LivePFVerifier` is an explicit `HostDeployment` callback.
+Its policy and Apple `pfctl` digest enter the deployment configuration identity;
+the verifier source enters the host-control source identity. No verifier or
+firewall profile is selected by an environment variable or default constructor.
+
+The qualification rules use one `com.apple/990.SamcloudEXO` anchor under the
+host's inspected stock anchor path. TCP peer and ring traffic is allowed only
+between the three addresses on their measured interfaces; the private API stays
+on loopback. Other inbound TCP on the reserved ports is blocked for dynamically
+updated host addresses, including IPv6. Reserved UDP is blocked for multicast
+as well as local destinations. Outbound traffic to the reserved ports is
+limited to the same peers and loopback. Other port numbers are unaffected.
+
+An attended, per-host installer is maintained in the operator runtime kit. It
+checks the current boot, route source, empty reserved ports, disabled PF, stock
+main rules, absent enable references and scaffold-only existing anchors before
+installing. It never loads the main ruleset, flushes global states or replaces
+another anchor. It retains one exact `pfctl -E` reference with persist-before-
+action evidence. Partial/unknown installation refuses repetition. The proposed
+rollback runs only after EXO is drained and deselected, checks empty ports and
+states again, removes our anchor rules and exact reference, and removes only
+our own unchanged read delegation.
+
+The sole service privilege is a digest-pinned list of exact `pfctl` show
+commands in one sudoers file. There is no shell permission, argument wildcard,
+rule mutation permission, additional credential, root daemon or polling loop.
+The verifier reads a root-owned installed receipt as configuration, then queries
+the live kernel on every call. Disabled PF, changed anchor inventory or rules,
+another effective filter, a skipped LAN interface, changed address/boot/binary,
+missing owned reference, unexpected reserved-port states or any failed read
+refuses admission. It rechecks the evaluation path before returning. No timeout
+or automatic retry is introduced. An invalid receipt is never live permission.
+
+The initial inspection's wildcard anchor query produced `DIOCGETRULES` errors
+with exit zero on two hosts. The verifier rejects diagnostics even when the
+process exits zero and instead reads each literal, enumerated anchor. CPU tests
+use synthetic snapshots; unprivileged per-host `pfctl -n` and `visudo -c` checks
+prove syntax only. Actual rule installation, positive/negative network probes
+and the admitted distributed model remain separate deployment evidence.

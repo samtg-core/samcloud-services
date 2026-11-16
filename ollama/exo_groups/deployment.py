@@ -125,6 +125,11 @@ class HostDeployment:
         self.cleanup_tolerance_bytes = cleanup_tolerance_bytes
         self.qualification_token_limit = qualification_token_limit
         self.verify_transport, self.collector = verify_transport, collector
+        self.transport_sha256 = getattr(verify_transport, 'configuration_sha256', None)
+        if self.transport_sha256 is not None and (
+                not isinstance(self.transport_sha256, str)
+                or not re.fullmatch('[a-f0-9]{64}', self.transport_sha256)):
+            raise ValueError('exact explicit transport configuration fingerprint required')
         self.previous = None
 
     @property
