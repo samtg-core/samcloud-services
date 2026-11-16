@@ -250,7 +250,13 @@ class SessionControl:
                 except sqlite3.IntegrityError:
                     raise HTTPException(409, 'Session request id already belongs to another operation') from None
         task = self.tasks.get(key)
-        if old is None:
+        # Activation's durable row records the owner decision, never its
+        # credential. After a process restart the same authenticated request
+        # must explicitly restore that in-memory credential and subscription.
+        # Other operations retain their once-owned task/reconciliation rules.
+        restore_activation = (action == 'activate' and task is None
+            and self.service.credential._value is None)
+        if old is None or restore_activation:
             operation = self.perform(action, body, key, header)
             try:
                 task = self.tasks[key] = self.service.runtime.queue.supervisor.prepare(operation)

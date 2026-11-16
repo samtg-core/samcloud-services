@@ -115,6 +115,32 @@ class ConfiguredFleetControls(IsolatedAsyncioTestCase):
         self.assertEqual((await self.post('activate')).status_code, 503)
         self.service.session.fleet.journals['slice'] = str(self.runtime.settings.journal)
 
+    async def test_same_attended_activation_restores_memory_after_process_restart(self):
+        from .exo_groups.prepare import digest
+        # Only the durable owner/request decision survives a process restart.
+        # This fresh composition has no credential, subscription or owned task.
+        session = self.service.session
+        with session.journal.transaction():
+            session.journal.db.execute('INSERT INTO exo_session_controls VALUES(?,?,?,?,?,?,NULL,?)',
+                (session.plan.owner_id, session.plan.request_key, 'activate', 'a'*64,
+                 digest({'request_id': 'a'*64}), 'returned', 1))
+        self.assertEqual((await self.post('activate', request_id='b'*64)).status_code, 409)
+        self.assertFalse(self.calls)
+        self.caller = {'valid': True, 'owner_id': 'foreign'}
+        self.assertEqual((await self.post('activate')).status_code, 403)
+        self.caller = {'valid': True, 'owner_id': session.plan.owner_id}
+        response = await self.post('activate')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['status']['credential_bound'])
+        await self.connected.wait()
+        original = self.service.tasks['coordinator']
+        self.assertEqual((await self.post('activate')).status_code, 200)
+        self.assertIs(self.service.tasks['coordinator'], original)
+        self.assertEqual(self.context.creates, 0)
+        rows = list(session.journal.db.execute('SELECT request_id,state FROM exo_session_controls'))
+        self.assertEqual([tuple(row) for row in rows], [('a'*64, 'returned')])
+        self.assertNotIn('attended-operator-only', '\n'.join(session.journal.db.iterdump()))
+
     async def test_observer_disconnect_retains_the_same_owned_activation(self):
         self.verify_release.clear()
         observer = asyncio.create_task(self.post('activate'))

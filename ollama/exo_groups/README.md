@@ -1000,3 +1000,9 @@ still request a fresh read. Exact resource/lease changes, new demand and event
 contact loss continue to invalidate immediately, including during an audit.
 Existing authority still expires against the continuous clock. This introduces
 no polling loop, deadline, physical operation or inference retry.
+
+An attended coordinator restart retains the activation decision in the journal
+but loses its credential. The same owner must explicitly repeat the original
+activation request id to restore the header in memory and subscribe again.
+A different request id or owner is refused. This restores observation of the
+same saved demand/group; it does not enqueue another inference execution.
