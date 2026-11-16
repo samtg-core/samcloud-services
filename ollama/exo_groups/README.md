@@ -667,3 +667,52 @@ and617 pass on Obelisk's own Python3.14.10 with external DNS/connects blocked an
 no MLX/native compute import. Counts overlap. These are CPU controls, not fleet
 activation or a distributed model result. The fleet's exact configure function,
 launch/receipt orchestration and enforced private transport remain rollout work.
+
+## Exact host configuration from a frozen deployment
+
+`deployment.HostDeployment` compiles the host role from its complete pinned
+model/runtime policies, boot, uid, private addresses, explicit ports and cleanup
+bound. The model policy must equal the pinned rank/parent manifests. The frozen
+interpreter uses `-I -S -B` and `run_text.py`; all ranks disable downloads,
+disaggregation and images, use the exact read-only shard bundle, and have stable
+per-generation node IDs. Slice is the API/master candidate; other ranks have no
+API. Compilation only produces data and creates no directory or authority.
+
+`bind(runtime, launch, emit=...)` is a trusted service action, not a public API.
+It freshly checks the sealed local files/boot/uid and an explicitly supplied
+live transport verifier; there is no default verifier or permission from a saved
+network report. It refuses a busy/foreign host role. The private session directory
+is new per group/generation/lease and is never reused. The host reader derives its
+credential callback from the already-verified manager, with no coordinator header
+argument and no token in the native environment. A separate random private API
+key and exact native marker belong to that session.
+
+The guarded host preparation commits to the existing journal before private key
+setup. A setup error retains that owner rather than enabling a fresh retry. The
+never-started path can verify source/spec/boot without launch-only network
+permission or a finished private home: it still holds the same lock, commits the
+permanent negative CAS, and observes ports and memory. It cannot apply after a
+launch decision, release a lease or restart a rank. Actual start always uses the
+full verifier, including transport and private-file checks; legacy host runtimes
+retain their original verifier for both paths unless explicitly configured.
+
+Twelve new controls use real sealed tiny files and the actual host journal, with
+isolated volume/counters/transport and native spawn forbidden. They cover policy
+and command binding, identity separation, live verification, setup failure,
+key tampering and never-started cleanup after transport loss. Full group/Obelisk
+compatibility373 and Obelisk gateway-interpreter629 controls pass. Gateway/SDK357
+pass serially; one initial3-second idle-handoff timeout is retained, with identical
+parent/client/queue bytes and isolated parent/candidate passes. No timeout changed.
+
+An additional read-only preflight ran on all three actual hosts: complete frozen
+runtime/shard policies match their earlier authenticated audits; the commands
+parse with the exact frozen EXO Args class and satisfy its ring/profile guards.
+No native compute modules, rank, journal mutation, private session or lease was
+created. Synthetic IDs were compile inputs only and were never sent to the plane.
+Each host refused launch verification with transport enforcement deliberately
+unconfigured. This proves file/configuration integration, not enforcement,
+current group authority, distributed inference or a host launch.
+
+The exact fleet transport verifier and coordinator-to-host launch/receipt
+orchestration still precede activation. No new public route, source selection,
+standing model-service restart or rank start is enabled by this module.
