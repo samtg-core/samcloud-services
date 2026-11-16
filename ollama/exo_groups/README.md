@@ -1,4 +1,32 @@
-## Attended startup and raw-token qualification — 16 November 2026
+## Wafer queued gateway — 16 November 2026
+
+At Sam's request, Wafer's normal gateway now serves release `5176ff0` through
+its first durable inference queue. The EXO composition is still draft and
+unselected. The old clean `1dc3e7f` deploy clone and launcher backup are preserved;
+Ollama was not restarted. All five existing model IDs, the device-scoped
+`wafer-model-service` identity (`user:60`), environment and context settings are
+retained. The runtime is a byte-identical, separately sealed copy of the old
+Python environment, qualified in its new location.
+
+The actual Wafer Python 3.14.6 passes 701 offline controls and the required
+route, context, in-flight and stream checks. A real queued Qwen3-1.7B call
+completed with `OK.`; its logical grant released. A normal queued, non-forced
+unload then released the exact 3,354 MiB residency lease. Both journal executions
+are complete, both grants released, no uncertain work or unsettled capacity.
+The new journal is `/Users/wafer-services/var/samcloud-services-queue/queue.sqlite`
+(mode0600). No default idle/fairness timer was enabled. Like the other queued
+gateways, direct compatibility calls require a stable `Idempotency-Key`; native
+queue clients already supply durable intent keys.
+
+Qualification caught and fixed a raw-receipt portability issue: reads may update
+access time. The check now pins the existing content identity plus link count;
+replacement, content changes and additional links still refuse. A stale context
+test response fixture was also repaired to report its successful HTTP status.
+The final normal gateway release includes both fixes. Live EXO host control,
+transport enforcement and distributed model qualification are still separate
+rollout steps. The earlier evidence below is retained with its source scope.
+
+## Earlier attended startup qualification — e68a6b3, 16 November 2026
 
 This remains a draft, uninstalled model-service candidate. `FleetConfiguration`
 is now the explicit trusted startup callback for the fixed Slice coordinator;
