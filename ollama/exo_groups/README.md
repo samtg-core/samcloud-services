@@ -1,3 +1,32 @@
+## EXO comparison ownership and fixed bindings — 16 November 2026
+
+The numerical observer now joins the original execution, demand, group intent
+and private binding in one read. It keeps the canonical group owner (`user:58`)
+separate from the authenticated queue username (`codex`). The public queue's
+owner checks and stored names are unchanged. The joined observation also requires
+the complete state, exact frozen contract and matching saved request digest.
+Foreign/unlinked calls, changed contracts or requests, missing all-rank end and
+uncertain/failed work refuse before any host receipt read. Session source pins
+include this provenance helper. The HTTP/SQLite regression fails on the preceding
+source with the real identity shape, then passes with this fix. Its physical
+admission and token receipts are synthetic; it is not distributed model proof.
+
+The source passes 450 group controls, 357 critical gateway/SDK controls and 708
+controls on Obelisk's Python 3.14.10 (overlapping counts). No native compute or
+external connections occur in those controls. All three frozen-v4 interpreters
+also pass read-only file/Args/ring checks and inspect the exact fixed startup
+composition without journal, credential, network, process or model operations.
+The bindings use the measured host journals and preserve each existing local
+queue configuration; only Slice gains the explicitly configured small EXO model.
+No entrypoint is installed and a live transport verifier remains mandatory.
+
+A fresh interface survey changes Wafer's peer from its absent Ethernet address
+192.168.1.19 to active Wi-Fi 192.168.1.80. Slice uses Ethernet192.168.1.3 and
+Obelisk remains on Wi-Fi192.168.1.84. These are current small-trial settings, not
+an Ethernet performance claim. Live confinement and actual three-host generation
+remain the next deployment/model gates. Native8e21bc3 and its frozen artifacts
+are unchanged; Wafer's normal5176 gateway was not restarted for this source fix.
+
 ## Wafer queued gateway — 16 November 2026
 
 At Sam's request, Wafer's normal gateway now serves release `5176ff0` through

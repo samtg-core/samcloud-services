@@ -34,7 +34,7 @@ from .service import EXOService
 
 
 _PINS = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-         for name in ('configured.py', 'qualification.py', 'factory.py', 'host_control.py')}
+         for name in ('configured.py', 'qualification.py', 'calls.py', 'factory.py', 'host_control.py')}
 
 
 class AttendedCredential:

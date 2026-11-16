@@ -7,6 +7,7 @@ from the pinned whole-model chat oracle, not text or post-parser token events.
 import base64
 import hashlib
 
+from ..inference_arbiter import Conflict, NotFound
 from .host_control import run_identity
 from .http import decode_json
 from .prepare import canonical, digest
@@ -138,9 +139,13 @@ class TokenComparison:
         backend = provider.backend
         if backend is None or provider.assembly is None or provider._closed:
             raise ComparisonUnavailable('original installed assembly required')
-        execution = backend.bindings.journal.execution(execution_id, self.fleet.plan.owner_id)
-        snapshot = backend.bindings.snapshot(execution_id)
-        if (execution['state'] != 'complete' or snapshot['contract_sha256'] != backend.contract.sha256
+        try:
+            snapshot = backend.bindings.completed_snapshot(execution_id,
+                group_owner=self.fleet.plan.owner_id, request_key=self.fleet.plan.request_key,
+                contract=backend.contract)
+        except (Conflict, NotFound, KeyError, TypeError, ValueError):
+            raise ComparisonUnavailable('complete original group call unconfirmed') from None
+        if (snapshot['contract_sha256'] != backend.contract.sha256
                 or snapshot['owner'] != self.fleet.plan.owner_id
                 or snapshot['request_key'] != self.fleet.plan.request_key or snapshot['end'] is None):
             raise ComparisonUnavailable('complete owned call with observed all-rank end required')
