@@ -26,6 +26,7 @@ class GroupProvider:
         self.publication = None
         self.receipts = None
         self.readiness = None
+        self.assembly = self.assembly_factory = None
         self._ready = False
         self._actor_epoch = None
         self._epoch = 0
@@ -151,6 +152,41 @@ class GroupProvider:
         self.readiness = GroupReadiness(self,startup)
         return self.readiness
 
+    def bind_assembly_factory(self, factory):
+        """Trusted async factory(provider); no selector in a public request."""
+        if not callable(factory) or self.assembly_factory is not None or self._closed:
+            raise ValueError('one explicit provider assembly factory required')
+        self.assembly_factory = factory
+        with self.queue.supervisor.journal.transaction():
+            self.queue.supervisor.journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_assembly_factory (
+                owner TEXT NOT NULL,request_key TEXT NOT NULL,group_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,state TEXT NOT NULL,
+                PRIMARY KEY(owner,request_key))''')
+        self.wake()
+
+    async def _assemble(self):
+        from .assembly import GroupAssembly
+        if self.assembly is None:
+            saved = self._saved()
+            journal = self.queue.supervisor.journal
+            with journal.transaction():
+                if journal.db.execute('SELECT 1 FROM exo_assembly_factory WHERE owner=? AND request_key=?',
+                        (self.actor.plan.owner_id, self.actor.plan.request_key)).fetchone():
+                    # A failed/new process must explicitly reconcile its same
+                    # configuration; never guess that the factory had no effect.
+                    raise RuntimeError('assembly configuration already owned; inspect it')
+                journal.db.execute('INSERT INTO exo_assembly_factory VALUES(?,?,?,?,?)',
+                    (self.actor.plan.owner_id, self.actor.plan.request_key,
+                     saved['group_id'], saved['generation'], 'owned'))
+            assembly = await self.assembly_factory(self)
+            if not isinstance(assembly, GroupAssembly) or assembly.provider is not self:
+                raise ValueError('exact provider assembly required')
+            self.assembly = assembly
+            with journal.transaction():
+                journal.db.execute('UPDATE exo_assembly_factory SET state=? WHERE owner=? AND request_key=?',
+                    ('configured', self.actor.plan.owner_id, self.actor.plan.request_key))
+        return await self.assembly.advance()
+
     def permitted(self, resource):
         if (resource != self.resource or self.source.paused or self._closed
                 or self.source.permission is not True):
@@ -188,6 +224,22 @@ class GroupProvider:
             try:
                 await self.actor.wait()
                 actor_epoch = self.actor._epoch
+                if (not self.source.paused and self.assembly_factory is not None and not self._busy()
+                        and not self.installation.runtime.manager.models and self.actor.may_start_ranks()):
+                    try:
+                        assembled = await self._assemble()
+                    except Exception:
+                        self.queue.supervisor.journal.capacity_event(self.resource, self.model,
+                            'unknown', 'exo_assembly_configuration_unconfirmed')
+                        self.publish()
+                        return
+                    if not assembled:
+                        # Startup refreshes can invalidate our own epoch. They
+                        # are not a reason to hot-retry an unavailable private
+                        # API or unknown POST. Wait for an external event.
+                        self.publish()
+                        return
+                    epoch, actor_epoch = self._epoch, self.actor._epoch
                 backend = self.backend
                 if (not self.source.paused and backend is not None and not self._busy()
                         and not self.installation.runtime.manager.models

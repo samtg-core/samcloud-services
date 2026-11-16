@@ -762,7 +762,37 @@ begins during runtime verification prevents the late start.
 Thirty CPU controls added since host configuration cover these contracts with
 real journal/sealed-file fixtures and isolated ASGI/HTTPS transports; native
 spawn is forbidden. Group controls401 and critical gateway/SDK357 pass. This
-source is uninstalled. The provider's full preparation/start/private-instance/
-readiness orchestration remains to be wired. These controls are not proof of
-network enforcement or distributed inference. The admitted small-model
+source is uninstalled. These controls are not proof of network enforcement or
+distributed inference. The admitted small-model
 three-host qualification remains required before staging the large model.
+
+## Assembly through the existing provider
+
+`GroupProvider.bind_assembly_factory` takes one trusted asynchronous factory,
+configured outside public inference requests. After all exact members are
+admitted, the existing finite provider task owns configuration and a
+`GroupAssembly`. The factory must supply that same provider's backend, three
+host commands, independent receipt routes and readiness owner. A configuration
+decision commits before the factory runs; an ambiguous factory cannot be called
+again automatically after failure or a new process.
+
+Assembly prepares all hosts and pins their independently observed preparations
+before the first start. Each start must produce its exact live child receipt.
+The original private-instance startup then submits once, and serving requires
+the existing full private-state check and attributed core acknowledgement.
+Only then can ordinary provider capacity checks dispatch the queued inference.
+Assembly itself does not generate an answer or request another physical lease.
+
+An owned host POST is reconciled through status and receipts. A lost native
+instance acceptance is reconciled against the same contract and private state;
+neither starts nor instance creation are re-POSTed. A failed pass withdraws
+capacity and returns to the existing event stream. Internal authority refreshes
+do not cause a hot retry loop when an API has not opened. Service shutdown drains
+the same finite provider/host tasks and still refuses an unsettled group.
+
+Nine assembly controls cover the full sequence, both kinds of lost reply,
+unknown start without a receipt, observer cancellation, failed configuration,
+drain and unavailable private API. Group controls410 and gateway/SDK357 pass.
+They use isolated transports and physical fixtures, not a distributed model.
+The fleet's fixed async factory, frozen-interpreter contract compiler and actual
+network enforcement are still deployment work; no default factory is selected.
