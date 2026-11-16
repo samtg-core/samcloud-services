@@ -716,3 +716,39 @@ current group authority, distributed inference or a host launch.
 The exact fleet transport verifier and coordinator-to-host launch/receipt
 orchestration still precede activation. No new public route, source selection,
 standing model-service restart or rank start is enabled by this module.
+
+## Opt-in host control on the existing model-service endpoint
+
+`EXOService(runtime, deployment=...)` exposes fixed `/v1/exo/host` metadata and
+control routes. The existing authentication middleware must verify the exact
+configured coordinator owner. Requests cannot choose a model, deployment, path,
+command, environment or credential. `files` freshly checks sealed files and live
+transport before acquisition; an unconfigured verifier refuses. Responses bind
+the request nonce, control-source hash and fixed configuration hash and forbid
+caching. No redirect, automatic reconnect or request timeout is introduced.
+
+Host registration remains a trusted `HostDeployment.bind` followed by
+`EXOService.attach_host`; there is no public prepare or arbitrary activation
+endpoint. Status, receipts, start, stop and the permanent never-started fence
+require that exact registered live attempt. Status never grants authority.
+Receipts are collected from its actual journal/private state and the HTTP reader
+uses the same preparation, child-birth and cleanup validator as the SSH reader.
+Neither route settles or releases a lease.
+
+Start/stop/fence decisions commit once in the host journal before a finite task
+is registered with the existing supervisor. HTTP cancellation cannot cancel that
+task. The same nonce observes the original operation; a new nonce cannot repeat
+it. An old owned row without a task is reported as unknown, never restarted.
+`HostCommands` likewise commits a single POST decision in the coordinator's
+existing inference journal, checks its frozen member/runtime and fresh authority
+before start, and belongs to that installed queue's service lifecycle. A lost
+reply keeps the committed row; recovery reads status/receipts. Shutdown pauses
+new starts and drains these finite tasks before closing observers. A drain that
+begins during runtime verification prevents the late start.
+
+Twenty-one new CPU controls cover these contracts with real journal/sealed-file
+fixtures and isolated ASGI/HTTPS transports; native spawn is forbidden. Group
+controls392 and critical gateway/SDK357 pass. This source is uninstalled. It does
+not yet provide automatic host preparation or full orchestration, and is not
+proof of network enforcement or distributed inference. The admitted small-model
+three-host qualification remains required before staging the large model.

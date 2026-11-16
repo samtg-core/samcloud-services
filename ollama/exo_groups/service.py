@@ -28,11 +28,13 @@ class EXOService:
     changes an attempt, starts ranks or resubmits inference.
     """
 
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, deployment=None):
+        from .deployment import HostDeployment
         installation = getattr(runtime, 'exo', None)
         host = getattr(runtime, 'host_rank', None)
         if (getattr(runtime, 'exo_service', None) is not None
-                or installation is None and host is None
+                or installation is None and host is None and deployment is None
+                or deployment is not None and not isinstance(deployment, HostDeployment)
                 or installation is not None and (
                     not isinstance(installation, EXOInstallation)
                     or installation.runtime is not runtime or installation.closed)
@@ -47,9 +49,15 @@ class EXOService:
         if host is not None:
             self.roles['host'] = host
         self.tasks = {}
+        self.commands = []
         self.failures = {}
         self.started = self.closed = self.closing = False
+        self.draining = False
         self._close_lock = asyncio.Lock()
+        self.control = None
+        if deployment is not None:
+            from .host_control import HostControl
+            self.control = HostControl(runtime, deployment, self)
 
     def start(self):
         if (self.started or self.closed or self.closing
@@ -62,6 +70,30 @@ class EXOService:
         for role in self.roles:
             self._subscribe(role)
         return self
+
+    def attach_host(self, owner):
+        """Trusted launcher/controller binding, never an HTTP prepare operation."""
+        if (not self.started or self.closed or self.closing or self.draining
+                or not isinstance(owner, HostRankRuntime) or owner.closed
+                or getattr(self.runtime, 'host_rank', None) is not owner
+                or getattr(owner, '_queue_runtime', None) is not self.runtime
+                or 'host' in self.roles and self.roles['host'] is not owner):
+            raise RuntimeError('exact newly registered host owner required')
+        if 'host' not in self.roles:
+            self.roles['host'] = owner
+            self._subscribe('host')
+        return self.tasks['host']
+
+    def own_host_commands(self, commands):
+        from .host_http import HostCommands
+        installation = self.roles.get('coordinator')
+        if (not isinstance(commands, HostCommands) or self.closed or self.closing or self.draining
+                or installation is None or installation.closed
+                or commands.actor not in [p.actor for p in installation.providers.values()]
+                or commands.journal is not self.runtime.queue.supervisor.journal
+                or commands.actor.task_factory != self.runtime.queue.supervisor.prepare):
+            raise ValueError('host commands must belong to this installed queue coordinator')
+        self.commands.append(commands)
 
     def _subscribe(self, role):
         task = asyncio.create_task(self._consume(role))
@@ -124,6 +156,14 @@ class EXOService:
                 return
             if not self.started:
                 raise RuntimeError('EXO service has not been started')
+            self.draining = True
+            if self.control is not None:
+                self.control.pause()
+                await self.control.drain()
+            for commands in self.commands:
+                commands.pause()
+            for commands in self.commands:
+                await commands.drain()
             # Do not cancel observers, explicit authority alarms or child owners
             # as a shortcut through uncertain work. Component close methods
             # verify cleanup/exact settlement and retain ownership on refusal.
@@ -141,6 +181,8 @@ class EXOService:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
             if host is not None and not host.closed:
                 await self.runtime.close_exo_rank()
+            for commands in self.commands:
+                await commands.client.close()
             self.closed = True
 
 
