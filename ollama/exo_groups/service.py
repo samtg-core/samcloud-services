@@ -72,8 +72,8 @@ class EXOService:
         return self
 
     def attach_host(self, owner):
-        """Trusted launcher/controller binding, never an HTTP prepare operation."""
-        if (not self.started or self.closed or self.closing or self.draining
+        """Attach an already journaled owner, including partial setup on drain."""
+        if (not self.started or self.closed or self.closing
                 or not isinstance(owner, HostRankRuntime) or owner.closed
                 or getattr(self.runtime, 'host_rank', None) is not owner
                 or getattr(owner, '_queue_runtime', None) is not self.runtime

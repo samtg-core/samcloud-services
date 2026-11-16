@@ -13,7 +13,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from . import test_exo_group_deployment as deployed
-from .exo_groups import host_control, receipt_files
+from . import test_exo_group_host_authority as authority_fixtures
+from .exo_groups import deployment, host_control, receipt_files
+from .exo_groups.host_authority import HostPlaneReader
 from .exo_groups.host_control import configuration_sha256, run_identity
 from .exo_groups.host_http import HostControlClient, HostEndpoint, HTTPReceiptReader
 from .exo_groups.prepare import digest
@@ -41,6 +43,7 @@ class HostControlControls(IsolatedAsyncioTestCase):
 
     async def cleanup(self):
         self.release.set()
+        self.fixture.owner = getattr(self.runtime, 'host_rank', None)
         if self.fixture.owner is not None and self.fixture.owner.actor.receipt is None:
             await self.fixture.owner.attest_never_started()
         await self.composition.close()
@@ -51,11 +54,13 @@ class HostControlControls(IsolatedAsyncioTestCase):
 
         async def isolated_feed():
             owner._events_ready = True
+            owner._connected.set()
             self.entered.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 owner._events_ready = False
+                owner._connected.clear()
 
         owner.consume_events_once = isolated_feed
         self.composition.attach_host(owner)
@@ -67,6 +72,144 @@ class HostControlControls(IsolatedAsyncioTestCase):
 
     async def post(self, action, **values):
         return await self.client.post('/v1/exo/host/' + action, json=self.payload(**values))
+
+    def isolated_member_plane(self, *, changes=None):
+        """Real own-credential reader/feed against isolated admitted metadata."""
+        self.fixture.binding = replace(self.fixture.binding, expires_at='2026-11-16T00:01:00+00:00')
+        binding = self.fixture.binding
+        member = self.config.plan.members[0]
+        lease = {'id': binding.lease_id, 'agent_id': binding.owner_id,
+            'resource_id': binding.resource_id, 'status': 'active', 'service_id': None,
+            'exclusive': True, 'priority': 'normal', 'memory_mb': member.memory_mb,
+            'ttl_s': member.ttl_seconds, 'max_total_s': member.max_total_s,
+            'granted_at': '2026-11-16T00:00:00+00:00', 'expires_at': '2026-11-16T00:01:00+00:00',
+            'released_at': None, 'settled_at': None}
+        projection = {'group_id': binding.group_id, 'owner_id': binding.owner_id,
+            'generation': binding.generation, 'phase': 'admitted', 'release_requested': False,
+            'authoritative': True, 'observed_at': '2026-11-16T00:00:00+00:00',
+            'authority_expires_at': lease['expires_at'], 'member': {'resource_id': binding.resource_id,
+                'lease_id': binding.lease_id, 'cleanup_attested': False, 'settlement_recorded': False,
+                'lease': lease}, **(changes or {})}
+        self.plane_requests, self.readers = [], []
+        self.admit_entered, self.admit_release = asyncio.Event(), asyncio.Event()
+        self.admit_release.set()
+
+        async def frames():
+            yield ': current\n\n'
+            await asyncio.Event().wait()
+
+        async def transport(request):
+            self.plane_requests.append(request)
+            self.assertEqual(request.method, 'GET')
+            self.assertEqual(request.headers['authorization'], 'Bearer synthetic-host-only')
+            if request.url.path == '/api/v1/auth/verify':
+                return httpx.Response(200, json={'valid': True, 'owner_id': 'user:9999'})
+            if request.url.path == '/api/v1/events':
+                return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                    stream=authority_fixtures.FrameStream(frames))
+            self.assertEqual(request.url.path,
+                f'/api/v1/lease-groups/{binding.group_id}/members/{binding.lease_id}/authority')
+            self.admit_entered.set()
+            await self.admit_release.wait()
+            return httpx.Response(200, json=projection)
+
+        def reader(header, *, owner_id):
+            result = HostPlaneReader(header, owner_id=owner_id, transport=httpx.MockTransport(transport))
+            self.readers.append(result)
+            return result
+
+        self.enterContext(patch.object(deployment, 'HostPlaneReader', side_effect=reader))
+        original = deployment.HostAuthorityAdapter
+        self.enterContext(patch.object(deployment, 'HostAuthorityAdapter', side_effect=lambda actor, r:
+            original(actor, r, alarm_factory=authority_fixtures.FakeAlarm)))
+        return projection
+
+    async def prepare(self, **changes):
+        launch = json.loads(json.dumps(asdict(self.fixture.binding)))
+        launch.update(changes)
+        return await self.post('prepare', launch=launch, plan_sha256=digest(asdict(self.config.plan)))
+
+    async def test_prepare_reads_own_admitted_member_and_attaches_existing_feed_without_start(self):
+        self.isolated_member_plane()
+        response = await self.prepare()
+        self.assertEqual(response.status_code, 200, response.text)
+        report = response.json()['report']
+        self.assertEqual(report['phase'], 'prepared')
+        self.assertTrue(report['events_reconciled'])
+        self.assertEqual(report['operations'][0]['action'], 'prepare')
+        self.assertEqual(report['operations'][0]['state'], 'returned')
+        self.assertEqual(report['host_reader_owner'], 'user:9999')
+        self.assertFalse(report['launch_attempted'])
+        self.assertIs(self.runtime.host_rank, self.composition.roles['host'])
+        self.assertTrue(self.readers[0]._client.is_closed)
+        self.assertFalse(self.readers[1]._client.is_closed)
+        before = self.runtime.host_rank
+        replay = await self.prepare()
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertIs(self.runtime.host_rank, before)
+        self.assertEqual(len(self.readers), 2)
+        other = await self.client.post('/v1/exo/host/prepare', json=self.payload(
+            request_id='b' * 64, launch=asdict(self.fixture.binding), plan_sha256=digest(asdict(self.config.plan))))
+        self.assertEqual(other.status_code, 409)
+
+    async def test_prepare_disconnect_keeps_same_supervisor_task_and_member(self):
+        self.isolated_member_plane()
+        self.admit_release.clear()
+        observer = asyncio.create_task(self.prepare())
+        await self.admit_entered.wait()
+        observer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await observer
+        self.assertFalse(list(self.fixture.state_base.iterdir()))
+        self.assertEqual(len(self.runtime.queue.supervisor.preparations), 1)
+        self.admit_release.set()
+        response = await self.prepare()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['report']['phase'], 'prepared')
+        self.assertEqual(len(self.readers), 2)
+
+    async def test_unadmitted_or_wrong_generation_preparation_keeps_owned_failure_without_files(self):
+        self.isolated_member_plane(changes={'generation': 2})
+        response = await self.prepare()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['report']['phase'], 'preparation_unconfirmed')
+        self.assertEqual(response.json()['report']['operations'][0]['state'], 'unconfirmed')
+        self.assertIsNone(getattr(self.runtime, 'host_rank', None))
+        self.assertFalse(list(self.fixture.state_base.iterdir()))
+        identity = run_identity(self.config.compile(self.fixture.binding).spec.binding)
+        status = await self.post('status', identity=identity)
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()['report']['phase'], 'preparation_unconfirmed')
+        await self.prepare()
+        self.assertEqual(len(self.readers), 1)
+
+    async def test_prepare_schema_cannot_choose_runtime_or_change_fixed_rank(self):
+        for changes in ({'generation': True}, {'pipeline_rank': False}, {'layers': [0, True]},
+                        {'argv': ['arbitrary']}, {'rank': 'wafer'}, {'expires_at': '2040-01-01'},
+                        {'group_id': '../wrong'}):
+            self.assertEqual((await self.prepare(**changes)).status_code, 422)
+        self.assertFalse(self.runtime.queue.supervisor.journal.db.execute('SELECT 1 FROM exo_host_controls').fetchall())
+
+    async def test_prepare_cannot_invent_a_future_lease_expiry(self):
+        self.isolated_member_plane()
+        response = await self.prepare(expires_at='2040-01-01T00:00:00+00:00')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['report']['phase'], 'preparation_unconfirmed')
+        self.assertIsNone(getattr(self.runtime, 'host_rank', None))
+        self.assertFalse(list(self.fixture.state_base.iterdir()))
+
+    async def test_partial_private_setup_failure_still_attaches_negative_fence_cleanup(self):
+        self.isolated_member_plane()
+        with patch.object(deployment.secrets, 'token_hex', side_effect=OSError('fixture private setup')):
+            response = await self.prepare()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['report']['operations'][0]['state'], 'unconfirmed')
+        self.assertIs(self.runtime.host_rank, self.composition.roles['host'])
+        identity = run_identity(self.runtime.host_rank.actor.spec.binding)
+        fenced = await self.client.post('/v1/exo/host/fence-unstarted',
+            json=self.payload(request_id='b' * 64, identity=identity))
+        self.assertEqual(fenced.status_code, 200, fenced.text)
+        self.assertTrue(fenced.json()['report']['cleanup_observed'])
 
     async def test_standby_files_preflight_checks_live_transport_without_host_or_lease(self):
         response = await self.post('files', policy_sha256=digest(asdict(self.config.files)))

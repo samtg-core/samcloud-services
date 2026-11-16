@@ -11,6 +11,7 @@ import httpx
 from . import test_exo_group_install as installed
 from .exo_groups.host_control import run_identity
 from .exo_groups.host_http import HostCommands, HostControlClient, HostControlUnavailable, HostEndpoint
+from .exo_groups.prepare import digest
 from .exo_groups.service import EXOService
 from .inference_arbiter import Conflict
 
@@ -50,7 +51,7 @@ class HostCommandControls(IsolatedAsyncioTestCase):
             await self.release.wait()
             if self.mode == 'lost':
                 raise httpx.ReadError('private host response and credential')
-            report = {'identity': value['identity'], 'operations': [{
+            report = {'identity': value.get('identity', run_identity(self.commands.binding)), 'operations': [{
                 'action': request.url.path.split('/')[-1], 'request_id': value['request_id'], 'state': 'returned'}]}
             if self.mode == 'wrong-attempt':
                 report['identity'] = report['identity'] | {'lease_id': 'foreign'}
@@ -99,6 +100,20 @@ class HostCommandControls(IsolatedAsyncioTestCase):
         with self.assertRaises(Conflict):
             await self.commands.submit('start', verify_runtime=self.verify)
         self.assertEqual(len(self.requests), 1)
+
+    async def test_prepare_carries_only_full_saved_binding_and_fixed_plan_before_start(self):
+        result = await self.commands.submit('prepare', verify_runtime=self.verify)
+        payload = json.loads(self.requests[0].content)
+        self.assertEqual(set(payload), {'request_id', 'launch', 'plan_sha256'})
+        self.assertEqual(payload['plan_sha256'], digest(self.fixture.actor.intents.snapshot(
+            self.actor.plan.owner_id, self.actor.plan.request_key)['plan']))
+        self.assertEqual(payload['launch']['lease_id'], self.commands.binding.lease_id)
+        self.assertEqual(payload['launch']['rank_manifest_sha256'], self.actor.plan.rank_manifest_sha256)
+        self.assertEqual(result['operations'][0]['action'], 'prepare')
+        with self.assertRaises(Conflict):
+            await self.commands.submit('prepare', verify_runtime=self.verify)
+        await self.commands.submit('start', verify_runtime=self.verify)
+        self.assertEqual([r.url.path.rsplit('/', 1)[-1] for r in self.requests], ['prepare', 'start'])
 
     async def test_lost_reply_retains_once_only_row_even_with_a_new_command_owner(self):
         self.mode = 'lost'

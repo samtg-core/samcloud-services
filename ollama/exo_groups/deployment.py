@@ -7,6 +7,7 @@ The host reader always uses the manager's own already-verified credential.
 
 import asyncio
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from ipaddress import IPv4Address, IPv4Network
 import json
 import os
@@ -17,8 +18,9 @@ import stat
 from uuid import UUID
 
 from .evidence import write_new
+from .clock import authority_clock
 from .host_authority import HostAuthorityAdapter, HostPlaneReader
-from .member import ExpectedMember
+from .member import ExpectedMember, check_projection
 from .plan import GroupPlan, HOST_RESOURCES
 from .prepare import canonical, digest
 from .rank_lifecycle import RankLifecycle, RankSpec
@@ -181,6 +183,43 @@ class HostDeployment:
             raise ValueError('live exact transport enforcement unconfirmed')
         return observed
 
+    def host_reader(self, runtime):
+        if (runtime.manager.initial_reservations.owner == self.plan.owner_id
+                or not isinstance(runtime.manager.sc.token, str) or not runtime.manager.sc.token
+                or set(runtime.settings.models.values()) != {self.files.resource_id}):
+            raise ValueError('distinct verified own-host service identity required')
+        return HostPlaneReader(lambda: 'Bearer ' + runtime.manager.sc.token,
+                               owner_id=runtime.manager.initial_reservations.owner)
+
+    async def admit_preparation(self, runtime, binding):
+        """Fresh own-member read only; configuration/binding is not permission.
+
+        The coordinator checks its saved full group intent before sending this
+        binding. The host's scoped projection independently checks ownership,
+        admission and the exact declared envelope, without borrowing that token.
+        This observation never replaces the rank's launch-time authority read.
+        """
+        compiled = self.compile(binding)
+        reader = self.host_reader(runtime)
+        try:
+            started = authority_clock()
+            value = await reader.projection(compiled.expected)
+            received = authority_clock()
+            decision = check_projection(compiled.expected, value,
+                request_started_monotonic=started, received_monotonic=received,
+                now_monotonic=authority_clock())
+            if not decision.allows_start(authority_clock()):
+                raise ValueError('exact own member is not freshly admitted')
+            lease = value['member']['lease']
+            # The saved launch expiry may predate a renewal, but cannot invent
+            # a later authority envelope. Actual start still reads it afresh.
+            if not (datetime.fromisoformat(lease['granted_at'])
+                    < datetime.fromisoformat(binding.expires_at)
+                    <= datetime.fromisoformat(lease['expires_at'])):
+                raise ValueError('launch expiry is outside the observed lease envelope')
+        finally:
+            await reader.close()
+
     async def bind(self, runtime, binding, *, emit):
         """Prepare and journal one host attempt, without starting its rank/feed."""
         files = self.files
@@ -235,8 +274,7 @@ class HostDeployment:
         expected_launch_sha = launch_sha256(actor, compiled.environment)
         # Callback stays local to the already-verified manager. There is no
         # coordinator header argument, token file copy or credential in env.
-        reader = HostPlaneReader(lambda: 'Bearer ' + runtime.manager.sc.token,
-                                 owner_id=runtime.manager.initial_reservations.owner)
+        reader = self.host_reader(runtime)
         adapter = HostAuthorityAdapter(actor, reader)
         owner = HostRankRuntime(actor, adapter, verify_runtime=verify, environment=compiled.environment,
                                 boot_id=self.boot_id, verify_unstarted=verify_prepared)

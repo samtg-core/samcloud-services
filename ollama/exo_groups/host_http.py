@@ -57,7 +57,7 @@ class HostControlClient:
             follow_redirects=False, trust_env=False, transport=transport)
 
     async def _request(self, action, payload, *, request_id=None):
-        if (action not in ('files', 'status', 'receipts', 'start', 'stop', 'fence-unstarted')
+        if (action not in ('files', 'status', 'receipts', 'prepare', 'start', 'stop', 'fence-unstarted')
                 or not isinstance(payload, dict) or 'request_id' in payload):
             raise ValueError('fixed host operation and payload required')
         request_id = secrets.token_hex(32) if request_id is None else request_id
@@ -151,12 +151,12 @@ class HostCommands:
                 PRIMARY KEY(group_id,generation,lease_id,action))''')
 
     async def submit(self, action, *, verify_runtime):
-        if action not in ('start', 'stop', 'fence-unstarted') or not callable(verify_runtime):
+        if action not in ('prepare', 'start', 'stop', 'fence-unstarted') or not callable(verify_runtime):
             raise ValueError('explicit host action and runtime verifier required')
         if (not self.service.started or self.service.closed
-                or action == 'start' and not self.accepting):
+                or action in ('prepare', 'start') and not self.accepting):
             raise Conflict('configured service host control is not accepting starts')
-        if action == 'start':
+        if action in ('prepare', 'start'):
             self.actor.wake()
             await self.actor.wait()
             epoch = self.actor._epoch
@@ -212,7 +212,9 @@ class HostCommands:
 
     async def _send(self, action, key, request_id):
         binding = self.binding
-        result = await self.client._request(action, {'identity': run_identity(binding)}, request_id=request_id)
+        payload = ({'launch': asdict(binding.expected.binding), 'plan_sha256': digest(asdict(self.actor.plan))}
+            if action == 'prepare' else {'identity': run_identity(binding)})
+        result = await self.client._request(action, payload, request_id=request_id)
         operations = result.get('operations')
         if (canonical(result.get('identity')) != canonical(run_identity(binding))
                 or not isinstance(operations, list)

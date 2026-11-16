@@ -183,6 +183,7 @@ class HostRankRuntime:
         self._watcher_factory, self.exit_watch = watcher_factory, None
         self._lock, self._closed = asyncio.Lock(), False
         self._event_epoch, self._events_ready = 0, False
+        self._connected = asyncio.Event()
         self.observation_error = None
         self._journal, self.prepared = None, None
 
@@ -353,11 +354,13 @@ class HostRankRuntime:
 
     async def on_connect(self):
         self._events_ready = False
+        self._connected.clear()
         self._event_epoch += 1
         epoch = self._event_epoch
         result = await self.adapter.on_connect()
         if epoch == self._event_epoch:
             self._events_ready = True
+            self._connected.set()
         self.inventory_changed()
         return result
 
@@ -368,6 +371,17 @@ class HostRankRuntime:
         if feed is None:
             feed = self._event_feed = RegistryEventFeed.host(self)
         return await feed.consume_once()
+
+    async def wait_connected(self, subscription):
+        """Wait on the existing event transition, never poll or own its task."""
+        waiter = asyncio.create_task(self._connected.wait())
+        try:
+            await asyncio.wait((waiter, subscription), return_when=asyncio.FIRST_COMPLETED)
+            if subscription.done() or not self._events_ready:
+                raise ObservationUnknown('host event observation unavailable; same attempt retained')
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
 
     async def on_event(self, event):
         result = await self.adapter.on_event(event)
@@ -381,6 +395,7 @@ class HostRankRuntime:
 
     def on_disconnect(self):
         self._events_ready = False
+        self._connected.clear()
         self._event_epoch += 1
         self.adapter.on_disconnect()
 

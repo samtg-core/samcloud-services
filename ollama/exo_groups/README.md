@@ -727,10 +727,23 @@ transport before acquisition; an unconfigured verifier refuses. Responses bind
 the request nonce, control-source hash and fixed configuration hash and forbid
 caching. No redirect, automatic reconnect or request timeout is introduced.
 
-Host registration remains a trusted `HostDeployment.bind` followed by
-`EXOService.attach_host`; there is no public prepare or arbitrary activation
-endpoint. Status, receipts, start, stop and the permanent never-started fence
-require that exact registered live attempt. Status never grants authority.
+The `prepare` route takes only the complete exact member binding and fixed plan
+digest. The coordinator checks its saved full group intent/member/runtime before
+sending it. The host independently reads its scoped member using the manager's
+own credential: exact owner, group, generation, resource, active lease
+envelope and admitted/serving authority must match. The submitted expiry may
+predate a renewal but cannot exceed the observed lease. The scoped projection
+does not disclose the full coordinator intent; host configuration stays fixed.
+Preparation calls `HostDeployment.bind` then `EXOService.attach_host` and waits
+on that subscription's connection event, without a timer or polling loop. It
+does not start a rank. Start separately rechecks files, transport and authority.
+
+Status, receipts, start, stop and the permanent never-started fence require the
+exact registered attempt. A failed preparation with no owner can be read through
+status, but stays unconfirmed; absence of a host record is not cleanup evidence.
+No preparation or start is retried after an ambiguous outcome. Status never
+grants authority. Partial private setup preserves its journaled owner/feed and
+the existing permanent no-start cleanup path, including during service drain.
 Receipts are collected from its actual journal/private state and the HTTP reader
 uses the same preparation, child-birth and cleanup validator as the SSH reader.
 Neither route settles or releases a lease.
@@ -746,9 +759,10 @@ reply keeps the committed row; recovery reads status/receipts. Shutdown pauses
 new starts and drains these finite tasks before closing observers. A drain that
 begins during runtime verification prevents the late start.
 
-Twenty-one new CPU controls cover these contracts with real journal/sealed-file
-fixtures and isolated ASGI/HTTPS transports; native spawn is forbidden. Group
-controls392 and critical gateway/SDK357 pass. This source is uninstalled. It does
-not yet provide automatic host preparation or full orchestration, and is not
-proof of network enforcement or distributed inference. The admitted small-model
+Thirty CPU controls added since host configuration cover these contracts with
+real journal/sealed-file fixtures and isolated ASGI/HTTPS transports; native
+spawn is forbidden. Group controls401 and critical gateway/SDK357 pass. This
+source is uninstalled. The provider's full preparation/start/private-instance/
+readiness orchestration remains to be wired. These controls are not proof of
+network enforcement or distributed inference. The admitted small-model
 three-host qualification remains required before staging the large model.
