@@ -13,7 +13,7 @@ import stat
 
 from .http import decode_json
 from .prepare import canonical
-from .receipt_files import ReceiptUnavailable, _directory, _read, boot_id
+from .receipt_files import ReceiptUnavailable, _directory, _identity, _read, boot_id
 
 _IDENTITY = {'group_id', 'generation', 'rank', 'device_rank', 'rank_manifest_sha256',
              'command_id', 'task_id', 'model'}
@@ -84,7 +84,10 @@ def collect_tokens(home, uid, boot, expected, *, boot_reader=boot_id):
         if stat.S_IMODE(before.st_mode) != 0o600:
             raise ReceiptUnavailable('private raw token file mode changed')
         raw = _read(directory, name, uid)
-        if before != os.stat(name, dir_fd=directory, follow_symlinks=False):
+        after = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        # Reading may update access time. Pin content and pathname identity,
+        # including ownership, mode and link count, without rejecting that read.
+        if (_identity(before), before.st_nlink) != (_identity(after), after.st_nlink):
             raise ReceiptUnavailable('raw token file changed during collection')
         parse_tokens(raw, expected)
         if boot_reader() != boot:

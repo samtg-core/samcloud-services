@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import patch
 
 from . import test_exo_group_deployment as deployed
 from . import test_exo_group_host_control as host_controls
@@ -25,6 +27,7 @@ from .exo_groups.rank_process import RunBinding
 from .exo_groups.receipt_files import ReceiptUnavailable
 from .exo_groups.staging import runtime_file_policy
 from .exo_groups.token_receipts import collect_tokens, parse_tokens
+from .exo_groups import token_receipts
 
 
 def enable_trace(fixture):
@@ -201,6 +204,54 @@ class RawTokenControls(TestCase):
             path.symlink_to(other)
             with self.assertRaises((ReceiptUnavailable, OSError)):
                 collect_tokens(str(home), os.getuid(), 'boot', identity, boot_reader=lambda: 'boot')
+
+    def test_access_time_can_change_but_replacement_content_or_links_cannot(self):
+        original_stat, original_read = os.stat, token_receipts._read
+        for change in ('access', 'replace', 'content', 'link'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                home = Path(folder).resolve()
+                directory = home/'qualification-tokens'
+                directory.mkdir(mode=0o700)
+                identity = expected(self.bindings[0])
+                name = identity['command_id']+'-'+hashlib.sha256(identity['task_id'].encode()).hexdigest()+'.jsonl'
+                path = directory/name
+                raw = receipt(self.case, identity)
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                observations = []
+
+                def observe(*args, **kwargs):
+                    info = original_stat(*args, **kwargs)
+                    observations.append(info)
+                    # Model a kernel access-time update without a metadata write
+                    # (utime itself changes ctime, which must remain checked).
+                    fields = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+                    fields['st_atime_ns'] = len(observations)
+                    return SimpleNamespace(**fields)
+
+                def read(*args, **kwargs):
+                    data = original_read(*args, **kwargs)
+                    if change == 'replace':
+                        path.unlink()
+                        path.write_bytes(raw)
+                        path.chmod(0o600)
+                    elif change == 'content':
+                        with path.open('ab') as handle:
+                            handle.write(b'\n')
+                    elif change == 'link':
+                        os.link(path, home/'other-link')
+                    return data
+
+                with patch.object(token_receipts.os, 'stat', side_effect=observe), \
+                        patch.object(token_receipts, '_read', side_effect=read):
+                    if change == 'access':
+                        result = collect_tokens(str(home), os.getuid(), 'boot', identity,
+                                                boot_reader=lambda: 'boot')
+                        self.assertEqual(base64.b64decode(result['raw_base64']), raw)
+                    else:
+                        with self.assertRaises(ReceiptUnavailable):
+                            collect_tokens(str(home), os.getuid(), 'boot', identity,
+                                           boot_reader=lambda: 'boot')
 
 
 class TokenHostControls(IsolatedAsyncioTestCase):
