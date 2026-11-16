@@ -24,9 +24,10 @@ from .member import ExpectedMember
 from .plan import LaunchBinding
 from .prepare import canonical, digest
 from .receipt_files import collect_attempt
+from .token_receipts import collect_tokens
 
 
-_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py')
+_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
 SOURCE_SHA256 = digest(_SOURCE)
@@ -43,7 +44,8 @@ def configuration_sha256(deployment):
         'runtime_sha256': deployment.runtime_sha256, 'boot_id': deployment.boot_id,
         'home': str(deployment.home), 'state_base': str(deployment.state_base),
         'peer_ips': deployment.peer_ips, 'ports': deployment.ports,
-        'cleanup_tolerance_bytes': deployment.cleanup_tolerance_bytes})
+        'cleanup_tolerance_bytes': deployment.cleanup_tolerance_bytes,
+        'qualification_token_limit': deployment.qualification_token_limit})
 
 
 class HostControl:
@@ -351,6 +353,26 @@ class HostControl:
             except Exception:
                 raise HTTPException(503, 'Exact host receipt unconfirmed') from None
             return self._response(body['request_id'], report)
+
+        @router.post('/tokens')
+        async def tokens(request: Request):
+            body = await self._body(request, {'identity', 'command_id', 'task_id'})
+            owner = self._owner(body['identity'])
+            if self.deployment.qualification_token_limit != 16:
+                raise HTTPException(409, 'Raw token qualification is not configured')
+            binding = owner.actor.spec.binding
+            compiled = self.deployment.compile(binding.expected.binding)
+            expected = {'group_id': binding.group_id, 'generation': binding.generation,
+                'rank': self.deployment.files.rank, 'device_rank': binding.expected.binding.pipeline_rank,
+                'rank_manifest_sha256': binding.rank_manifest_sha256,
+                'command_id': body['command_id'], 'task_id': body['task_id'],
+                'model': self.deployment.plan.model_id}
+            try:
+                report = await asyncio.to_thread(collect_tokens, str(compiled.native_home),
+                    self.deployment.files.uid, owner.boot_id, expected)
+            except Exception:
+                raise HTTPException(503, 'Exact raw token receipt unconfirmed') from None
+            return self._response(body['request_id'], {'identity': run_identity(binding), **report})
 
         def add_operation(action):
             async def operation(request: Request):

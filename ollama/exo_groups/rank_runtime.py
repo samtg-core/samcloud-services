@@ -174,6 +174,7 @@ class HostRankRuntime:
                 or not isinstance(environment, dict)
                 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in environment.items())
                 or any(any(part in k.upper() for part in ('TOKEN', 'BEARER', 'SAMCLOUD_AUTH'))
+                       and not (k == 'EXO_LEASED_TOKEN_TRACE' and environment[k] == '16')
                        for k in environment)
                 or actor.launch_attempted or actor.phase != 'prepared'
                 or not isinstance(boot_id, str) or str(UUID(boot_id)) != boot_id

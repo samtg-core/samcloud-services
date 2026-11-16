@@ -1,3 +1,48 @@
+## Attended startup and raw-token qualification — 16 November 2026
+
+This remains a draft, uninstalled model-service candidate. `FleetConfiguration`
+is now the explicit trusted startup callback for the fixed Slice coordinator;
+`host_configuration` supplies each other host role. It binds the existing
+journal, ordinary host queues, exact frozen deployments and host HTTPS endpoints.
+There is no environment-selected profile or implicit production activation.
+
+The attended coordinator starts without a standing coordinator credential or
+registry subscription. Its already-authenticated configured owner explicitly
+activates `/v1/exo/session/activate` using that owner's existing request header.
+The credential stays in gateway memory, separate from each host manager's own
+service credential, and is never persisted or passed to native processes. The
+existing supervisor owns and drains activation across observer disconnects.
+Cleanup or settlement refusal retains it; successful shutdown clears it. Status,
+explicit subscription reconnection and exact existing member settlement use
+fixed metadata routes. No request can choose a model, path, audience or command.
+No group is acquired without queued demand and live staging/authority checks.
+
+The optional qualification profile alone sets `EXO_LEASED_TOKEN_TRACE=16`.
+`token_receipts.py` reads fresh private, boot/UID/command/task/rank-bound receipts;
+`qualification.py` compares all 16 raw IDs on every rank with the pinned actual
+M5 whole-model chat oracle. The original three prompts, exact rendered/encoded
+input, sampling options, usage/cache path and independent all-rank end must
+match. The frontend exposes 45 IDs because its thinking parser suppresses one
+opening marker per prompt; the numerical criterion remains all 48 raw IDs.
+A mismatch fails; partial or unproven observations stay unconfirmed. Comparison
+cannot start inference, retry a call, establish physical admission or free HOLD.
+
+Validation: 442 group controls, 357 critical gateway/SDK controls and 700 controls
+on Obelisk's Python 3.14.10 pass, with overlapping counts. The actual frozen-v4
+interpreter on all three hosts also verifies its complete files and exact native
+arguments twice, without native imports, lease operations or service selection.
+The deliberately unconfigured live transport verifier refuses as required.
+Source qualification is not a distributed model pass.
+
+Native source `8e21bc36d4e0859c3c73959ce435b3bb4bb186f0` has all required gates
+passing (601 default tests, three existing skips, 190 default slow exclusions).
+The same wheel and frozen-v4 artifacts are prepared and hash-audited on all three
+hosts, unselected. [Native source and evidence2307](https://cloud.samtg.xyz/api/v1/files/2307/raw)
+retain the exact oracle, runtime manifests and cleanup receipts. Live enforced
+transport and actual small three-host inference still precede the 235B model's
+measured context/memory fit and full21 evaluations. No approval or merge is
+requested while this PR remains draft.
+
 ## Obelisk compatibility candidate
 
 This stacked candidate reconciles provider commit `0073e4f` with Obelisk's
@@ -25,7 +70,7 @@ and actual small queued three-host model proof still precede large staging.
 
 # EXO provider integration
 
-## Current native qualification
+## Earlier native qualification — 15 November 2026
 
 Core PR19 is merged and live as **0.13.11 / 1d396f5**; the exact-member authority
 handler was independently checked. The native candidate is committed as

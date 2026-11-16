@@ -79,7 +79,8 @@ class HostDeployment:
 
     def __init__(self, plan, files, *, manifest, parent, runtime_sha256, boot_id, home, state_base,
                  peer_ips, api_port, peer_port, discovery_port, ring_port,
-                 cleanup_tolerance_bytes, verify_transport, collector=collect_host):
+                 cleanup_tolerance_bytes, verify_transport, collector=collect_host,
+                 qualification_token_limit=None):
         if (not isinstance(plan, GroupPlan) or not isinstance(files, HostFiles) or files.rank not in _RANKS
                 or files.resource_id != HOST_RESOURCES[files.rank]
                 or type(files.uid) is not int or files.uid < 0
@@ -88,7 +89,9 @@ class HostDeployment:
                 or not re.fullmatch('[a-f0-9]{64}', runtime_sha256)
                 or str(UUID(boot_id)) != boot_id or UUID(boot_id).int == 0
                 or not callable(verify_transport) or not callable(collector)
-                or type(cleanup_tolerance_bytes) is not int or cleanup_tolerance_bytes < 0):
+                or type(cleanup_tolerance_bytes) is not int or cleanup_tolerance_bytes < 0
+                or qualification_token_limit is not None and (
+                    type(qualification_token_limit) is not int or qualification_token_limit != 16)):
             raise ValueError('exact host files, boot, runtime and live transport verifier required')
         self.plan = plan
         # Freeze mutable policy dictionaries before producing any spec or file.
@@ -102,6 +105,10 @@ class HostDeployment:
         names = {pin['path'] for pin in files.runtime['files']}
         if not {'run_text.py', 'python/bin/python3.13', 'source/src/exo/main.py'} <= names:
             raise ValueError('pinned frozen interpreter, launcher and node source required')
+        if qualification_token_limit is not None and not {
+                'source/src/exo/utils/qualification_tokens.py',
+                'source/src/exo/worker/runner/llm_inference/batch_generator.py'} <= names:
+            raise ValueError('pinned raw-token observation source required')
         if (self.state_base == self.home / '.exo'
                 or any(self.state_base.is_relative_to(p) for p in (self.runtime_root, self.model_root))):
             raise ValueError('private attempt state must be outside immutable artifacts and standing EXO home')
@@ -116,6 +123,7 @@ class HostDeployment:
             raise ValueError('four distinct explicit unprivileged ports required')
         self.peer_ips, self.ports = peer_ips, ports
         self.cleanup_tolerance_bytes = cleanup_tolerance_bytes
+        self.qualification_token_limit = qualification_token_limit
         self.verify_transport, self.collector = verify_transport, collector
         self.previous = None
 
@@ -153,6 +161,8 @@ class HostDeployment:
             **{f'EXO_LEASED_{name}_PORT': str(port)
                for name, port in zip(('API', 'PEER', 'DISCOVERY', 'RING'), self.ports)},
         }
+        if self.qualification_token_limit is not None:
+            environment['EXO_LEASED_TOKEN_TRACE'] = str(self.qualification_token_limit)
         argv = (str(self.runtime_root / 'python/bin/python3.13'), '-I', '-S', '-B',
                 str(self.runtime_root / 'run_text.py'), '--namespace', namespace,
                 '--offline', '--no-downloads', '--no-batch', '--api-port', str(api),

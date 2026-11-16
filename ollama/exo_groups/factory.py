@@ -38,6 +38,7 @@ class HostFleet:
                 or any(canonical(asdict(host.plan)) != canonical(asdict(hosts[0].plan))
                        or host.runtime_sha256 != hosts[0].runtime_sha256
                        or host.peer_ips != hosts[0].peer_ips or host.ports != hosts[0].ports
+                       or host.qualification_token_limit != hosts[0].qualification_token_limit
                        for host in hosts)):
             raise ValueError('fixed pipeline-ordered fleet, endpoints and own coordinator required')
         for host, endpoint in zip(hosts, endpoints):

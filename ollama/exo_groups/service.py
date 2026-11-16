@@ -28,11 +28,12 @@ class EXOService:
     changes an attempt, starts ranks or resubmits inference.
     """
 
-    def __init__(self, runtime, *, deployment=None):
+    def __init__(self, runtime, *, deployment=None, defer_coordinator=False):
         from .deployment import HostDeployment
         installation = getattr(runtime, 'exo', None)
         host = getattr(runtime, 'host_rank', None)
-        if (getattr(runtime, 'exo_service', None) is not None
+        if (type(defer_coordinator) is not bool or defer_coordinator and installation is None
+                or getattr(runtime, 'exo_service', None) is not None
                 or installation is None and host is None and deployment is None
                 or deployment is not None and not isinstance(deployment, HostDeployment)
                 or installation is not None and (
@@ -54,6 +55,7 @@ class EXOService:
         self.failures = {}
         self.started = self.closed = self.closing = False
         self.draining = False
+        self.deferred_coordinator = defer_coordinator
         self._close_lock = asyncio.Lock()
         self.control = None
         if deployment is not None:
@@ -69,8 +71,18 @@ class EXOService:
         self.runtime.exo_service = self
         self.started = True
         for role in self.roles:
-            self._subscribe(role)
+            if role != 'coordinator' or not self.deferred_coordinator:
+                self._subscribe(role)
         return self
+
+    def connect_coordinator(self):
+        """Explicit first connection after the attended owner provides its header."""
+        if (not self.started or self.closed or self.closing or self.draining
+                or not self.deferred_coordinator or 'coordinator' not in self.roles
+                or 'coordinator' in self.tasks):
+            raise RuntimeError('fresh deferred coordinator connection required')
+        self.deferred_coordinator = False
+        return self._subscribe('coordinator')
 
     def attach_host(self, owner):
         """Attach an already journaled owner, including partial setup on drain."""

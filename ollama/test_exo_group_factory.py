@@ -99,6 +99,7 @@ class FixedFactoryControls(IsolatedAsyncioTestCase):
                 value = self.group
             return httpx.Response(200, json=copy.deepcopy(value))
 
+        self.core_transport_callback = core_transport
         self.plane = CoordinatorPlane(self.plan.owner_id, lambda: 'Bearer synthetic-coordinator',
                                       transport=httpx.MockTransport(core_transport))
         transports = {}
@@ -126,6 +127,10 @@ class FixedFactoryControls(IsolatedAsyncioTestCase):
         self.fleet_args = dict(manifest=c.stage.manifest, parent=canonical(c.stage.parent),
                                journals=self.journals, transports=transports)
         self.fleet = HostFleet(self.layouts, self.endpoints, self.plane, **self.fleet_args)
+        if getattr(self, 'configuration_only', False):
+            self.addAsyncCleanup(self.fleet.close)
+            self.addAsyncCleanup(self.plane.close)
+            return
         self.intents = GroupIntents(self.runtime.queue.supervisor.journal)
 
         def authority(plan, launches):

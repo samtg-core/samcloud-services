@@ -57,7 +57,7 @@ class HostControlClient:
             follow_redirects=False, trust_env=False, transport=transport)
 
     async def _request(self, action, payload, *, request_id=None):
-        if (action not in ('files', 'status', 'receipts', 'prepare', 'start', 'stop', 'fence-unstarted')
+        if (action not in ('files', 'status', 'receipts', 'tokens', 'prepare', 'start', 'stop', 'fence-unstarted')
                 or not isinstance(payload, dict) or 'request_id' in payload):
             raise ValueError('fixed host operation and payload required')
         request_id = secrets.token_hex(32) if request_id is None else request_id
@@ -98,6 +98,10 @@ class HostControlClient:
 
     async def receipts(self, binding):
         return await self._request('receipts', {'identity': run_identity(binding)})
+
+    async def tokens(self, binding, command_id, task_id):
+        return await self._request('tokens', {'identity': run_identity(binding),
+                                             'command_id': command_id, 'task_id': task_id})
 
     async def close(self):
         await self._client.aclose()
