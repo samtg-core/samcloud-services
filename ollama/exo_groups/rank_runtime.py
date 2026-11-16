@@ -162,10 +162,12 @@ class HostRankRuntime:
     disconnect; an uncertain launch is never replayed.
     """
     def __init__(self, actor, adapter, *, verify_runtime, environment, boot_id,
-                 watcher_factory=ChildExitWatch):
+                 watcher_factory=ChildExitWatch, verify_unstarted=None):
         if (not isinstance(actor, RankLifecycle) or not isinstance(adapter, HostAuthorityAdapter)
                 or adapter.actor is not actor or not callable(verify_runtime)
-                or not callable(watcher_factory) or not isinstance(environment, dict)
+                or not callable(watcher_factory)
+                or verify_unstarted is not None and not callable(verify_unstarted)
+                or not isinstance(environment, dict)
                 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in environment.items())
                 or any(any(part in k.upper() for part in ('TOKEN', 'BEARER', 'SAMCLOUD_AUTH'))
                        for k in environment)
@@ -175,6 +177,7 @@ class HostRankRuntime:
             raise ValueError('fresh exact host actor, runtime verifier and boot required')
         self.actor, self.adapter = actor, adapter
         self.verify_runtime, self.boot_id = verify_runtime, boot_id
+        self.verify_unstarted = verify_runtime if verify_unstarted is None else verify_unstarted
         self._environment = dict(environment)
         self.launch_sha256 = launch_sha256(actor, self._environment)
         self._watcher_factory, self.exit_watch = watcher_factory, None
@@ -284,7 +287,11 @@ class HostRankRuntime:
             row = self._attempt()
             if row['phase'] not in ('prepared', 'launch_fenced'):
                 raise ObservationUnknown('launch outcome is not provably unstarted')
-            observed = await self.verify_runtime()
+            # A configured preparation verifier can omit launch-only transport
+            # permission. It still proves the exact files/spec/boot; the same
+            # lock, durable negative CAS, ports and memory prove no compute.
+            # start() never uses this verifier.
+            observed = await self.verify_unstarted()
             if (not isinstance(observed, RuntimeObservation)
                     or observed.runtime_sha256 != self.actor.spec.binding.runtime_sha256
                     or observed.launch_sha256 != self.launch_sha256
