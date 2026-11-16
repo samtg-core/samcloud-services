@@ -990,3 +990,13 @@ process exits zero and instead reads each literal, enumerated anchor. CPU tests
 use synthetic snapshots; unprivileged per-host `pfctl -n` and `visudo -c` checks
 prove syntax only. Actual rule installation, positive/negative network probes
 and the admitted distributed model remain separate deployment evidence.
+
+## Coordinator liveness during long file audits
+
+Registry keepalives and unrelated events coalesce into an active coordinator
+reconciliation. They do not change its observation epoch: the three-host file
+audit can outlast several keepalives. When no reconciliation is active they
+still request a fresh read. Exact resource/lease changes, new demand and event
+contact loss continue to invalidate immediately, including during an audit.
+Existing authority still expires against the continuous clock. This introduces
+no polling loop, deadline, physical operation or inference retry.
