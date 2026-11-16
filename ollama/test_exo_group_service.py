@@ -17,6 +17,7 @@ from . import test_exo_group_rank_runtime as host_runtime
 from . import test_queue_startup as startup
 from .exo_groups.service import EXOQueueStartup, EXOService, ServiceFeedUnavailable
 from .exo_groups.plane import CoordinatorPlane
+from .exo_groups.rank_process import ObservationUnknown
 
 
 class HostServiceControls(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +94,29 @@ class HostServiceControls(unittest.IsolatedAsyncioTestCase):
             await observer
         self.assertFalse(self.owner.tasks['host'].done())
         self.assertTrue(self.host._events_ready)
+
+    async def test_cancelled_connection_wait_keeps_the_original_feed_owned(self):
+        await self.start()
+        self.assertTrue(self.host._connected.is_set())
+        await self.host.wait_connected(self.owner.tasks['host'])
+        self.host.on_disconnect()
+        self.assertFalse(self.host._connected.is_set())
+        observer = asyncio.create_task(self.host.wait_connected(self.owner.tasks['host']))
+        await asyncio.sleep(0)
+        observer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await observer
+        self.assertFalse(self.owner.tasks['host'].done())
+
+    async def test_connection_wait_refuses_when_same_subscription_has_ended(self):
+        await self.start()
+        self.release.set()
+        with self.assertLogs('ollama.exo_groups.service', level='WARNING'):
+            with self.assertRaises(ServiceFeedUnavailable):
+                await self.owner.wait('host')
+        self.assertFalse(self.host._connected.is_set())
+        with self.assertRaises(ObservationUnknown):
+            await self.host.wait_connected(self.owner.tasks['host'])
 
     async def test_explicit_reconnect_uses_same_runtime_attempt_and_feed(self):
         await self.start()

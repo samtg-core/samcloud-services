@@ -136,6 +136,46 @@ class ExecutionBindings:
         result['end'] = json.loads(result.pop('end_json') or 'null')
         return result
 
+    def completed_snapshot(self, execution_id: str, *, group_owner: str,
+                           request_key: str, contract: InstanceContract) -> dict:
+        """Observe this group's completed call without impersonating its caller.
+
+        The group's canonical plane owner and the grant's authenticated queue
+        username have different meanings. Join the original demand and binding;
+        never translate either identity or bypass the public queue's privacy.
+        """
+        if not isinstance(contract, InstanceContract):
+            raise Conflict('original private instance contract required')
+        row = self.journal.db.execute('''SELECT b.*,x.state AS call_state,
+            x.request AS call_request,g.model AS call_model,g.resource AS call_resource,
+            i.plan_json AS group_plan FROM exo_execution_bindings b
+            JOIN executions x ON x.id=b.execution_id
+            JOIN grants g ON g.id=x.grant_id
+            JOIN exo_group_demands d ON d.execution_id=b.execution_id
+                AND d.owner=b.owner AND d.request_key=b.request_key
+            JOIN exo_group_intents i ON i.owner=b.owner AND i.request_key=b.request_key
+            WHERE b.execution_id=? AND b.owner=? AND b.request_key=?''',
+            (execution_id, group_owner, request_key)).fetchone()
+        if row is None:
+            raise NotFound()
+        result = dict(row)
+        plan = GroupPlan.parse(json.loads(result.pop('group_plan')))
+        state, body = result.pop('call_state'), json.loads(result.pop('call_request'))
+        model, resource = result.pop('call_model'), result.pop('call_resource')
+        if (state != 'complete' or model != plan.model_id or resource != HOST_RESOURCES['slice']
+                or contract.plan_sha256 != digest(asdict(plan))
+                or result['contract_json'] != encoded(asdict(contract))
+                or result['contract_sha256'] != contract.sha256
+                or result['instance_id'] != contract.instance_id
+                or not isinstance(body, dict) or body.get('operation') != 'chat'
+                or not isinstance(body.get('body'), dict)
+                or body['body'].get('model') != plan.model_id
+                or digest(body['body']) != result['request_sha256']):
+            raise Conflict('completed call differs from its original group binding')
+        result['contract'] = json.loads(result.pop('contract_json'))
+        result['end'] = json.loads(result.pop('end_json') or 'null')
+        return result
+
     def record_end(self, execution_id: str, proof: dict) -> dict:
         """Save exact all-rank runtime evidence; never finish or release here."""
         with self.journal.transaction():
