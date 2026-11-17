@@ -42,6 +42,10 @@ def darwin_filesystem(directory):
     result = _Statfs64()
     if function(directory, ctypes.byref(result)) != 0:
         raise StagingFilesUnavailable('filesystem observation failed')
+    # MNT_IGNORE_OWNERSHIP (also MNT_UNKNOWNPERMISSIONS), Darwin SDK
+    # sys/mount.h: st_uid cannot establish the required service ownership.
+    if result.flags & 0x00200000:
+        raise StagingFilesUnavailable('staging filesystem ignores ownership')
     return {'local': bool(result.flags & 0x1000),  # MNT_LOCAL, SDK sys/mount.h
             'filesystem': result.filesystem.decode('ascii'),
             'filesystem_id': list(result.fsid),
