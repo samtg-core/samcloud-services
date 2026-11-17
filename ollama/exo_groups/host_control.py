@@ -25,13 +25,14 @@ from .http import decode_json
 from .member import ExpectedMember
 from .plan import LaunchBinding, MemberPlan
 from .prepare import canonical, digest
-from .receipt_files import collect_attempt
+from .host_receipts import observe_local_attempt
 from .token_receipts import collect_tokens
 from .rank_process import Listener, ProcessIdentity, RunBinding
 from .rank_runtime import LaunchPreflightPending
 
 
-_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py', 'pf_transport.py')
+_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py',
+                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
 SOURCE_SHA256 = digest(_SOURCE)
@@ -285,7 +286,7 @@ class HostControl:
                     'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
                 spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
                             journal_path=str(self.runtime.settings.journal))
-                report = await asyncio.to_thread(collect_attempt, spec)
+                report = await observe_local_attempt(spec)
                 prepared = report['prepared']
                 data = prepared['binding']['expected']
                 launch = dict(data['binding']); launch['layers'] = tuple(launch['layers'])
@@ -516,7 +517,7 @@ class HostControl:
                 'state_path': str(owner.actor.state), 'journal_path': str(self.runtime.settings.journal)}
             spec.pop('rank_manifest_sha256')  # Collector derives it from the actual prepared row.
             try:
-                report = await asyncio.to_thread(collect_attempt, spec)
+                report = await observe_local_attempt(spec)
             except Exception:
                 raise HTTPException(503, 'Exact host receipt unconfirmed') from None
             return self._response(body['request_id'], report)

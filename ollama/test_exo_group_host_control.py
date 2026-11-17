@@ -171,9 +171,9 @@ class HostControlControls(IsolatedAsyncioTestCase):
         history = self.runtime.exo_host_control._preparation_history('lease_'+'9'*16)
         reader = SimpleNamespace(projection=AsyncMock(return_value=projection), close=AsyncMock())
         self.enterContext(patch.object(self.config, 'host_reader', return_value=reader))
-        collector = host_control.collect_attempt
-        self.enterContext(patch.object(host_control, 'collect_attempt', side_effect=lambda spec:
-            collector(spec, boot_reader=lambda: self.config.boot_id)))
+        collector = receipt_files.collect_attempt
+        self.enterContext(patch.object(host_control, 'observe_local_attempt', new=AsyncMock(side_effect=lambda spec:
+            collector(spec, boot_reader=lambda: self.config.boot_id))))
         return projection, history, reader
 
     async def test_historical_no_start_cleanup_and_exact_settlement_allow_new_session_preflight(self):
@@ -484,7 +484,7 @@ class HostControlControls(IsolatedAsyncioTestCase):
         try:
             def collect(spec):
                 return receipt_files.collect_attempt(spec, boot_reader=lambda: self.config.boot_id)
-            with patch.object(host_control, 'collect_attempt', side_effect=collect):
+            with patch.object(host_control, 'observe_local_attempt', new=AsyncMock(side_effect=collect)):
                 proof = await HTTPReceiptReader(client).read(self.config.plan, binding=self.fixture.binding,
                     journal_path=str(self.runtime.settings.journal), state_path=str(owner.actor.state),
                     boot_id=self.config.boot_id, launch_sha256=owner.launch_sha256,

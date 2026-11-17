@@ -35,3 +35,25 @@ repeated bind after an unknown effect, no resumed committed or legacy operation,
 and an authority event superseding the final read before the same runtime
 performs exactly one launch. These are control tests, not distributed numerical
 qualification.
+
+## Isolate receipt reads from the gateway's SQLite locks
+
+The receipt collector pins the journal inode with a raw file descriptor. On
+Darwin, closing any descriptor for that inode in the same process can drop
+SQLite's POSIX locks held by another connection in that process. Moving the
+collector to a thread does not isolate those locks.
+
+Local host receipts and historical-cleanup checks therefore use the existing
+bounded probe protocol in an isolated standard-library Python child. The
+command is fixed service code; the exact receipt specification travels on
+stdin, with a fresh nonce and collector hash checked on return. The child gets
+an explicit minimal environment with no credential inheritance. All original
+inode, ownership, boot, immutable-receipt, SQLite snapshot and size checks stay
+in place. A failed observation is still unknown, never cleanup or launch proof.
+
+A real SQLite control holds a parent writer lock and asks a second process to
+acquire it before and after the actual receipt observation. The isolated read
+preserves that lock; the old in-process collector demonstrably drops it. Other
+controls check identical receipt metadata, nonce/source/spec/uid/boot matching,
+output bounds, credential exclusion and no automatic observer retry. No model,
+fleet request or physical lease is used in these controls.
