@@ -67,6 +67,22 @@ render                              json | text | verbose_json | srt | vtt
 
 ## Model Lifecycle
 
+Durable transcription consumes its exact staged initial reservation before
+spawning Whisper. The physical resource handoff pauses admission and drains
+known work before invoking confirmed Whisper cleanup. An uncertain execution
+keeps the handoff closed even when its Python request counter has returned to
+zero; an idle timer or `force` flag cannot authorize this cleanup.
+
+Cleanup signals only the manager's tracked child with the exact configured
+arguments. Its exit must be reaped, the process inventory must contain no
+Whisper server, and the Whisper port must refuse connections before the model's
+lease can be released. The explicit cleanup observation bound never escalates
+to a kill or frees bytes on expiry. Cold reconciliation uses these same Whisper
+observations, so an empty Ollama inventory cannot establish Whisper absence.
+
+These are model-service lifecycle responsibilities. The core registry remains
+the authority for queue admission, lease ownership and settlement.
+
 ```
 Not loaded → estimate memory → request SAMcloud lease → pull/start → load → serve
                                                                         │

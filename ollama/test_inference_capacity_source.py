@@ -69,6 +69,31 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
         await self.source.refresh(self.physical)
         self.assertTrue(self.binding.ready('qwen'))
 
+    async def test_whisper_retirement_needs_whisper_absence_before_readmission(self):
+        from unittest.mock import Mock, patch
+        model = 'whisper-large-v3-turbo'
+        self.binding.models = {model:'gpu'}
+        self.runtime.settings = QueueSettings(Path(self.tmp.name)/'queue.sqlite',
+            {model:'gpu'},reservation_mb={model:100})
+        self.manager.models[model] = SimpleNamespace(name=model,lease_id='owned',memory_mb=80)
+        self.resource.update(available_memory_mb=0,leases=[self.receipt])
+        await self.source.refresh(self.physical)
+        self.assertTrue(self.binding.ready(model))
+        self.manager.models.clear()
+        self.manager.ollama = SimpleNamespace(list_running=Mock(return_value=[]))
+        self.rows = [self.receipt|{'status':'released'}]
+        self.resource.update(available_memory_mb=10000,leases=[])
+        with patch('ollama.whisper_lifecycle.cold_whisper_absent',return_value=False):
+            await self.source.refresh(self.physical)
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
+        self.assertEqual(self.source.last['gpu']['reason'],'previous_residency_unconfirmed')
+        self.assertEqual(self.actor.store.snapshot(self.binding.allocation(model))['state'],'covered')
+        with patch('ollama.whisper_lifecycle.cold_whisper_absent',return_value=True):
+            await self.source.refresh(self.physical)
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertEqual(self.actor.store.snapshot(self.binding.allocation(model))['state'],'retired')
+        self.manager.ollama.list_running.assert_not_called()
+
     async def test_unload_does_not_guess_backend_absence_or_registry_release(self):
         self.resident()
         await self.source.refresh(self.physical)

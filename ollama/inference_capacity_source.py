@@ -207,11 +207,15 @@ class ManagerCapacitySource:
                     if former is not None and (former['state']!='retired' or needs_initial_retirement):
                         ended=await source_call(lambda:manager.sc.list_leases(
                             resource_id=resource,service_id=store.service))
-                        from .manager import VLM_MODELS
+                        from .manager import VLM_MODELS, match_whisper_model
                         vision_model=any(info['default']==model for info in VLM_MODELS.values())
                         if vision_model:
                             from .inference_shared_resource import cold_vision_absent
                             absent=await source_call(cold_vision_absent)
+                            running=[] if absent is True else None
+                        elif match_whisper_model(model) is not None:
+                            from .whisper_lifecycle import cold_whisper_absent
+                            absent=await source_call(cold_whisper_absent)
                             running=[] if absent is True else None
                         else:
                             running=await source_call(manager.ollama.list_running)

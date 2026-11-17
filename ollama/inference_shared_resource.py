@@ -124,6 +124,10 @@ class ResourceHandoff:
             # Only cold recovery can reach this branch: live VLM unload still
             # refuses durable accounting and admission remains fail-closed.
             return cold_vision_absent()
+        from .manager import match_whisper_model
+        if match_whisper_model(model) is not None:
+            from .whisper_lifecycle import cold_whisper_absent
+            return cold_whisper_absent()
         running = self.runtime.manager.ollama.list_running()
         return (isinstance(running, list) and all(isinstance(row, dict) and
             isinstance(row.get('name'), str) and row['name'].removesuffix(':latest') !=

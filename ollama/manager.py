@@ -1818,7 +1818,7 @@ class ModelManager:
 
         self._kill_stray_whisper()
 
-        lease_id = self._request_lease(model_id, memory_mb)
+        lease_id = self._request_lease(model_id, memory_mb, before_load=True)
 
         config.WHISPER_SPOOL_DIR.mkdir(parents=True, exist_ok=True)
         config.WHISPER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -2286,6 +2286,9 @@ class ModelManager:
             if any(info['default'] == name for info in VLM_MODELS.values()):
                 from .inference_shared_resource import cold_vision_absent
                 return cold_vision_absent()
+            if match_whisper_model(name) is not None:
+                from .whisper_lifecycle import cold_whisper_absent
+                return cold_whisper_absent()
             running = self.ollama.list_running()
             return (isinstance(running, list) and
                     all(isinstance(row, dict) and isinstance(row.get('name'), str) and
@@ -2817,7 +2820,13 @@ class ModelManager:
         strict = require_confirmed or self.durable_inference
         if strict and mm.in_flight:
             raise RuntimeError('Model still has owned work; unload requires reconciliation')
-        if strict and mm.backend not in (Backend.OLLAMA, Backend.VLM):
+        if strict and mm.backend == Backend.WHISPER and not require_confirmed:
+            # A Python request counter can reach zero after contact loss while
+            # native transcription remains uncertain. Only ResourceHandoff's
+            # successful durable queue drain may enter qualified cleanup. An
+            # idle timer or force flag is not that authority.
+            raise RuntimeError('Whisper cleanup requires a drained queue handoff')
+        if strict and mm.backend not in (Backend.OLLAMA, Backend.VLM, Backend.WHISPER):
             raise RuntimeError('Backend unload is not qualified for durable accounting')
 
         if mm.backend == Backend.EXO:
@@ -2864,7 +2873,10 @@ class ModelManager:
             result = self.llama.stop(mm.port)
             log.info(f"Stopped llama-server: {result}")
         elif mm.backend == Backend.WHISPER:
-            if mm.whisper_process:
+            if strict:
+                from .whisper_lifecycle import stop_owned_whisper
+                stop_owned_whisper(mm, observation_seconds=10)
+            elif mm.whisper_process:
                 try:
                     mm.whisper_process.terminate()
                     try:

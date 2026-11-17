@@ -168,6 +168,45 @@ class SharedResourceHandoff(unittest.IsolatedAsyncioTestCase):
              patch('ollama.inference_bootstrap.vision_backend_absent', return_value=True):
             self.assertTrue(cold_vision_absent())
 
+    async def test_whisper_handoff_stops_owned_child_then_retires_one_staged_claim(self):
+        from . import config, manager as module
+        from .manager import ModelManager, ManagedModel, Backend
+        model = module.WHISPER_DEFAULT
+        self.client.request_lease.reset_mock()
+        initial = InitialReservations(self.root/'whisper.sqlite',self.client,
+            registry_owner='owner',service_id='model-service',models={model:'gpu'})
+        initial.stage(model,resource='gpu',service_id='model-service',memory_mb=100,ttl_seconds=3600)
+        initial.reserve(model,resource='gpu',service_id='model-service',memory_mb=100,ttl_seconds=3600)
+        child = Mock(pid=1234)
+        child.args = [module.WHISPER_PYTHON,module.WHISPER_SCRIPT,
+            '--model',module.WHISPER_MODELS[model]['repo'],'--host',config.WHISPER_HOST,
+            '--port',str(config.WHISPER_PORT),'--spool',str(config.WHISPER_SPOOL_DIR),
+            '--ffmpeg',config.FFMPEG_BIN]
+        child.poll.return_value = None
+        child.terminate.side_effect = lambda:setattr(child.poll,'return_value',0)
+        manager = object.__new__(ModelManager)
+        manager.durable_inference = True
+        manager.initial_reservations,manager.sc = initial,self.client
+        manager.models = {model:ManagedModel(name=model,backend=Backend.WHISPER,
+            memory_mb=100,lease_id='owned',port=config.WHISPER_PORT,managed=True,
+            whisper_process=child,loaded_at=0,last_used=0)}
+        manager.residency_renewal = SimpleNamespace(resume=Mock())
+        manager._release_lease_quietly = self.client.release_lease
+        self.running = []
+        self.runtime.manager = manager
+        self.runtime.settings = SimpleNamespace(models={model:'gpu'})
+        self.actor = ResourceHandoff(self.runtime)
+        with patch('ollama.whisper_lifecycle.cold_whisper_absent',return_value=True):
+            result = await self.actor.begin()
+        self.assertEqual(result['phase'],'idle')
+        self.assertEqual(manager.models,{})
+        self.assertEqual(initial.snapshot(model)['state'],'retired')
+        self.client.request_lease.assert_called_once()
+        self.client.release_lease.assert_called_once_with('owned')
+        child.terminate.assert_called_once()
+        child.wait.assert_called_once_with(timeout=10)
+        child.kill.assert_not_called()
+
     async def test_uncertain_native_work_keeps_residency_and_allocation(self):
         self.uncertain = True
         result = await self.actor.begin()
