@@ -47,6 +47,7 @@ def build_explicit_instance(
     group_id: str,
     generation: int,
     ring_port: int,
+    served_context_length: int | None = None,
 ) -> dict:
     """Exact three-host pipeline request; not evidence of admission/readiness."""
     # Import only for the explicit adapter. Ordinary staging stays CPU-only and
@@ -114,6 +115,12 @@ def build_explicit_instance(
             or not re.fullmatch(r"[a-f0-9]{64}", entry.get("sha256", ""))
         ):
             raise BindingRefused("invalid parent weight identity")
+    context_length = config['max_position_embeddings']
+    if served_context_length is not None:
+        if (type(served_context_length) is not int or type(context_length) is not int
+                or not 1 <= served_context_length <= context_length):
+            raise BindingRefused('served context must fit the pinned native window')
+        context_length = served_context_length
     card = ModelCard(
         model_id=ModelId(plan.model_id),
         storage_size=Memory.from_bytes(sum(entry["bytes"] for entry in files)),
@@ -123,7 +130,7 @@ def build_explicit_instance(
         num_key_value_heads=config["num_key_value_heads"],
         tasks=[ModelTask.TextGeneration],
         family=config["model_type"],
-        context_length=config["max_position_embeddings"],
+        context_length=context_length,
         trust_remote_code=False,
         backends=[Backend.MlxMetal],
     )

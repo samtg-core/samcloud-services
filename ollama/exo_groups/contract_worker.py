@@ -87,8 +87,9 @@ def main():
     if len(raw) > MAX_INPUT:
         raise ValueError('compiler input exceeds bound')
     request = decode(raw)
-    if set(request) != {'nonce', 'bootstrap_sha256', 'source_pins', 'plan', 'manifest',
-                        'parent', 'runtime_sha256', 'group_id', 'generation', 'ring_port', 'endpoints'}:
+    fields = {'nonce', 'bootstrap_sha256', 'source_pins', 'plan', 'manifest',
+              'parent', 'runtime_sha256', 'group_id', 'generation', 'ring_port', 'endpoints'}
+    if set(request) not in (fields, fields | {'served_context_length'}):
         raise ValueError('exact metadata compiler request required')
     provider = Path(__file__).resolve().parents[2]
     pins = {name: hashlib.sha256((provider/name).read_bytes()).hexdigest() for name in SOURCE_FILES}
@@ -110,7 +111,8 @@ def main():
         request['manifest'].encode(), request['parent'].encode(),
         tuple(RankEndpoint(**value) for value in request['endpoints']),
         group_id=request['group_id'], generation=request['generation'],
-        ring_port=request['ring_port'], runtime_sha256=request['runtime_sha256'])
+        ring_port=request['ring_port'], runtime_sha256=request['runtime_sha256'],
+        served_context_length=request.get('served_context_length'))
     if any(name.split('.')[0] in COMPUTE for name in sys.modules):
         raise RuntimeError('compute module imported during metadata compilation')
     output = canonical({'nonce': request['nonce'], 'request_sha256': hashlib.sha256(raw).hexdigest(),

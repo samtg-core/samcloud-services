@@ -27,6 +27,7 @@ class InstanceContract:
         cls, plan: GroupPlan, manifest: bytes, parent: bytes,
         endpoints: tuple[RankEndpoint, ...], *, group_id: str,
         generation: int, ring_port: int, runtime_sha256: str,
+        served_context_length: int | None = None,
     ) -> "InstanceContract":
         """CPU-only preparation; the caller independently pins the EXO source.
 
@@ -36,7 +37,7 @@ class InstanceContract:
         _digest(runtime_sha256, "runtime source")
         wire = build_explicit_instance(
             plan, manifest, parent, endpoints, group_id=group_id,
-            generation=generation, ring_port=ring_port,
+            generation=generation, ring_port=ring_port, served_context_length=served_context_length,
         )
         from exo.api.types.api import CreateInstanceParams
 
@@ -58,6 +59,17 @@ class InstanceContract:
     @property
     def sha256(self) -> str:
         return digest(asdict(self))
+
+    @property
+    def context_length(self) -> int:
+        contexts = {shard['PipelineShardMetadata']['modelCard']['contextLength']
+                    for shard in self._instance['shardAssignments']['runnerToShard'].values()}
+        if len(contexts) != 1:
+            raise BindingRefused('private instance has inconsistent served contexts')
+        context = contexts.pop()
+        if type(context) is not int or context < 1:
+            raise BindingRefused('private instance has no valid served context')
+        return context
 
     def create_request(self) -> dict:
         """Return detached data; obtaining it never authorizes its submission."""

@@ -80,7 +80,7 @@ class HostDeployment:
     def __init__(self, plan, files, *, manifest, parent, runtime_sha256, boot_id, home, state_base,
                  peer_ips, api_port, peer_port, discovery_port, ring_port,
                  cleanup_tolerance_bytes, verify_transport, collector=collect_host,
-                 qualification_token_limit=None):
+                 qualification_token_limit=None, prefill_step_size=None, served_context_length=None):
         if (not isinstance(plan, GroupPlan) or not isinstance(files, HostFiles) or files.rank not in _RANKS
                 or files.resource_id != HOST_RESOURCES[files.rank]
                 or type(files.uid) is not int or files.uid < 0
@@ -91,7 +91,11 @@ class HostDeployment:
                 or not callable(verify_transport) or not callable(collector)
                 or type(cleanup_tolerance_bytes) is not int or cleanup_tolerance_bytes < 0
                 or qualification_token_limit is not None and (
-                    type(qualification_token_limit) is not int or qualification_token_limit != 16)):
+                    type(qualification_token_limit) is not int or qualification_token_limit != 16)
+                or prefill_step_size is not None and (
+                    type(prefill_step_size) is not int or prefill_step_size < 4)
+                or served_context_length is not None and (
+                    type(served_context_length) is not int or served_context_length < 1)):
             raise ValueError('exact host files, boot, runtime and live transport verifier required')
         self.plan = plan
         # Freeze mutable policy dictionaries before producing any spec or file.
@@ -109,6 +113,14 @@ class HostDeployment:
                 'source/src/exo/utils/qualification_tokens.py',
                 'source/src/exo/worker/runner/llm_inference/batch_generator.py'} <= names:
             raise ValueError('pinned raw-token observation source required')
+        if prefill_step_size is not None and 'source/src/exo/utils/inference_profile.py' not in names:
+            raise ValueError('pinned native prefill-profile control required')
+        if served_context_length is not None:
+            native_context = json.loads(parent).get('config', {}).get('max_position_embeddings')
+            if (type(native_context) is not int or served_context_length > native_context
+                    or not {'source/src/exo/utils/served_context.py',
+                            'source/src/exo/worker/engines/mlx/generator/generate.py'} <= names):
+                raise ValueError('bounded native context and pinned token-budget enforcement required')
         if (self.state_base == self.home / '.exo'
                 or any(self.state_base.is_relative_to(p) for p in (self.runtime_root, self.model_root))):
             raise ValueError('private attempt state must be outside immutable artifacts and standing EXO home')
@@ -124,6 +136,8 @@ class HostDeployment:
         self.peer_ips, self.ports = peer_ips, ports
         self.cleanup_tolerance_bytes = cleanup_tolerance_bytes
         self.qualification_token_limit = qualification_token_limit
+        self.prefill_step_size = prefill_step_size
+        self.served_context_length = served_context_length
         self.verify_transport, self.collector = verify_transport, collector
         self.transport_sha256 = getattr(verify_transport, 'configuration_sha256', None)
         if self.transport_sha256 is not None and (
@@ -168,6 +182,10 @@ class HostDeployment:
         }
         if self.qualification_token_limit is not None:
             environment['EXO_LEASED_TOKEN_TRACE'] = str(self.qualification_token_limit)
+        if self.prefill_step_size is not None:
+            environment['EXO_PREFILL_STEP_SIZE'] = str(self.prefill_step_size)
+        if self.served_context_length is not None:
+            environment['EXO_SERVED_CONTEXT_LENGTH'] = str(self.served_context_length)
         argv = (str(self.runtime_root / 'python/bin/python3.13'), '-I', '-S', '-B',
                 str(self.runtime_root / 'run_text.py'), '--namespace', namespace,
                 '--offline', '--no-downloads', '--no-batch', '--api-port', str(api),

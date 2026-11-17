@@ -19,6 +19,7 @@ from . import server
 from . import test_exo_group_staging as staged
 from .exo_groups import deployment
 from .exo_groups.deployment import HostDeployment
+from .exo_groups.host_control import configuration_sha256
 from .exo_groups.plan import LaunchBinding
 from .exo_groups.prepare import canonical
 from .exo_groups.rank_process import ObservationUnknown
@@ -131,9 +132,73 @@ class DeploymentControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compiled.environment['EXO_LEASED_RING_PORT'], '52518')
         self.assertEqual(compiled.spec.binding.expected.member.layers, (0, 7))
         self.assertFalse(any('TOKEN' in k or 'BEARER' in k for k in compiled.environment))
+        self.assertNotIn('EXO_PREFILL_STEP_SIZE', compiled.environment)
         changed = self.config.compile(replace(self.binding, generation=2))
         self.assertNotEqual(compiled.node_id, changed.node_id)
         self.assertNotEqual(compiled.session, changed.session)
+
+    async def test_explicit_prefill_step_requires_qualified_native_source(self):
+        with self.assertRaisesRegex(ValueError, 'native prefill-profile'):
+            HostDeployment(self.plan, self.files, **(self.options | {'prefill_step_size': 256}))
+        for invalid in (True, 0, 3, '256'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                HostDeployment(self.plan, self.files, **(self.options | {'prefill_step_size': invalid}))
+        self.assertFalse(list(self.state_base.iterdir()))
+
+    async def test_prefill_step_is_bound_to_host_configuration_and_launch_environment(self):
+        runtime = Path(self.files.runtime['root'])
+        runtime.chmod(0o700)
+        path = runtime / 'source/src/exo/utils/inference_profile.py'
+        path.parent.parent.chmod(0o700)
+        path.parent.mkdir(mode=0o700)
+        raw = b'qualified control fixture; never executed\n'
+        path.write_bytes(raw)
+        path.chmod(0o400)
+        path.parent.chmod(0o500)
+        path.parent.parent.chmod(0o500)
+        runtime.chmod(0o500)
+        pins = list(self.files.runtime['files']) + [{'path': str(path.relative_to(runtime)),
+                'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(), 'link': None}]
+        files = replace(self.files, runtime=runtime_file_policy(str(runtime), pins))
+        config = HostDeployment(self.plan, files, **(self.options | {'prefill_step_size': 256}))
+        other = HostDeployment(self.plan, files, **(self.options | {'prefill_step_size': 512}))
+        compiled = config.compile(self.binding)
+        self.assertEqual(compiled.environment['EXO_PREFILL_STEP_SIZE'], '256')
+        self.assertNotEqual(configuration_sha256(config), configuration_sha256(other))
+        self.assertNotEqual(compiled.environment_json, other.compile(self.binding).environment_json)
+        self.assertEqual(compiled.expected, self.config.compile(self.binding).expected)
+        self.assertFalse(list(self.state_base.iterdir()))
+
+    async def test_served_context_requires_native_enforcement_and_cannot_exceed_checkpoint(self):
+        with self.assertRaisesRegex(ValueError, 'token-budget enforcement'):
+            HostDeployment(self.plan, self.files, **(self.options | {'served_context_length': 1024}))
+        runtime = Path(self.files.runtime['root'])
+        pins = list(self.files.runtime['files'])
+        for name in ('source/src/exo/utils/served_context.py',
+                     'source/src/exo/worker/engines/mlx/generator/generate.py'):
+            path = runtime / name
+            for parent in reversed((path.parent, *path.parent.parents)):
+                if parent == runtime or parent.is_relative_to(runtime):
+                    parent.mkdir(exist_ok=True)
+                    parent.chmod(0o700)
+            raw = b'qualified context control fixture; never executed\n'
+            path.write_bytes(raw)
+            pins.append({'path': name, 'bytes': len(raw),
+                         'sha256': hashlib.sha256(raw).hexdigest(), 'link': None})
+        for path in sorted(runtime.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+            if not path.is_symlink():
+                path.chmod(0o500 if path.is_dir() else 0o400)
+        runtime.chmod(0o500)
+        files = replace(self.files, runtime=runtime_file_policy(str(runtime), pins))
+        for value in (True, 0, 32769):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                HostDeployment(self.plan, files, **(self.options | {'served_context_length': value}))
+        configured = HostDeployment(self.plan, files, **(self.options | {'served_context_length': 1024}))
+        changed = HostDeployment(self.plan, files, **(self.options | {'served_context_length': 2048}))
+        self.assertEqual(configured.compile(self.binding).environment['EXO_SERVED_CONTEXT_LENGTH'], '1024')
+        self.assertNotEqual(configuration_sha256(configured), configuration_sha256(changed))
+        self.assertEqual(configured.compile(self.binding).expected, self.config.compile(self.binding).expected)
+        self.assertFalse(list(self.state_base.iterdir()))
 
     async def test_wrong_rank_resource_or_lease_never_gets_a_private_attempt(self):
         for binding in (replace(self.binding, rank='wafer'),

@@ -81,6 +81,13 @@ else:sys.stdout.buffer.write(canon(v))
         self.assertEqual(await owner.compile(self.launches), result)
         self.assertEqual(len(self.calls), 1)
 
+    async def test_helper_cannot_advertise_a_context_different_from_the_host_profile(self):
+        # The isolated fake helper intentionally returns the original card.
+        self.fixture.config.served_context_length = 1024
+        with self.assertRaises(CompilerUnavailable):
+            await self.owner().compile(self.launches)
+        self.assertEqual(len(self.calls), 1)
+
     async def test_observer_disconnect_keeps_one_supervisor_owned_compilation(self):
         owner = self.owner()
         self.release.clear()

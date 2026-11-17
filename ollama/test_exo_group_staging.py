@@ -21,7 +21,7 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name).resolve()
         fixture = fixtures.GroupBindingControls()
         fixture.setUp()
-        config = {'model_type': 'qwen3', 'num_hidden_layers': 28}
+        config = {'model_type': 'qwen3', 'num_hidden_layers': 28, 'max_position_embeddings': 32768}
         self.sidecars = {'config.json': canonical(config), 'tokenizer.json': b'{}',
                          'tokenizer_config.json': b'{}'}
         self.parent = {'model_id': fixture.plan.model_id, 'revision': fixture.plan.revision,
