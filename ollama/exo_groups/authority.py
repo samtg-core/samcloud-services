@@ -126,12 +126,17 @@ class GroupAuthorityReader:
 
     async def refresh(self) -> GroupObservation:
         async with self._lock:
-            self.invalidate()
+            # A liveness read cannot extend the previous continuous-clock
+            # envelope, but need not revoke its unexpired permission. Exact
+            # member events/contact loss still invalidate immediately, and a
+            # failed read below withdraws the previous observation.
             epoch = self._epoch
             try:
                 headers = self._headers()
                 digest = hashlib.sha256(headers['Authorization'].encode()).digest()
                 if digest != self._verified_digest:
+                    self.invalidate()
+                    epoch = self._epoch
                     identity = await self._json('/api/v1/auth/verify', headers)
                     if identity.get('valid') is not True or identity.get('owner_id') != self.owner_id:
                         raise AuthorityReadUnavailable('credential differs from group owner')
@@ -156,8 +161,10 @@ class GroupAuthorityReader:
                     raise AuthorityReadUnavailable('authority changed during observation')
                 self._current = observation
                 return observation
-            except Exception:
+            except (Exception, asyncio.CancelledError) as error:
                 self.invalidate()
+                if isinstance(error, asyncio.CancelledError):
+                    raise
                 # No HTTP body, credentials, prompts or parser details in diagnostics.
                 raise AuthorityReadUnavailable('fresh group authority unavailable') from None
 

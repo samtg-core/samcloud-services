@@ -57,6 +57,7 @@ class GroupAcquisition:
         self.report = AcquisitionReport('unknown', 'event_source_unconfirmed')
         self._task = None
         self._epoch = 0
+        self._published_epoch = None
         self._events_ready = False
         self._closed = False
         self._drained = False
@@ -82,7 +83,11 @@ class GroupAcquisition:
             self.authority.invalidate()
 
     def _publish(self, report):
+        changed = report != self.report or self._published_epoch != self._epoch
         self.report = report
+        if not changed:
+            return
+        self._published_epoch = self._epoch
         try:
             self.notify(report)
         except Exception:
@@ -140,6 +145,9 @@ class GroupAcquisition:
         self._invalidate()  # Withdraw before scheduling, not after awaiting I/O.
         if not self._events_ready:
             return
+        self._schedule()
+
+    def _schedule(self):
         if self._task is None or self._task.done():
             task = self.task_factory(self._drive())
             self._task = task
@@ -161,8 +169,8 @@ class GroupAcquisition:
         """
         if self._closed:
             return
-        if self._task is None or self._task.done():
-            self.wake()
+        if self._events_ready:
+            self._schedule()
 
     async def wait(self):
         task = self._task

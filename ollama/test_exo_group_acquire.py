@@ -286,6 +286,33 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.server_created)
         self.assertFalse(self.actor.may_start_ranks())
 
+    async def test_liveness_refresh_does_not_revoke_a_dependent_operation_epoch(self):
+        self.group['phase'] = 'serving'
+        await self.start()
+        entered, release = asyncio.Event(), asyncio.Event()
+        notified = []
+        self.actor.notify = notified.append
+        original = self.actor.verify_staging
+        async def slow_stage(*args):
+            entered.set()
+            await release.wait()
+            return await original(*args)
+        self.actor.verify_staging = slow_stage
+        epoch = self.actor._epoch
+        self.actor.refresh()
+        await asyncio.wait_for(entered.wait(), 2)
+        try:
+            self.assertEqual(self.actor._epoch, epoch)
+            self.assertTrue(self.actor.may_serve_requests())
+            self.actor.refresh()
+            self.assertEqual(self.actor._epoch, epoch)
+        finally:
+            release.set()
+        self.assertEqual((await self.actor.wait()).phase, 'lease_serving')
+        self.assertEqual(self.actor._epoch, epoch)
+        self.assertTrue(self.actor.may_serve_requests())
+        self.assertEqual(notified, [])
+
     async def test_close_drains_pending_metadata_and_keeps_ownership_record(self):
         self.release.clear()
         self.actor.note_demand(self.call['id'])

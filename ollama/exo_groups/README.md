@@ -1006,3 +1006,11 @@ but loses its credential. The same owner must explicitly repeat the original
 activation request id to restore the header in memory and subscribe again.
 A different request id or owner is refused. This restores observation of the
 same saved demand/group; it does not enqueue another inference execution.
+
+Liveness refreshes also preserve the semantic observation epoch during dependent
+host/runtime reads. An unchanged phase does not invalidate provider readiness.
+While fresh authority is being read, only the previous unexpired continuous-
+clock envelope remains usable; its deadline is never extended by the read.
+Failure, cancellation, credential changes, exact lease/resource hints and feed
+loss withdraw permission. This keeps a harmless refresh from interrupting a
+long runtime check or inference stream, without treating a keepalive as authority.
