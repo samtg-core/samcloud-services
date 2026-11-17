@@ -43,6 +43,14 @@ class GroupProvider:
             self.wake()
 
         actor.notify = changed
+        previous_refreshed = actor.notify_refreshed
+
+        def refreshed(report):
+            previous_refreshed(report)
+            if not self._ready and not self._busy():
+                self.refresh()
+
+        actor.notify_refreshed = refreshed
 
     def _saved(self):
         try:
@@ -215,6 +223,16 @@ class GroupProvider:
         if self._closed:
             return
         self.invalidate()
+        self.refresh()
+
+    def refresh(self):
+        """Resume incomplete metadata after an external hint, preserving epoch.
+
+        An active dependent read remains owned. Assembly re-reads existing
+        submission identities; it never replays an unknown host/instance POST.
+        """
+        if self._closed:
+            return
         if self._task is None or self._task.done():
             self._task = self.queue.supervisor.prepare(self._drive())
 

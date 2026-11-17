@@ -1015,6 +1015,14 @@ Failure, cancellation, credential changes, exact lease/resource hints and feed
 loss withdraw permission. This keeps a harmless refresh from interrupting a
 long runtime check or inference stream, without treating a keepalive as authority.
 
+An unchanged successful authority read also emits a separate refresh notification.
+If a dependent metadata read previously failed, the provider can resume that
+finite operation on this notification without changing its semantic epoch or
+requiring another inference demand. An active read keeps its existing task, and
+a ready or busy backend is left alone. Saved host/instance submissions retain
+their identities: this notification cannot replay an unknown POST. There is no
+additional timer or polling owner.
+
 ## Explicit two-host qualification
 
 The pinned plan accepts Slice/Obelisk or Slice/Wafer/Obelisk, in those pipeline

@@ -48,6 +48,7 @@ class GroupAcquisition:
         self.intents, self.plan, self.manifest = intents, plan, manifest
         self.plane, self.authority_factory = plane, authority_factory
         self.notify, self.wall_clock = notify, wall_clock
+        self.notify_refreshed = lambda _report: None
         if verify_staging is not None and not callable(verify_staging):
             raise TypeError('explicit staging verifier required')
         self.verify_staging = verify_staging
@@ -86,6 +87,14 @@ class GroupAcquisition:
         changed = report != self.report or self._published_epoch != self._epoch
         self.report = report
         if not changed:
+            # A successful fresh read can resume an incomplete dependent
+            # metadata operation. It must not revoke its semantic epoch or a
+            # ready backend merely because the registry delivered liveness.
+            try:
+                self.notify_refreshed(report)
+            except Exception:
+                self._invalidate()
+                self.report = AcquisitionReport('unknown', 'notification_failed', report.group_id)
             return
         self._published_epoch = self._epoch
         try:

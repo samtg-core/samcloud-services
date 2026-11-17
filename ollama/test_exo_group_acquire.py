@@ -313,6 +313,20 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.actor.may_serve_requests())
         self.assertEqual(notified, [])
 
+    async def test_successful_unchanged_read_has_a_separate_refresh_notification(self):
+        self.group['phase'] = 'serving'
+        await self.start()
+        semantic, refreshed = [], []
+        self.actor.notify = semantic.append
+        self.actor.notify_refreshed = refreshed.append
+        epoch = self.actor._epoch
+        self.actor.refresh()
+        report = await self.actor.wait()
+        self.assertEqual(report.phase, 'lease_serving')
+        self.assertEqual(semantic, [])
+        self.assertEqual(refreshed, [report])
+        self.assertEqual(self.actor._epoch, epoch)
+
     async def test_close_drains_pending_metadata_and_keeps_ownership_record(self):
         self.release.clear()
         self.actor.note_demand(self.call['id'])
