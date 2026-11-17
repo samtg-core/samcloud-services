@@ -113,7 +113,7 @@ class HostDeployment:
                 or any(self.state_base.is_relative_to(p) for p in (self.runtime_root, self.model_root))):
             raise ValueError('private attempt state must be outside immutable artifacts and standing EXO home')
         private = tuple(IPv4Network(v) for v in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
-        if (not isinstance(peer_ips, tuple) or len(peer_ips) != 3 or len(set(peer_ips)) != 3
+        if (not isinstance(peer_ips, tuple) or len(peer_ips) != len(plan.pipeline_ranks) or len(set(peer_ips)) != len(plan.members)
                 or any(str(IPv4Address(v)) != v or not any(IPv4Address(v) in network for network in private)
                        for v in peer_ips)):
             raise ValueError('three exact private LAN peer addresses required')

@@ -82,7 +82,7 @@ class InstanceStarts:
 class InstanceStartup:
     def __init__(self, actor, private, starts, contract, launches, verify_runtime):
         if (actor.intents is not starts.bindings.intents or not callable(verify_runtime)
-                or len(launches) != 3):
+                or len(launches) != len(actor.plan.pipeline_ranks)):
             raise ValueError('exact startup actor, bindings and runtime verifier required')
         self.actor, self.private, self.starts = actor, private, starts
         self.contract, self.launches, self.verify_runtime = contract, launches, verify_runtime

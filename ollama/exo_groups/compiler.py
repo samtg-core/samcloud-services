@@ -51,7 +51,7 @@ class ContractCompiler:
 
     async def compile(self, launches):
         ordered = sorted(self.deployment.plan.members, key=lambda m: m.pipeline_rank)
-        if (not isinstance(launches, tuple) or len(launches) != 3
+        if (not isinstance(launches, tuple) or len(launches) != len(self.deployment.plan.pipeline_ranks)
                 or tuple(binding.rank for binding in launches) != tuple(m.rank for m in ordered)):
             raise ValueError('exact pipeline-ordered launches required')
         for binding in launches:
@@ -63,7 +63,7 @@ class ContractCompiler:
                     or not isinstance(binding.lease_id, str)
                     or not re.fullmatch('lease_[a-f0-9]{16,64}', binding.lease_id)):
                 raise ValueError('one exact group generation required')
-        if len({binding.lease_id for binding in launches}) != 3:
+        if len({binding.lease_id for binding in launches}) != len(self.deployment.plan.members):
             raise ValueError('three exact unique member leases required')
         local = next(binding for binding in launches if binding.rank == self.deployment.files.rank)
         compiled = self.deployment.compile(local)

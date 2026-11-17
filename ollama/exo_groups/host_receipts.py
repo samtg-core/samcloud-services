@@ -10,6 +10,7 @@ import hashlib
 from importlib.resources import files
 import secrets
 import shlex
+import sys
 
 from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
 from .host_channel import HostRoute, run_probe
@@ -18,6 +19,7 @@ from .member import ExpectedMember
 from .plan import BindingRefused, LaunchBinding
 from .prepare import canonical
 from .rank_process import ProcessIdentity, Listener, RunBinding
+from .receipt_files import ReceiptUnavailable
 
 
 PREFIX=b'EXO_RECEIPTS_V1:'
@@ -33,6 +35,41 @@ def _program(source):
         "v={'request_id':r['request_id'],'collector_sha256':r['collector_sha256'],"
         "'report':n['collect_attempt'](r['spec'])}\n"
         "print('EXO_RECEIPTS_V1:'+json.dumps(v,sort_keys=True,separators=(',',':'),allow_nan=False),flush=True)")
+
+
+async def observe_local_attempt(spec):
+    """Read the host's journal in a separate, bounded metadata observer.
+
+    POSIX locks are per process: closing a raw descriptor for SQLite's file in
+    a thread can release the gateway's writer locks. The existing isolated
+    collector/probe protocol avoids that without weakening any file checks.
+    No environment/credential inheritance, shell, native model or lease call.
+    """
+    source = files(__package__).joinpath('receipt_files.py').read_text()
+    sha = hashlib.sha256(source.encode()).hexdigest()
+    nonce = secrets.token_hex(32)
+    request = canonical({'request_id': nonce, 'collector_sha256': sha, 'spec': spec})
+    if len(request) > MAX_FRAME:
+        raise ReceiptUnavailable('local host receipt request exceeds bound')
+    try:
+        raw = await run_probe((sys.executable, '-I', '-S', '-B', '-c', _program(source)), request,
+            environment={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'PYTHONDONTWRITEBYTECODE': '1'})
+        if not isinstance(raw, bytes) or len(raw) > MAX_FRAME:
+            raise ValueError('frame bound')
+        frames = [line[len(PREFIX):] for line in raw.splitlines() if line.startswith(PREFIX)]
+        if len(frames) != 1:
+            raise ValueError('frame count')
+        value = decode_json(frames[0])
+        report = value.get('report')
+        if (set(value) != {'request_id', 'collector_sha256', 'report'}
+                or value['request_id'] != nonce or value['collector_sha256'] != sha
+                or not isinstance(report, dict) or canonical(report.get('binding')) != canonical(spec)
+                or type(report.get('uid')) is not int or report['uid'] != spec['uid']
+                or report.get('boot_id') != spec['boot_id']):
+            raise ValueError('local receipt identity')
+        return report
+    except Exception:
+        raise ReceiptUnavailable('isolated host attempt observation unavailable') from None
 
 
 def prepared_from_report(plan,value):

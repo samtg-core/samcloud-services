@@ -8,7 +8,7 @@ import copy
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 import httpx
@@ -174,6 +174,51 @@ class InstalledControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.state(first), self.state(second)), ('failed', 'complete'))
         self.assertEqual(self.parts.posts, 2)
         self.assertTrue(self.provider.owns_group())  # Logical result is not physical release.
+
+    async def test_liveness_resumes_failed_metadata_without_new_demand_or_submission(self):
+        call = await self.enqueue()
+        self.actor.events_reconciled()
+        await self.drain()
+        self.parts.bindings.bind_instance(self.parts.plan.owner_id,
+            self.parts.plan.request_key, self.parts.contract)
+        with patch.object(self.parts.private, 'state', new=AsyncMock(side_effect=RuntimeError('transient read'))):
+            self.provider.bind_backend(self.parts.backend)
+            await self.drain()
+        self.assertEqual(self.state(call), 'queued')
+        self.assertFalse(self.provider._ready)
+        epoch = self.actor._epoch
+        self.actor.refresh()  # Existing external heartbeat; no timer/new call.
+        self.assertEqual(self.actor._epoch, epoch)
+        await self.drain()
+        self.assertEqual(self.state(call), 'complete')
+        self.assertEqual((self.created, self.parts.posts), (1, 1))
+
+    async def test_liveness_during_dependent_read_keeps_its_task_and_epoch(self):
+        call = await self.enqueue()
+        self.actor.events_reconciled()
+        await self.drain()
+        self.parts.bindings.bind_instance(self.parts.plan.owner_id,
+            self.parts.plan.request_key, self.parts.contract)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.parts.backend.verify_runtime
+        async def blocked():
+            entered.set()
+            await release.wait()
+            return await original()
+        self.parts.backend.verify_runtime = blocked
+        self.provider.bind_backend(self.parts.backend)
+        await asyncio.wait_for(entered.wait(), 2)
+        task, epoch, actor_epoch = self.provider._task, self.provider._epoch, self.actor._epoch
+        try:
+            self.actor.refresh()
+            await self.actor.wait()
+            self.assertIs(self.provider._task, task)
+            self.assertEqual((self.provider._epoch, self.actor._epoch), (epoch, actor_epoch))
+        finally:
+            release.set()
+        await self.drain()
+        self.assertEqual(self.state(call), 'complete')
+        self.assertEqual(self.parts.posts, 1)
 
     async def test_transport_loss_keeps_unknown_execution_and_next_call_waiting(self):
         self.parts.mode = 'reset'

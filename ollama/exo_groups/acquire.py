@@ -48,6 +48,7 @@ class GroupAcquisition:
         self.intents, self.plan, self.manifest = intents, plan, manifest
         self.plane, self.authority_factory = plane, authority_factory
         self.notify, self.wall_clock = notify, wall_clock
+        self.notify_refreshed = lambda _report: None
         if verify_staging is not None and not callable(verify_staging):
             raise TypeError('explicit staging verifier required')
         self.verify_staging = verify_staging
@@ -57,6 +58,7 @@ class GroupAcquisition:
         self.report = AcquisitionReport('unknown', 'event_source_unconfirmed')
         self._task = None
         self._epoch = 0
+        self._published_epoch = None
         self._events_ready = False
         self._closed = False
         self._drained = False
@@ -82,7 +84,19 @@ class GroupAcquisition:
             self.authority.invalidate()
 
     def _publish(self, report):
+        changed = report != self.report or self._published_epoch != self._epoch
         self.report = report
+        if not changed:
+            # A successful fresh read can resume an incomplete dependent
+            # metadata operation. It must not revoke its semantic epoch or a
+            # ready backend merely because the registry delivered liveness.
+            try:
+                self.notify_refreshed(report)
+            except Exception:
+                self._invalidate()
+                self.report = AcquisitionReport('unknown', 'notification_failed', report.group_id)
+            return
+        self._published_epoch = self._epoch
         try:
             self.notify(report)
         except Exception:
@@ -140,6 +154,9 @@ class GroupAcquisition:
         self._invalidate()  # Withdraw before scheduling, not after awaiting I/O.
         if not self._events_ready:
             return
+        self._schedule()
+
+    def _schedule(self):
         if self._task is None or self._task.done():
             task = self.task_factory(self._drive())
             self._task = task
@@ -161,8 +178,8 @@ class GroupAcquisition:
         """
         if self._closed:
             return
-        if self._task is None or self._task.done():
-            self.wake()
+        if self._events_ready:
+            self._schedule()
 
     async def wait(self):
         task = self._task

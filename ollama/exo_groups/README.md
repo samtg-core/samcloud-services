@@ -1006,3 +1006,41 @@ but loses its credential. The same owner must explicitly repeat the original
 activation request id to restore the header in memory and subscribe again.
 A different request id or owner is refused. This restores observation of the
 same saved demand/group; it does not enqueue another inference execution.
+
+Liveness refreshes also preserve the semantic observation epoch during dependent
+host/runtime reads. An unchanged phase does not invalidate provider readiness.
+While fresh authority is being read, only the previous unexpired continuous-
+clock envelope remains usable; its deadline is never extended by the read.
+Failure, cancellation, credential changes, exact lease/resource hints and feed
+loss withdraw permission. This keeps a harmless refresh from interrupting a
+long runtime check or inference stream, without treating a keepalive as authority.
+
+An unchanged successful authority read also emits a separate refresh notification.
+If a dependent metadata read previously failed, the provider can resume that
+finite operation on this notification without changing its semantic epoch or
+requiring another inference demand. An active read keeps its existing task, and
+a ready or busy backend is left alone. Saved host/instance submissions retain
+their identities: this notification cannot replay an unknown POST. There is no
+additional timer or polling owner.
+
+## Explicit two-host qualification
+
+The pinned plan accepts Slice/Obelisk or Slice/Wafer/Obelisk, in those pipeline
+orders. Acquisition order remains independent. Every admitted member, layer,
+endpoint, runner, raw-token receipt and cleanup receipt derives from that exact
+plan; omitting a required member never creates a smaller session implicitly.
+The original three prompts and all16 raw tokens per prompt remain the numerical
+gate. A different topology needs its own repacked manifest and reference binding.
+
+The two-host runtime uses the exact Slice/Obelisk subset of the existing approved
+three-host PF envelope. Kernel inspection still verifies that complete installed
+policy; it does not claim a newly installed two-address firewall. Native peer
+configuration and instance membership contain only the selected two hosts.
+
+A new session can retain an old attempt in the same ordinary journal only after
+host-owned cleanup proof and exact plane settlement are confirmed on the same
+boot. An attempt that never started needs its permanent launch fence. A started
+attempt needs its independent launch record, exact child birth identity and
+cleanup validated against that child. Historical rows remain intact. Rebooted,
+missing or unconfirmed prior attempts require separate reconciliation; this
+path never replays them or treats an empty process list as cleanup evidence.

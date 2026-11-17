@@ -97,7 +97,7 @@ class ProviderGroupAuthority(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.reader.may_start_ranks())
                 self.assertFalse(self.reader.may_serve_requests())
 
-    async def test_partial_member_read_failure_cannot_retain_previous_authority(self):
+    async def test_refresh_uses_only_unexpired_previous_authority_then_revokes_on_failure(self):
         await self.reader.refresh()
         entered, release = asyncio.Event(), asyncio.Event()
         async def hook(lease_id):
@@ -109,8 +109,9 @@ class ProviderGroupAuthority(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.create_task(self.reader.refresh())
         try:
             await asyncio.wait_for(entered.wait(), 2)
+            self.assertTrue(self.reader.may_serve_requests())
+            self.now = 400
             self.assertFalse(self.reader.may_serve_requests())
-            self.assertIsNone(self.reader.current)
         finally:
             release.set()
         with self.assertRaises(AuthorityReadUnavailable) as caught:

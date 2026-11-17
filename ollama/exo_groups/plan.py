@@ -21,6 +21,7 @@ HOST_RESOURCES = {
     "wafer": "wafer-services/gpu-metal",
     "obelisk": "obelisk-services/gpu-0",
 }
+PIPELINES = (("slice", "obelisk"), ("slice", "wafer", "obelisk"))
 _SHA = re.compile(r"[a-f0-9]{64}")
 
 
@@ -104,8 +105,8 @@ class GroupPlan:
         if not re.fullmatch(r"[a-f0-9]{40}", revision):
             raise BindingRefused("model revision must be pinned")
         entries = raw["members"]
-        if not isinstance(entries, list) or len(entries) != 3:
-            raise BindingRefused("this qualification requires all three hosts")
+        if not isinstance(entries, list) or len(entries) not in (2, 3):
+            raise BindingRefused("qualification requires an explicit two- or three-host pipeline")
         members = []
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) != {
@@ -155,10 +156,11 @@ class GroupPlan:
                     total,
                 )
             )
-        if {member.rank for member in members} != set(HOST_RESOURCES):
+        if len({member.rank for member in members}) != len(members):
             raise BindingRefused("a host is duplicated or missing")
         ordered = sorted(members, key=lambda member: member.pipeline_rank)
-        if [member.pipeline_rank for member in ordered] != [0, 1, 2]:
+        if (tuple(member.rank for member in ordered) not in PIPELINES
+                or [member.pipeline_rank for member in ordered] != list(range(len(members)))):
             raise BindingRefused("pipeline ranks must be unique and contiguous")
         end = 0
         for member in ordered:
@@ -173,6 +175,14 @@ class GroupPlan:
             _digest(raw["rank_manifest_sha256"], "rank manifest"),
             tuple(members),
         )
+
+    @property
+    def pipeline_ranks(self) -> tuple[str, ...]:
+        ordered = sorted(self.members, key=lambda member: member.pipeline_rank)
+        names = tuple(member.rank for member in ordered)
+        if names not in PIPELINES or tuple(member.pipeline_rank for member in ordered) != tuple(range(len(names))):
+            raise BindingRefused('exact two- or three-host pipeline required')
+        return names
 
     def request(self) -> dict[str, Any]:
         # No priority boost, wait deadline, assembly deadline or idle grace.
@@ -315,8 +325,8 @@ def check_rank_manifest(plan: GroupPlan, manifest_bytes: bytes) -> None:
     ):
         raise BindingRefused("rank manifest is a different model or revision")
     actual = manifest.get("ranks")
-    if not isinstance(actual, list) or len(actual) != 3:
-        raise BindingRefused("rank manifest must cover all three hosts")
+    if not isinstance(actual, list) or len(actual) != len(plan.pipeline_ranks):
+        raise BindingRefused("rank manifest must cover every planned host")
     ordered = sorted(plan.members, key=lambda item: item.pipeline_rank)
     for rank, member in zip(actual, ordered):
         if rank.get("name") != member.rank or rank.get("layers") != list(member.layers):

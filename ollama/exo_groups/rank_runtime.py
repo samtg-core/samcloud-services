@@ -23,6 +23,14 @@ from .rank_lifecycle import RankLifecycle
 from .rank_process import ObservationUnknown, OwnedRankProcess
 
 
+class LaunchPreflightPending(ObservationUnknown):
+    """A superseded authority read before the durable launch decision.
+
+    Only the existing owner may resume these reads. This is never evidence that
+    a committed launch, Popen, or an inference request can be repeated.
+    """
+
+
 @dataclass(frozen=True)
 class RuntimeObservation:
     runtime_sha256: str
@@ -240,11 +248,14 @@ class HostRankRuntime:
                 raise ObservationUnknown('exact fresh host runtime/boot/spec unconfirmed')
             await self.adapter.refresh('before verified rank launch')
             if (launch_sha256(self.actor, self._environment) != self.launch_sha256
-                    or self.actor.boot_reader() != self.boot_id
-                    or not self._events_ready or epoch != self._event_epoch):
+                    or self.actor.boot_reader() != self.boot_id):
                 raise ObservationUnknown('host runtime spec or boot changed during authority read')
+            if not self._events_ready or epoch != self._event_epoch:
+                raise LaunchPreflightPending('host event feed changed before launch decision')
             if self.actor.authority is None or not self.actor.authority.allows_start(self.actor.monotonic()):
-                raise ObservationUnknown('fresh host authority required before committing launch')
+                if not self.actor.draining:
+                    raise LaunchPreflightPending('fresh host authority required before committing launch')
+                raise ObservationUnknown('host authority withdrawn before committing launch')
             # Commit before any Popen or filesystem launch intent. A crash or
             # preflight failure here stays uncertain, never a no-start proof.
             self._transition('prepared', 'launch_committed')

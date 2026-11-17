@@ -80,9 +80,9 @@ class FleetConfiguration:
     def __init__(self, hosts, endpoints, *, manifest, parent, journals, group_scope,
                  renew_before_s, raw_reference=None, reference_sha256=None, transports=None,
                  plane_transport=None):
-        if (not isinstance(hosts, tuple) or len(hosts) != 3
+        if (not isinstance(hosts, tuple) or len(hosts) not in (2, 3)
                 or any(not isinstance(host, HostDeployment) for host in hosts)
-                or tuple(host.files.rank for host in hosts) != ('slice', 'wafer', 'obelisk')
+                or tuple(host.files.rank for host in hosts) != hosts[0].plan.pipeline_ranks
                 or not isinstance(group_scope, str) or not re.fullmatch('[a-zA-Z0-9_-]{1,100}', group_scope)
                 or raw_reference is None and reference_sha256 is not None
                 or raw_reference is not None and any(host.qualification_token_limit != 16 for host in hosts)):

@@ -29,10 +29,10 @@ from .startup import InstanceStarts, InstanceStartup
 
 class HostFleet:
     def __init__(self, hosts, endpoints, plane, *, manifest, parent, journals, transports=None):
-        if (not isinstance(hosts, tuple) or len(hosts) != 3
+        if (not isinstance(hosts, tuple) or len(hosts) not in (2, 3)
                 or any(not isinstance(host, HostDeployment) for host in hosts)
-                or tuple(host.files.rank for host in hosts) != ('slice', 'wafer', 'obelisk')
-                or not isinstance(endpoints, tuple) or len(endpoints) != 3
+                or tuple(host.files.rank for host in hosts) != hosts[0].plan.pipeline_ranks
+                or not isinstance(endpoints, tuple) or len(endpoints) != len(hosts)
                 or any(not isinstance(endpoint, HostEndpoint) for endpoint in endpoints)
                 or not isinstance(plane, CoordinatorPlane) or plane.owner_id != hosts[0].plan.owner_id
                 or any(canonical(asdict(host.plan)) != canonical(asdict(hosts[0].plan))
@@ -47,9 +47,9 @@ class HostFleet:
                     or endpoint.source_sha256 != SOURCE_SHA256
                     or endpoint.configuration_sha256 != configuration_sha256(host)):
                 raise ValueError('host endpoint differs from its qualified fixed deployment')
-        if transports is not None and set(transports) != {'slice', 'wafer', 'obelisk'}:
+        if transports is not None and set(transports) != set(host.files.rank for host in hosts):
             raise ValueError('exact isolated test transports or production HTTPS required')
-        if (not isinstance(journals, dict) or set(journals) != {'slice', 'wafer', 'obelisk'}
+        if (not isinstance(journals, dict) or set(journals) != set(host.files.rank for host in hosts)
                 or any(not isinstance(path, str) or not path.startswith('/') or '\x00' in path
                        or str(PurePosixPath(path)) != path or '..' in PurePosixPath(path).parts
                        for path in journals.values())):
