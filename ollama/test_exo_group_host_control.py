@@ -22,6 +22,7 @@ from .exo_groups.host_authority import HostPlaneReader
 from .exo_groups.host_control import configuration_sha256, run_identity
 from .exo_groups.host_http import HostControlClient, HostEndpoint, HTTPReceiptReader
 from .exo_groups.prepare import digest
+from .exo_groups.rank_runtime import LaunchPreflightPending
 from .exo_groups.service import EXOService
 
 
@@ -222,12 +223,63 @@ class HostControlControls(IsolatedAsyncioTestCase):
         self.assertEqual(response.json()['report']['phase'], 'prepared')
         self.assertEqual(len(self.readers), 2)
 
+    async def test_history_read_failure_is_durable_before_read_and_status_resumes_same_preparation(self):
+        self.isolated_member_plane()
+        control = self.composition.control
+        calls = []
+
+        async def history_read(history):
+            row = self.runtime.queue.supervisor.journal.db.execute(
+                "SELECT * FROM exo_host_controls WHERE action='prepare'").fetchone()
+            self.assertEqual(row['request_id'], 'a' * 64)
+            self.assertEqual(row['state'], 'owned')
+            self.assertEqual(row['prefix'], 'prepare')
+            self.assertFalse(list(self.fixture.state_base.iterdir()))
+            calls.append(history)
+            if len(calls) == 1:
+                raise OSError('transient historical receipt read')
+
+        # Historical receipt validation has separate real-file controls above;
+        # here its first read fails, before the actual fixed deployment binds.
+        with patch.object(control, '_preparation_history', return_value=[{'old': 'session'}]), \
+                patch.object(control, '_completed_preparations', side_effect=history_read), \
+                patch.object(self.config, 'bind', wraps=self.config.bind) as bind:
+            first = await self.prepare()
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(first.json()['report']['operations'][0]['state'], 'owned')
+            bind.assert_not_called()
+            identity = run_identity(self.config.compile(self.fixture.binding).spec.binding)
+            report = (await self.post('status', identity=identity)).json()['report']
+            self.assertEqual(report['phase'], 'prepared')
+            self.assertEqual(report['operations'][0]['request_id'], 'a' * 64)
+            self.assertEqual(report['operations'][0]['state'], 'returned')
+            self.assertIsNone(report['operations'][0]['prefix'])
+            self.assertEqual(bind.await_count, 1)
+            await self.post('status', identity=identity)
+            self.assertEqual(bind.await_count, 1)
+            self.assertEqual(len(calls), 2)
+        self.fixture.spawner.assert_not_called()
+
+    async def test_binding_effect_failure_never_rebinds_on_status(self):
+        self.isolated_member_plane()
+        with patch.object(self.config, 'bind', new=AsyncMock(side_effect=OSError('unknown binding effect'))) as bind:
+            first = await self.prepare()
+            operation = first.json()['report']['operations'][0]
+            self.assertEqual(operation['state'], 'unconfirmed')
+            self.assertIsNone(operation['prefix'])
+            identity = run_identity(self.config.compile(self.fixture.binding).spec.binding)
+            for _ in range(2):
+                await self.post('status', identity=identity)
+            self.assertEqual(bind.await_count, 1)
+        self.fixture.spawner.assert_not_called()
+
     async def test_unadmitted_or_wrong_generation_preparation_keeps_owned_failure_without_files(self):
         self.isolated_member_plane(changes={'generation': 2})
         response = await self.prepare()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['report']['phase'], 'preparation_unconfirmed')
-        self.assertEqual(response.json()['report']['operations'][0]['state'], 'unconfirmed')
+        self.assertEqual(response.json()['report']['operations'][0]['state'], 'owned')
+        self.assertEqual(response.json()['report']['operations'][0]['prefix'], 'prepare')
         self.assertIsNone(getattr(self.runtime, 'host_rank', None))
         self.assertFalse(list(self.fixture.state_base.iterdir()))
         identity = run_identity(self.config.compile(self.fixture.binding).spec.binding)
@@ -235,7 +287,7 @@ class HostControlControls(IsolatedAsyncioTestCase):
         self.assertEqual(status.status_code, 200, status.text)
         self.assertEqual(status.json()['report']['phase'], 'preparation_unconfirmed')
         await self.prepare()
-        self.assertEqual(len(self.readers), 1)
+        self.assertEqual(len(self.readers), 3)  # Same owned prefix, still no binding/files.
 
     async def test_prepare_schema_cannot_choose_runtime_or_change_fixed_rank(self):
         for changes in ({'generation': True}, {'pipeline_rank': False}, {'layers': [0, True]},
@@ -351,6 +403,53 @@ class HostControlControls(IsolatedAsyncioTestCase):
             self.assertEqual(effect.await_count, 1)
             self.assertNotIn('private response text', again.text)
             self.assertEqual(again.json()['report']['operations'][0]['state'], 'unconfirmed')
+
+    async def test_status_resumes_superseded_start_prefix_once_without_another_submission(self):
+        owner = await self.bind()
+        identity = run_identity(owner.actor.spec.binding)
+        entered, finish = asyncio.Event(), asyncio.Event()
+
+        async def resume():
+            entered.set()
+            await finish.wait()
+
+        count = 0
+        async def start():
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise LaunchPreflightPending('event superseded authority read')
+            await resume()
+        with patch.object(owner, 'start', new=AsyncMock(side_effect=start)) as effect:
+            first = await self.post('start', identity=identity)
+            op = first.json()['report']['operations'][0]
+            self.assertEqual((op['state'], op['prefix']), ('owned', 'start'))
+            observers = [asyncio.create_task(self.post('status', identity=identity)) for _ in range(2)]
+            await entered.wait()
+            self.assertEqual(effect.await_count, 2)
+            finish.set()
+            reports = [response.json()['report'] for response in await asyncio.gather(*observers)]
+            self.assertTrue(all(report['operations'][0]['request_id'] == 'a' * 64 for report in reports))
+            self.assertTrue(all(report['operations'][0]['state'] == 'returned' for report in reports))
+            await self.post('status', identity=identity)
+            self.assertEqual(effect.await_count, 2)
+
+    async def test_launch_commit_or_legacy_null_prefix_never_resumes_pending_start(self):
+        owner = await self.bind()
+        identity = run_identity(owner.actor.spec.binding)
+        journal = self.runtime.queue.supervisor.journal
+        with patch.object(owner, 'start', new=AsyncMock(side_effect=LaunchPreflightPending('event race'))) as effect:
+            await self.post('start', identity=identity)
+            with journal.transaction():
+                journal.db.execute("UPDATE exo_host_rank_attempts SET phase='launch_committed'")
+            await self.post('status', identity=identity)
+            self.assertEqual(effect.await_count, 1)
+            with journal.transaction():
+                journal.db.execute("UPDATE exo_host_rank_attempts SET phase='prepared'")
+                journal.db.execute('UPDATE exo_host_controls SET prefix=NULL')
+            self.composition.control.tasks.clear()
+            await self.post('status', identity=identity)
+            self.assertEqual(effect.await_count, 1)
 
     async def test_missing_host_feed_refuses_before_committing_start(self):
         owner = await self.bind()

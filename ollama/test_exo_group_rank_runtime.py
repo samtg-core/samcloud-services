@@ -19,7 +19,8 @@ from . import test_exo_group_member as member_fixtures
 from .exo_groups.host_authority import HostAuthorityAdapter, HostPlaneReader
 from .exo_groups.rank_lifecycle import RankLifecycle, RankSpec, darwin_boot_id
 from .exo_groups.rank_process import Listener, ObservationUnknown, RunBinding
-from .exo_groups.rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256, record_host_attempt
+from .exo_groups.rank_runtime import (HostRankRuntime, LaunchPreflightPending,
+    RuntimeObservation, launch_sha256, record_host_attempt)
 from .inference_arbiter import Arbiter
 
 
@@ -108,6 +109,25 @@ class RankRuntimeControls(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ObservationUnknown):
             await self.runtime.start()
         self.assertEqual(self.fixture.spawn_count, 0)
+
+    async def test_event_supersedes_final_read_before_commit_then_same_owner_launches_once(self):
+        async def event_during_read():
+            # Exact live race: SSE invalidates the launch-time GET while that
+            # GET is in flight. The old read must not authorize a process.
+            self.adapter.invalidate('new scoped event during final authority read')
+        self.context.before_read = event_during_read
+        with self.assertRaises(LaunchPreflightPending):
+            await self.runtime.start()
+        self.assertEqual(self.runtime._attempt()['phase'], 'prepared')
+        self.assertFalse((self.actor.state / 'launch-intent.json').exists())
+        self.assertEqual(self.fixture.spawn_count, 0)
+        self.context.before_read = None
+        await self.runtime.start()
+        self.assertEqual(self.runtime._attempt()['phase'], 'spawning')
+        self.assertEqual(self.fixture.spawn_count, 1)
+        with self.assertRaises(ObservationUnknown):
+            await self.runtime.start()
+        self.assertEqual(self.fixture.spawn_count, 1)
 
     async def test_fence_stop_and_child_event_require_physical_cleanup_before_close(self):
         await self.runtime.start()

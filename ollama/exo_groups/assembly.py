@@ -85,8 +85,9 @@ class GroupAssembly:
             report = await command.submit(action, verify_runtime=self.provider.backend.verify_runtime)
             row = self._submission(command, action)
         else:
-            # A process/observer lost the reply. This GET-like metadata read
-            # cannot create another host attempt or start decision.
+            # Reconcile the same durable operation. The host may resume its
+            # explicitly saved read-only prefix, then commit its FIRST bind or
+            # launch decision. An unknown effect is never submitted again.
             report = await command.client.status(command.binding)
         if (canonical(report.get('identity')) != canonical(run_identity(command.binding))
                 or not isinstance(report.get('operations'), list)
