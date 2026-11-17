@@ -1029,8 +1029,10 @@ three-host PF envelope. Kernel inspection still verifies that complete installed
 policy; it does not claim a newly installed two-address firewall. Native peer
 configuration and instance membership contain only the selected two hosts.
 
-A new session can retain an old no-start attempt in the same ordinary journal
-only after its permanent launch fence, host-owned cleanup proof and exact plane
-settlement are confirmed. Historical rows remain intact. Started, rebooted,
+A new session can retain an old attempt in the same ordinary journal only after
+host-owned cleanup proof and exact plane settlement are confirmed on the same
+boot. An attempt that never started needs its permanent launch fence. A started
+attempt needs its independent launch record, exact child birth identity and
+cleanup validated against that child. Historical rows remain intact. Rebooted,
 missing or unconfirmed prior attempts require separate reconciliation; this
 path never replays them or treats an empty process list as cleanup evidence.

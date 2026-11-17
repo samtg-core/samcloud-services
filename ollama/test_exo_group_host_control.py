@@ -16,6 +16,7 @@ import httpx
 
 from . import test_exo_group_deployment as deployed
 from . import test_exo_group_host_authority as authority_fixtures
+from . import test_exo_group_host_receipts as receipt_fixtures
 from .exo_groups import deployment, host_control, receipt_files
 from .exo_groups.host_authority import HostPlaneReader
 from .exo_groups.host_control import configuration_sha256, run_identity
@@ -400,6 +401,7 @@ class HostControlControls(IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+
     async def test_pause_blocks_new_start_but_allows_cleanup_and_drains_owned_task(self):
         owner = await self.bind()
         identity = run_identity(owner.actor.spec.binding)
@@ -455,3 +457,64 @@ class HostControlControls(IsolatedAsyncioTestCase):
                 await client.files(replace(self.config.files, resource_id='foreign/gpu'))
         finally:
             await client.close()
+
+
+
+class StartedHistoryControls(IsolatedAsyncioTestCase):
+    async def history(self, *, cleanup=True):
+        fixture = receipt_fixtures.ReceiptControls()
+        await fixture.asyncSetUp()
+        self.addAsyncCleanup(fixture.asyncTearDown)
+        await fixture.owner.on_connect()
+        await fixture.owner.start()
+        if cleanup:
+            fixture.child.code = 0
+            fixture.actor.process_exited()
+        binding = fixture.expected.binding
+        lease = {'id': binding.lease_id, 'agent_id': binding.owner_id,
+            'resource_id': binding.resource_id, 'exclusive': True,
+            'memory_mb': fixture.expected.member.memory_mb, 'status': 'released'}
+        projection = {'group_id': binding.group_id, 'owner_id': binding.owner_id,
+            'generation': binding.generation, 'phase': 'released', 'release_requested': True,
+            'member': {'resource_id': binding.resource_id, 'lease_id': binding.lease_id,
+                'cleanup_attested': True, 'settlement_recorded': True, 'lease': lease}}
+        reader = SimpleNamespace(projection=AsyncMock(return_value=projection), close=AsyncMock())
+        fake = SimpleNamespace(runtime=SimpleNamespace(settings=SimpleNamespace(journal=fixture.journal.path),
+            queue=SimpleNamespace(supervisor=SimpleNamespace(journal=fixture.journal))),
+            deployment=SimpleNamespace(boot_id=fixture.boot, state_base=fixture.root,
+                files=SimpleNamespace(uid=fixture.spec['uid'], resource_id=binding.resource_id, rank=binding.rank),
+                host_reader=lambda _runtime: reader))
+        history = [{'state': 'returned', 'resource_id': binding.resource_id, 'lease_id': binding.lease_id,
+                    'identity_json': json.dumps(asdict(binding))}]
+        return fixture, fake, history, reader
+
+    async def test_started_rank_with_exact_child_cleanup_and_settlement_allows_fresh_session(self):
+        fixture, fake, history, reader = await self.history()
+        before = list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts'))
+        await host_control.HostControl._completed_preparations(fake, history)
+        self.assertEqual(before, list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts')))
+        reader.projection.assert_awaited_once()
+        reader.close.assert_awaited_once()
+
+    async def test_started_rank_without_cleanup_cannot_be_replaced(self):
+        _fixture, fake, history, reader = await self.history(cleanup=False)
+        with self.assertRaises(host_control.HTTPException):
+            await host_control.HostControl._completed_preparations(fake, history)
+        reader.projection.assert_not_called()
+
+    async def test_cleanup_for_another_child_cannot_end_the_prior_attempt(self):
+        fixture, fake, history, reader = await self.history()
+        path = fixture.actor.state / 'cleanup-evidence.json'
+        value = json.loads(path.read_bytes())
+        value['observation']['child']['pid'] += 1
+        path.write_text(json.dumps(value))
+        with self.assertRaises(host_control.HTTPException):
+            await host_control.HostControl._completed_preparations(fake, history)
+        reader.projection.assert_not_called()
+
+    async def test_started_cleanup_without_exact_settlement_stays_refused(self):
+        _fixture, fake, history, reader = await self.history()
+        value = reader.projection.return_value
+        value['member']['settlement_recorded'] = False
+        with self.assertRaises(host_control.HTTPException):
+            await host_control.HostControl._completed_preparations(fake, history)

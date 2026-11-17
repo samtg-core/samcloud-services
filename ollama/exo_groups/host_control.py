@@ -20,14 +20,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .deployment import HostDeployment
-from .cleanup import NoStartExpectation, validate_cleanup
+from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
 from .http import decode_json
 from .member import ExpectedMember
 from .plan import LaunchBinding, MemberPlan
 from .prepare import canonical, digest
 from .receipt_files import collect_attempt
 from .token_receipts import collect_tokens
-from .rank_process import Listener, RunBinding
+from .rank_process import Listener, ProcessIdentity, RunBinding
 
 
 _SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py', 'pf_transport.py')
@@ -227,12 +227,13 @@ class HostControl:
             'ORDER BY resource_id,lease_id', (lease_id,))]
 
     async def _completed_preparations(self, history):
-        """Allow a fresh fixed session only after exact prior no-start settlement.
+        """Allow a fresh fixed session only after exact prior cleanup/settlement.
 
         Read the old host-owned journal/immutable receipts and a fresh projection
         with this service's own credential. No history is removed or reset.
-        Started, incomplete, rebooted or unknown prior attempts stay refused.
-        This is never permission to resume an old rank or inference call.
+        A started attempt requires its independent child birth and launch
+        receipt, plus cleanup validated against that exact child. Incomplete,
+        rebooted or unknown attempts stay refused. Old work is never resumed.
         """
         journal = self.runtime.queue.supervisor.journal
         reader = self.deployment.host_reader(self.runtime)
@@ -241,11 +242,11 @@ class HostControl:
                 row = journal.db.execute('SELECT * FROM exo_host_rank_attempts '
                     'WHERE resource_id=? AND lease_id=?',
                     (prior['resource_id'], prior['lease_id'])).fetchone()
-                if (prior['state'] != 'returned' or row is None or row['phase'] != 'launch_fenced'
+                if (prior['state'] != 'returned' or row is None or row['phase'] not in ('launch_fenced', 'spawning')
                         or row['boot_id'] != self.deployment.boot_id
                         or row['resource_id'] != self.deployment.files.resource_id
                         or not Path(row['state_path']).is_relative_to(self.deployment.state_base)):
-                    raise ValueError('prior attempt is not a fixed completed no-start session')
+                    raise ValueError('prior attempt is not a fixed completed session')
                 spec = {key: row[key] for key in ('resource_id', 'group_id', 'generation',
                     'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
                 spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
@@ -261,8 +262,6 @@ class HostControl:
                     prepared['attempt_sha256'], tuple(Listener(**v) for v in prepared['listeners']),
                     prepared['baseline_in_use_bytes'], prepared['tolerance_bytes'], prepared['prepared_at'])
                 if (canonical(asdict(pin)) != canonical(prepared)
-                        or report['phase'] != 'launch_fenced' or report['started'] is not None
-                        or report['launch_intent'] is not None
                         or canonical(asdict(expected.binding)) != canonical(decode_json(prior['identity_json']))
                         or expected.binding.rank != self.deployment.files.rank
                         or expected.member.rank != expected.binding.rank
@@ -270,6 +269,28 @@ class HostControl:
                         or any(getattr(expected.binding, key) != row[key]
                                for key in ('resource_id', 'lease_id', 'group_id', 'generation'))):
                     raise ValueError('prior preparation identity changed')
+                started, launch = report['started'], report['launch_intent']
+                if started is None:
+                    if report['phase'] != 'launch_fenced' or launch is not None:
+                        raise ValueError('prior no-start fence is unconfirmed')
+                else:
+                    if (report['phase'] != 'spawning' or not isinstance(started, dict)
+                            or started.get('type') != 'rank_started' or not isinstance(launch, dict)
+                            or canonical({k: started.get(k) for k in ('group_id', 'generation', 'lease_id', 'resource_id')})
+                                != canonical({k: getattr(expected.binding, k) for k in ('group_id', 'generation', 'lease_id', 'resource_id')})
+                            or started.get('host_boot') != row['boot_id'] or launch.get('host_boot') != row['boot_id']
+                            or canonical(launch.get('binding')) != canonical(asdict(run))):
+                        raise ValueError('prior child launch differs from preparation')
+                    child = started.get('child')
+                    fields = ProcessIdentity.__dataclass_fields__
+                    if (not isinstance(child, dict) or set(child) != set(fields)
+                            or any(type(child[k]) is not int or child[k] < 0 for k in fields)
+                            or any(child[k] == 0 for k in ('pid', 'group_id', 'started_seconds'))
+                            or child['started_microseconds'] >= 1000000
+                            or child['uid'] != self.deployment.files.uid):
+                        raise ValueError('prior exact child birth identity unavailable')
+                    pin = CleanupExpectation(run, ProcessIdentity(**child), pin.listeners,
+                        launch.get('baseline_in_use_bytes'), pin.tolerance_bytes)
                 cleanup = report['cleanup']
                 raw = base64.b64decode(cleanup['base64'], validate=True)
                 if (len(raw) != cleanup['bytes']
