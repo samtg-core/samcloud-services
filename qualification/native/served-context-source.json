@@ -1,0 +1,14 @@
+{
+  "base_commit": "4a53f3a78b8083aaa56d0bb9e734ad91ec1d8af4",
+  "candidate_commit": "0beed7ea8c0e78a8ba73e513fedb884e102f4b0e",
+  "patch_sha256": "96818020d016ac911ea903e5b5c0719c739ab675623e40d9cc2240f4e551b43f",
+  "changed_files": [
+    "src/exo/utils/served_context.py",
+    "src/exo/utils/tests/test_served_context.py",
+    "src/exo/worker/engines/mlx/generator/generate.py",
+    "src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py"
+  ],
+  "source_repository": "local qualified EXO lineage, based on exo-explore/exo; no upstream push or PR",
+  "runtime_selected": false,
+  "default_profile_changed": false
+}
