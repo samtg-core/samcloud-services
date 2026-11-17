@@ -152,6 +152,34 @@ class InitialReservation(unittest.TestCase):
             with self.assertRaises(SpawnBoundary):
                 manager.load_vlm_model('vision-alias')
 
+    def test_whisper_load_consumes_staged_exact_row_before_spawn(self):
+        manager = object.__new__(ModelManager)
+        manager.durable_inference = True
+        manager.initial_reservations, manager.models = self.store, {}
+        manager.sc = self.client
+        manager.refuse_if_device_in_use = Mock()
+        manager._kill_stray_whisper = Mock()
+        args = dict(resource='gpu', service_id='service', memory_mb=100, ttl_seconds=3600)
+        self.store.stage('qwen', **args)
+        self.client.list_leases.return_value = [self.lease(expires_at='2099-01-01T00:00:00Z')]
+        class SpawnBoundary(Exception):
+            pass
+        def spawn(*args, **kwargs):
+            self.assertEqual(self.store.snapshot('qwen')['state'], 'handed_off')
+            self.assertEqual(self.store.snapshot('qwen')['lease_id'], 'exact')
+            self.client.request_lease.assert_called_once()
+            raise SpawnBoundary()
+        with patch.object(manager_module, 'RESOURCE_ID', 'gpu'), \
+             patch.object(manager_module, 'SERVICE_ID', 'service'), \
+             patch.object(manager_module, 'LEASE_TTL', 3600), \
+             patch.object(manager_module.config, 'WHISPER_SPOOL_DIR', Path(self.temp.name)/'spool'), \
+             patch.object(manager_module.config, 'WHISPER_LOG_FILE', Path(self.temp.name)/'whisper.log'), \
+             patch.object(manager_module.capacity, 'collect', return_value={'memory_available_mb':100000}), \
+             patch.object(manager_module, 'match_whisper_model', return_value=('qwen','repo',100)), \
+             patch.object(manager_module.subprocess, 'Popen', side_effect=spawn):
+            with self.assertRaises(SpawnBoundary):
+                manager.load_whisper_model('whisper-alias')
+
     def test_staged_queue_preserves_position_through_promotion_and_process_reopen(self):
         args = dict(resource='gpu', service_id='service', memory_mb=100, ttl_seconds=3600)
         self.client.request_lease.return_value = {'status_code':200,'status':'queued','lease_id':'exact'}
