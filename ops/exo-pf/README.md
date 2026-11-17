@@ -45,11 +45,13 @@ python3 ops/exo-pf/package.py --rank slice \
 ```
 
 Copy the complete package to its named host and verify every manifest entry.
-In an administrator terminal on that host, run once:
-
-```sh
-sudo /usr/bin/python3 -I -S -B /path/to/package/install.py --install
-```
+The packager prints `installer_sha256` and a hash-pinned `administrator_command`.
+In an administrator terminal on the named host, run that command once. Its small
+system-Python bootstrap opens the installer without following symlinks, verifies
+the reviewed SHA256, and compiles/executes those same buffered bytes. It does not
+re-open a service-owned code path after verification. If the package moves to a
+different host path, regenerate the command for that exact path using
+`install_command(path, reviewed_sha256)`; retain the reviewed digest.
 
 Installation only adds the scoped capability; it performs no PF update, queue
 change or restart. It may be installed while ordinary work runs. The service

@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import shlex
 from pathlib import Path
 
 BASE=Path(__file__).resolve().parent
@@ -9,6 +10,19 @@ ACCOUNTS={'slice':('claude-services',502),'wafer':('wafer-services',504),'obelis
 
 
 def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+def install_command(path, expected_sha256):
+    """Execute an already-reviewed byte buffer, never re-open code after hashing."""
+    if len(expected_sha256)!=64 or any(c not in '0123456789abcdef' for c in expected_sha256):
+        raise ValueError('reviewed installer digest required')
+    source=("import hashlib,os,stat; p="+repr(str(path))+"; "
+            "fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK); "
+            "info=os.fstat(fd); assert stat.S_ISREG(info.st_mode) and info.st_size<=262144; "
+            "raw=os.read(fd,262145); os.close(fd); "
+            "assert hashlib.sha256(raw).hexdigest()=="+repr(expected_sha256)+",'installer changed'; "
+            "exec(compile(raw,p,'exec'),{'__file__':p,'__name__':'__main__'})")
+    return shlex.join(['/usr/bin/sudo','/usr/bin/python3','-I','-S','-B','-c',source,'--install'])
 
 
 def package(rank,journal,destination):
@@ -48,4 +62,6 @@ if __name__=='__main__':
     a=parser.parse_args()
     value=package(a.rank,a.journal,a.destination)
     print(json.dumps({'rank':a.rank,'destination':a.destination,'files':len(value['files'])+2,
+                      'installer_sha256':sha((Path(a.destination)/'install.py').read_bytes()),
+                      'administrator_command':install_command(Path(a.destination)/'install.py',sha((Path(a.destination)/'install.py').read_bytes())),
                       'installed':False,'PF_changed':False}))
