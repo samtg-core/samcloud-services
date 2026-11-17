@@ -1014,3 +1014,23 @@ clock envelope remains usable; its deadline is never extended by the read.
 Failure, cancellation, credential changes, exact lease/resource hints and feed
 loss withdraw permission. This keeps a harmless refresh from interrupting a
 long runtime check or inference stream, without treating a keepalive as authority.
+
+## Explicit two-host qualification
+
+The pinned plan accepts Slice/Obelisk or Slice/Wafer/Obelisk, in those pipeline
+orders. Acquisition order remains independent. Every admitted member, layer,
+endpoint, runner, raw-token receipt and cleanup receipt derives from that exact
+plan; omitting a required member never creates a smaller session implicitly.
+The original three prompts and all16 raw tokens per prompt remain the numerical
+gate. A different topology needs its own repacked manifest and reference binding.
+
+The two-host runtime uses the exact Slice/Obelisk subset of the existing approved
+three-host PF envelope. Kernel inspection still verifies that complete installed
+policy; it does not claim a newly installed two-address firewall. Native peer
+configuration and instance membership contain only the selected two hosts.
+
+A new session can retain an old no-start attempt in the same ordinary journal
+only after its permanent launch fence, host-owned cleanup proof and exact plane
+settlement are confirmed. Historical rows remain intact. Started, rebooted,
+missing or unconfirmed prior attempts require separate reconciliation; this
+path never replays them or treats an empty process list as cleanup evidence.

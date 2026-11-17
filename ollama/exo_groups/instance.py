@@ -69,11 +69,11 @@ class InstanceContract:
     ) -> None:
         if digest(asdict(plan)) != self.plan_sha256 or runtime_sha256 != self.runtime_sha256:
             raise BindingRefused("private instance plan or runtime changed")
-        if (len(launches) != 3
-                or tuple(item.pipeline_rank for item in launches) != (0, 1, 2)
+        if (len(launches) != len(plan.pipeline_ranks)
+                or tuple(item.pipeline_rank for item in launches) != tuple(range(len(plan.members)))
                 or any(type(item.pipeline_rank) is not int or type(item.generation) is not int
                        for item in launches)
-                or len({item.lease_id for item in launches}) != 3):
+                or len({item.lease_id for item in launches}) != len(plan.members)):
             raise BindingRefused("exact three pipeline launch bindings required")
         for item in launches:
             ExpectedMember.from_launch(plan, item)
@@ -91,7 +91,7 @@ class InstanceContract:
                 or any(state.get(name) != {} for name in (
                     'instances', 'runners', 'tasks', 'downloads',
                     'prefillServerPorts', 'instanceLinks'))
-                or not isinstance(nodes, list) or len(nodes) != 3
+                or not isinstance(nodes, list) or len(nodes) != len(plan.members)
                 or any(not isinstance(node, str) for node in nodes)
                 or set(nodes) != set(
                     self._instance['shardAssignments']['nodeToRunner'])):

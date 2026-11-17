@@ -228,9 +228,9 @@ class GroupIntents:
             saved = self.snapshot(owner, request_key)
             plan = GroupPlan.parse(saved['plan'])
             expected = tuple(ExpectedMember.from_launch(plan, binding) for binding in launches)
-            if (saved['group_id'] is None or len(expected) != 3
-                    or tuple(item.binding.pipeline_rank for item in expected) != (0, 1, 2)
-                    or len({item.binding.lease_id for item in expected}) != 3
+            if (saved['group_id'] is None or len(expected) != len(plan.pipeline_ranks)
+                    or tuple(item.binding.pipeline_rank for item in expected) != tuple(range(len(plan.members)))
+                    or len({item.binding.lease_id for item in expected}) != len(plan.members)
                     or any(item.binding.group_id != saved['group_id']
                         or type(item.binding.pipeline_rank) is not int
                         or type(item.binding.generation) is not int

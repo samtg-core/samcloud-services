@@ -18,7 +18,7 @@ class GroupAssembly:
     def __init__(self, provider, commands):
         backend, readiness, receipts = provider.backend, provider.readiness, provider.receipts
         if (backend is None or readiness is None or receipts is None
-                or readiness.provider is not provider or not isinstance(commands, tuple) or len(commands) != 3
+                or readiness.provider is not provider or not isinstance(commands, tuple) or len(commands) != len(provider.actor.plan.pipeline_ranks)
                 or any(not isinstance(command, HostCommands) or command.actor is not provider.actor
                        or command.journal is not provider.queue.supervisor.journal for command in commands)
                 or tuple(command.binding.expected.binding for command in commands) != backend.launches

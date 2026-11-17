@@ -7,6 +7,7 @@ selects runtime configuration. Operations belong to the supervisor and journal.
 """
 
 import asyncio
+import base64
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
@@ -19,12 +20,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .deployment import HostDeployment
+from .cleanup import NoStartExpectation, validate_cleanup
 from .http import decode_json
 from .member import ExpectedMember
-from .plan import LaunchBinding
+from .plan import LaunchBinding, MemberPlan
 from .prepare import canonical, digest
 from .receipt_files import collect_attempt
 from .token_receipts import collect_tokens
+from .rank_process import Listener, RunBinding
 
 
 _SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'token_receipts.py', 'pf_transport.py')
@@ -183,6 +186,11 @@ class HostControl:
         key = binding.resource_id, binding.lease_id, 'prepare'
         journal = self.runtime.queue.supervisor.journal
         identity_json = canonical(body['launch']).decode()
+        history = self._preparation_history(binding.lease_id)
+        existing = journal.db.execute('SELECT 1 FROM exo_host_controls '
+            'WHERE resource_id=? AND lease_id=? AND action=?', key).fetchone()
+        if history and existing is None:
+            await self._completed_preparations(history)
         with journal.transaction():
             old = journal.db.execute('SELECT * FROM exo_host_controls '
                 'WHERE resource_id=? AND lease_id=? AND action=?', key).fetchone()
@@ -192,8 +200,7 @@ class HostControl:
             else:
                 if (not self.accepting or not self.composition.started or self.composition.draining
                         or self.composition.closed or getattr(self.runtime, 'host_rank', None) is not None
-                        or journal.db.execute('SELECT 1 FROM exo_host_controls WHERE action=? LIMIT 1',
-                                              ('prepare',)).fetchone() is not None):
+                        or self._preparation_history(binding.lease_id) != history):
                     raise HTTPException(409, 'Fresh configured host preparation required')
                 try:
                     journal.db.execute('INSERT INTO exo_host_controls VALUES(?,?,?,?,?,?,NULL,?)',
@@ -213,6 +220,85 @@ class HostControl:
         # A failed/unknown preparation with no registered owner remains owned.
         # This report permits no retry, launch, absence inference or settlement.
         return self._preparation_status(binding)
+
+    def _preparation_history(self, lease_id):
+        return [dict(row) for row in self.runtime.queue.supervisor.journal.db.execute(
+            "SELECT * FROM exo_host_controls WHERE action='prepare' AND lease_id<>? "
+            'ORDER BY resource_id,lease_id', (lease_id,))]
+
+    async def _completed_preparations(self, history):
+        """Allow a fresh fixed session only after exact prior no-start settlement.
+
+        Read the old host-owned journal/immutable receipts and a fresh projection
+        with this service's own credential. No history is removed or reset.
+        Started, incomplete, rebooted or unknown prior attempts stay refused.
+        This is never permission to resume an old rank or inference call.
+        """
+        journal = self.runtime.queue.supervisor.journal
+        reader = self.deployment.host_reader(self.runtime)
+        try:
+            for prior in history:
+                row = journal.db.execute('SELECT * FROM exo_host_rank_attempts '
+                    'WHERE resource_id=? AND lease_id=?',
+                    (prior['resource_id'], prior['lease_id'])).fetchone()
+                if (prior['state'] != 'returned' or row is None or row['phase'] != 'launch_fenced'
+                        or row['boot_id'] != self.deployment.boot_id
+                        or row['resource_id'] != self.deployment.files.resource_id
+                        or not Path(row['state_path']).is_relative_to(self.deployment.state_base)):
+                    raise ValueError('prior attempt is not a fixed completed no-start session')
+                spec = {key: row[key] for key in ('resource_id', 'group_id', 'generation',
+                    'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
+                spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
+                            journal_path=str(self.runtime.settings.journal))
+                report = await asyncio.to_thread(collect_attempt, spec)
+                prepared = report['prepared']
+                data = prepared['binding']['expected']
+                launch = dict(data['binding']); launch['layers'] = tuple(launch['layers'])
+                member = dict(data['member']); member['layers'] = tuple(member['layers'])
+                expected = ExpectedMember(LaunchBinding(**launch), MemberPlan(**member))
+                run = RunBinding.from_expected(expected, row['runtime_sha256'])
+                pin = NoStartExpectation(run, prepared['host_boot'], prepared['launch_sha256'],
+                    prepared['attempt_sha256'], tuple(Listener(**v) for v in prepared['listeners']),
+                    prepared['baseline_in_use_bytes'], prepared['tolerance_bytes'], prepared['prepared_at'])
+                if (canonical(asdict(pin)) != canonical(prepared)
+                        or report['phase'] != 'launch_fenced' or report['started'] is not None
+                        or report['launch_intent'] is not None
+                        or canonical(asdict(expected.binding)) != canonical(decode_json(prior['identity_json']))
+                        or expected.binding.rank != self.deployment.files.rank
+                        or expected.member.rank != expected.binding.rank
+                        or expected.member.resource_id != row['resource_id']
+                        or any(getattr(expected.binding, key) != row[key]
+                               for key in ('resource_id', 'lease_id', 'group_id', 'generation'))):
+                    raise ValueError('prior preparation identity changed')
+                cleanup = report['cleanup']
+                raw = base64.b64decode(cleanup['base64'], validate=True)
+                if (len(raw) != cleanup['bytes']
+                        or hashlib.sha256(raw).hexdigest() != cleanup['sha256']):
+                    raise ValueError('prior cleanup bytes changed')
+                validate_cleanup(raw, pin)
+                projection = await reader.projection(expected)
+                observed = projection.get('member', {})
+                lease = observed.get('lease', {})
+                if (projection.get('group_id') != run.group_id
+                        or projection.get('owner_id') != expected.binding.owner_id
+                        or projection.get('generation') != run.generation
+                        or projection.get('phase') != 'released'
+                        or projection.get('release_requested') is not True
+                        or observed.get('resource_id') != run.resource_id
+                        or observed.get('lease_id') != run.lease_id
+                        or observed.get('cleanup_attested') is not True
+                        or observed.get('settlement_recorded') is not True
+                        or lease.get('id') != run.lease_id or lease.get('resource_id') != run.resource_id
+                        or lease.get('agent_id') != expected.binding.owner_id
+                        or lease.get('exclusive') is not True
+                        or lease.get('memory_mb') != expected.member.memory_mb
+                        or lease.get('status') not in ('released', 'cancelled', 'expired')
+                        or lease.get('status') == 'expired' and not lease.get('settled_at')):
+                    raise ValueError('prior exact member settlement is unconfirmed')
+        except Exception:
+            raise HTTPException(409, 'Prior host preparation needs exact cleanup and settlement') from None
+        finally:
+            await reader.close()
 
     async def _bind_prepared(self, binding, key):
         state, error_type = 'returned', None

@@ -243,7 +243,9 @@ class LivePFVerifier:
         actual = {(v.address, v.port, v.transport) for v in spec.listeners}
         if (os.getuid() != p.uid or actual != expected or len(spec.listeners) != 4
                 or environment.get('EXO_RANK_NAME') != p.rank
-                or environment.get('EXO_LEASED_PEER_IPS') != ','.join(p.peers)
+                or environment.get('EXO_LEASED_PEER_IPS') not in (
+                    (','.join(p.peers), ','.join((p.peers[0], p.peers[2])))
+                    if p.rank in ('slice', 'obelisk') else (','.join(p.peers),))
                 or any(environment.get('EXO_LEASED_' + name + '_PORT') != str(port)
                        for name, port in zip(('API', 'PEER', 'DISCOVERY', 'RING'), p.ports))):
             raise PFUnavailable('live confinement requested for another rank or endpoint')

@@ -5,8 +5,10 @@ not network confinement or distributed model qualification.
 """
 
 import asyncio
+import copy
 from dataclasses import asdict, replace
 import json
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
@@ -151,6 +153,57 @@ class HostControlControls(IsolatedAsyncioTestCase):
         other = await self.client.post('/v1/exo/host/prepare', json=self.payload(
             request_id='b' * 64, launch=asdict(self.fixture.binding), plan_sha256=digest(asdict(self.config.plan))))
         self.assertEqual(other.status_code, 409)
+
+    async def settled_history(self):
+        projection = self.isolated_member_plane()
+        response = await self.prepare()
+        self.assertEqual(response.status_code, 200, response.text)
+        owner = self.runtime.host_rank
+        fenced = await self.client.post('/v1/exo/host/fence-unstarted', json=self.payload(
+            request_id='b'*64, identity=run_identity(owner.actor.spec.binding)))
+        self.assertTrue(fenced.json()['report']['cleanup_observed'])
+        projection.update(phase='released', release_requested=True, authoritative=False,
+                          authority_expires_at=None)
+        projection['member'].update(cleanup_attested=True, settlement_recorded=True)
+        projection['member']['lease'].update(status='released', released_at='2026-11-16T00:01:00+00:00')
+        history = self.runtime.exo_host_control._preparation_history('lease_'+'9'*16)
+        reader = SimpleNamespace(projection=AsyncMock(return_value=projection), close=AsyncMock())
+        self.enterContext(patch.object(self.config, 'host_reader', return_value=reader))
+        collector = host_control.collect_attempt
+        self.enterContext(patch.object(host_control, 'collect_attempt', side_effect=lambda spec:
+            collector(spec, boot_reader=lambda: self.config.boot_id)))
+        return projection, history, reader
+
+    async def test_historical_no_start_cleanup_and_exact_settlement_allow_new_session_preflight(self):
+        _, history, reader = await self.settled_history()
+        before = list(self.runtime.queue.supervisor.journal.db.execute(
+            'SELECT * FROM exo_host_controls ORDER BY action'))
+        await self.runtime.exo_host_control._completed_preparations(history)
+        reader.projection.assert_awaited_once()
+        reader.close.assert_awaited_once()
+        after = list(self.runtime.queue.supervisor.journal.db.execute(
+            'SELECT * FROM exo_host_controls ORDER BY action'))
+        self.assertEqual(before, after)
+        self.fixture.spawner.assert_not_called()
+
+    async def test_historical_cleanup_without_exact_terminal_receipt_stays_refused(self):
+        projection, history, reader = await self.settled_history()
+        original = copy.deepcopy(projection)
+        variants = [original | {'phase': 'releasing'}, original | {'group_id': 'foreign'},
+            original | {'generation': 2},
+            original | {'member': original['member'] | {'cleanup_attested': False}},
+            original | {'member': original['member'] | {'settlement_recorded': False}},
+            original | {'member': original['member'] | {'lease_id': 'foreign'}},
+            original | {'member': original['member'] | {'lease': original['member']['lease'] | {'status': 'active'}}},
+            original | {'member': original['member'] | {'lease': original['member']['lease'] | {'memory_mb': 999}}}]
+        for value in variants:
+            reader.projection.return_value = value
+            with self.subTest(value=value), self.assertRaises(host_control.HTTPException) as caught:
+                await self.runtime.exo_host_control._completed_preparations(history)
+            self.assertEqual(caught.exception.status_code, 409)
+        reader.projection.side_effect = OSError('unavailable')
+        with self.assertRaises(host_control.HTTPException):
+            await self.runtime.exo_host_control._completed_preparations(history)
 
     async def test_prepare_disconnect_keeps_same_supervisor_task_and_member(self):
         self.isolated_member_plane()

@@ -73,14 +73,14 @@ def compare_raw_tokens(reference, snapshot, launches, reports):
             or type(end.get('end_event_idx')) is not int or type(snapshot.get('state_event_idx')) is not int
             or end['end_event_idx'] <= snapshot['state_event_idx']
             or not isinstance(launches, tuple) or tuple(b.expected.binding.rank for b in launches)
-                != ('slice', 'wafer', 'obelisk')
-            or not isinstance(reports, tuple) or len(reports) != 3):
+                != reference.plan.pipeline_ranks
+            or not isinstance(reports, tuple) or len(reports) != len(reference.plan.members)):
         raise ComparisonUnavailable('same completed command and three exact member observations required')
     try:
         instance = decode_json(contract['state_instance_json'])['MlxRingInstance']
         if (end.get('instance_id') != snapshot.get('instance_id')
                 or end['instance_id'] != instance['instanceId']
-                or len(instance['shardAssignments']['runnerToShard']) != 3
+                or len(instance['shardAssignments']['runnerToShard']) != len(reference.plan.members)
                 or end.get('runner_ids') != sorted(instance['shardAssignments']['runnerToShard'])):
             raise ValueError('end')
         rows = []

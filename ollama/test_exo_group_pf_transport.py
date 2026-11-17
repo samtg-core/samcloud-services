@@ -189,6 +189,29 @@ class LiveObserverTests(unittest.IsolatedAsyncioTestCase):
                 await verifier(self.endpoints(), environment)
             self.assertFalse(observe.called)
 
+    async def test_two_host_runtime_uses_only_exact_slice_obelisk_subset(self):
+        policy = replace(self.policy, rank='slice', uid=502)
+        verifier = LivePFVerifier(policy, self.receipt['pfctl_sha256'])
+        endpoints = self.endpoints()
+        for listener in endpoints.listeners:
+            if listener.address == self.policy.local_ip:
+                listener.address = policy.local_ip
+        environment = self.environment() | {
+            'EXO_RANK_NAME': 'slice', 'EXO_LEASED_PEER_IPS': '192.168.1.3,192.168.1.84'}
+        with patch.object(verifier, '_observe', return_value=True) as observe, patch('os.getuid', return_value=502):
+            self.assertTrue(await verifier(endpoints, environment))
+            for peers in ('192.168.1.3', '192.168.1.3,192.168.1.80',
+                          '192.168.1.84,192.168.1.3', '192.168.1.3,192.168.1.99'):
+                with self.subTest(peers=peers), self.assertRaises(PFUnavailable):
+                    await verifier(endpoints, environment | {'EXO_LEASED_PEER_IPS': peers})
+            self.assertEqual(observe.call_count, 1)
+        wafer = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
+        with patch.object(wafer, '_observe') as observe, patch('os.getuid', return_value=504):
+            with self.assertRaises(PFUnavailable):
+                await wafer(self.endpoints(), self.environment() | {
+                    'EXO_LEASED_PEER_IPS': '192.168.1.3,192.168.1.84'})
+            self.assertFalse(observe.called)
+
     async def test_live_reader_always_queries_kernel_and_rechecks_rules(self):
         verifier = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
         calls = []

@@ -75,7 +75,7 @@ def build_explicit_instance(
     ordered = sorted(plan.members, key=lambda member: member.pipeline_rank)
     # The current runtime's ring guard uses this fixed rank order. Refuse a
     # different order rather than generate a request it will interpret wrongly.
-    if [member.rank for member in ordered] != ["slice", "wafer", "obelisk"]:
+    if tuple(member.rank for member in ordered) != plan.pipeline_ranks:
         raise BindingRefused("pipeline order differs from the qualified ring profile")
     if config.get("num_hidden_layers") != ordered[-1].layers[1]:
         raise BindingRefused("parent layers differ from the complete placement")
@@ -88,11 +88,11 @@ def build_explicit_instance(
     ):
         raise BindingRefused("explicit group generation and ring port required")
     if (
-        len(endpoints) != 3
+        len(endpoints) != len(ordered)
         or [endpoint.rank for endpoint in endpoints]
         != [member.rank for member in ordered]
-        or len({endpoint.node_id for endpoint in endpoints}) != 3
-        or len({endpoint.ip for endpoint in endpoints}) != 3
+        or len({endpoint.node_id for endpoint in endpoints}) != len(ordered)
+        or len({endpoint.ip for endpoint in endpoints}) != len(ordered)
     ):
         raise BindingRefused("exact unique pipeline-ordered endpoints required")
     private = tuple(
@@ -147,7 +147,7 @@ def build_explicit_instance(
                 runners[member.rank]: PipelineShardMetadata(
                     model_card=card,
                     device_rank=member.pipeline_rank,
-                    world_size=3,
+                    world_size=len(ordered),
                     start_layer=member.layers[0],
                     end_layer=member.layers[1],
                     n_layers=card.n_layers,

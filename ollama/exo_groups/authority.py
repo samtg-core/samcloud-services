@@ -37,7 +37,7 @@ class GroupObservation:
 
     def permits(self, now: float) -> bool:
         return bool(
-            len(self.expected) == len(self.decisions) == 3
+            len(self.expected) == len(self.decisions) and len(self.expected) in (2, 3)
             and type(now) in (int, float) and math.isfinite(now)
             and self.checked_at <= now
             and all(decision.expected == expected and decision.allows_start(now)
@@ -45,7 +45,7 @@ class GroupObservation:
         )
 
     def permits_requests(self, now: float) -> bool:
-        return self.permits(now) and self.phases == ('serving', 'serving', 'serving')
+        return self.permits(now) and self.phases == ('serving',) * len(self.expected)
 
 
 class GroupAuthorityReader:
@@ -62,11 +62,11 @@ class GroupAuthorityReader:
         if not isinstance(plan, GroupPlan):
             raise TypeError('provider-owned GroupPlan required')
         expected = tuple(ExpectedMember.from_launch(plan, binding) for binding in launches)
-        if (len(expected) != 3
-                or tuple(item.binding.pipeline_rank for item in expected) != (0, 1, 2)
+        if (len(expected) != len(plan.pipeline_ranks)
+                or tuple(item.binding.pipeline_rank for item in expected) != tuple(range(len(plan.members)))
                 or len({item.binding.group_id for item in expected}) != 1
                 or len({item.binding.generation for item in expected}) != 1
-                or len({item.binding.lease_id for item in expected}) != 3
+                or len({item.binding.lease_id for item in expected}) != len(plan.members)
                 or any(type(item.binding.generation) is not int or item.binding.generation < 1
                        or type(item.binding.pipeline_rank) is not int for item in expected)
                 or {item.binding.rank for item in expected} != {member.rank for member in plan.members}):
