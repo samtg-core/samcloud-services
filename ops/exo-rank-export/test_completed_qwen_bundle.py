@@ -5,7 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from build_completed_qwen_bundle import validate_source
+from build_completed_qwen_bundle import validate_source, validate_sidecars, write_adapter_view
+from checkpoint_metadata import Rank
+from rank_bundle import build_bundle, digest
+from test_rank_bundle import create_parent
 
 
 class CompletionControls(unittest.TestCase):
@@ -88,6 +91,51 @@ class CompletionControls(unittest.TestCase):
         self.seal()
         with self.assertRaisesRegex(ValueError, 'extra entries'):
             validate_source(self.plan)
+
+
+class AdapterViewControls(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'source'
+        self.source.mkdir()
+        self.parent, self.index, self.catalogue, _ = create_parent(self.source)
+        rows = []
+        for name, value in [('config.json', self.parent['config']),
+                            ('tokenizer.json', {}), ('tokenizer_config.json', {})]:
+            raw = json.dumps(value).encode()
+            (self.source / name).write_bytes(raw)
+            rows.append({'name': name, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
+        self.parent['sidecar_files'] = rows
+        self.rows = [dict(row) for row in rows]
+
+    def test_missing_or_changed_sidecar_pin_refuses(self):
+        self.parent['sidecar_files'] = []
+        with self.assertRaisesRegex(ValueError, 'config/tokenizer'):
+            validate_sidecars(self.parent, self.rows, self.source)
+        self.parent['sidecar_files'] = [dict(row) for row in self.rows]
+        self.parent['sidecar_files'][0]['sha256'] = 'c' * 64
+        with self.assertRaisesRegex(ValueError, 'inventory'):
+            validate_sidecars(self.parent, self.rows, self.source)
+
+    def test_adapter_view_contains_only_assigned_weights_and_pinned_sidecars(self):
+        validate_sidecars(self.parent, self.rows, self.source)
+        ranks = [Rank('first', 0, 1, 100000, 100000), Rank('second', 1, 4, 100000, 100000)]
+        dest = self.root / 'bundle'
+        manifest = build_bundle(self.source, dest, self.parent, self.index,
+                                self.catalogue, ranks, scratch_reserve_bytes=0)
+        raw = json.dumps(self.parent).encode()
+        write_adapter_view(self.source, dest, self.parent, raw)
+        self.assertEqual((dest / 'parent-manifest.json').read_bytes(), raw)
+        self.assertEqual(digest(self.parent), manifest['parent_manifest_sha256'])
+        for rank in ranks:
+            directory = dest / rank.name
+            self.assertEqual(set(p.name for p in directory.iterdir()), {
+                'rank.safetensors', 'model-rank.safetensors', *(r['name'] for r in self.rows)})
+            self.assertEqual((directory / 'model-rank.safetensors').readlink(), Path('rank.safetensors'))
+            for row in self.rows:
+                self.assertEqual(hashlib.sha256((directory / row['name']).read_bytes()).hexdigest(), row['sha256'])
 
 
 if __name__ == '__main__':

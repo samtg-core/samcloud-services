@@ -18,6 +18,13 @@ against a pinned bundle manifest before that host uses it.
 rollout. Before any export, it requires the original downloader's full completion
 receipt, exact file inventory, service ownership, read-only files/directory and
 metadata hashes. It then delegates full weight hashing to the byte exporter.
+The parent manifest pins the native config/tokenizer sidecars. The exporter
+copies those exact bytes into each assigned loading view, writes the parent
+manifest and the qualified local weight alias, then records export completion.
+It does not publish a standard full-model index. The actual pinned native
+metadata adapter accepts and byte-verifies both ranks of a small fixture built
+this way without importing MLX or a model. A failed adapter-view copy receives
+no export-complete receipt even if byte export had completed.
 The operator substitutes the exact reviewed `PACKET` and `PLAN_SHA`; that plan
 also pins both imported modules and all parent/catalogue/index inputs. A detached
 launcher must independently pin the runner itself and record one process identity.
@@ -36,6 +43,7 @@ again at each host. No automatic retry, model load or queue bypass is supplied.
 python3 -m unittest discover -s ops/exo-rank-export -p 'test_*.py'
 ```
 
-Eighteen controls cover incomplete/seal/receipt/metadata/symlink/extra-file
+Twenty controls cover incomplete/seal/receipt/metadata/symlink/extra-file
 refusals plus byte-exact export across tiny chunks, corrupt input/output,
-interrupted publication, non-overwriting destinations and copied-rank verification.
+interrupted publication, non-overwriting destinations, copied-rank verification,
+and complete pinned native loading views.
