@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from .exo_groups.staging_files import collect_files, darwin_filesystem, StagingFilesUnavailable
 
@@ -116,6 +117,29 @@ class StagingFileControls(unittest.TestCase):
             return result
         with patch('os.read', read), self.assertRaises(StagingFilesUnavailable):
             self.collect()
+
+    def fake_statfs(self, flags):
+        def observe(descriptor, output):
+            value = output._obj
+            value.flags, value.filesystem = flags, b'apfs'
+            value.fsid[0], value.fsid[1] = 1, 2
+            value.available_blocks, value.block_size = 1000, 4096
+            return 0
+        return SimpleNamespace(fstatfs64=observe)
+
+    def test_ownership_ignored_volume_is_refused_even_with_valid_cached_hashes(self):
+        previous = self.collect()
+        with patch.object(sys, 'platform', 'darwin'), \
+             patch('ctypes.CDLL', return_value=self.fake_statfs(0x1000 | 0x00200000)), \
+             self.assertRaisesRegex(StagingFilesUnavailable, 'ignores ownership'):
+            collect_files(self.policy, filesystem=darwin_filesystem, previous=previous)
+
+    def test_darwin_local_volume_with_enforced_ownership_keeps_report_contract(self):
+        with patch.object(sys, 'platform', 'darwin'), \
+             patch('ctypes.CDLL', return_value=self.fake_statfs(0x1000)):
+            volume = darwin_filesystem(-1)
+        self.assertEqual(volume, {'local': True, 'filesystem': 'apfs',
+            'filesystem_id': [1, 2], 'free_bytes': 4096000})
 
     @unittest.skipUnless(sys.platform == 'darwin', 'Darwin host filesystem ABI')
     def test_actual_darwin_filesystem_reports_this_local_test_volume(self):
