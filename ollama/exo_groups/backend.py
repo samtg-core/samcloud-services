@@ -163,7 +163,12 @@ class EXOBackend:
                 or final['lastEventAppliedIdx'] < proof['end_event_idx']):
             raise RuntimeError('private state precedes its end evidence')
         self.bindings.record_end(execution_id, proof)
-        if failed or not self.actor.may_serve_requests():
+        # The exact command has ended on every rank, its terminal wire result
+        # is valid, and the bound instance is idle. Admission for a *new* call
+        # is independent: a later authority invalidation must not relabel this
+        # completed result as a backend failure. Provider permission still
+        # blocks new dispatch; physical ownership still needs exact cleanup.
+        if failed:
             raise BackendEnded({'kind': 'error', 'status': 502, 'code': 'exo_backend_failed',
                                 'detail': 'EXO generation ended without a usable result'})
         return result

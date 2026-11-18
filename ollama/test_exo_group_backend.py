@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 import httpx
@@ -235,6 +236,61 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
         row = await self.run_call(call)
         self.assertEqual(row['state'], 'queued')
         self.assertEqual(self.posts, 0)
+
+    async def finished_result_without_new_dispatch(self, *, stream):
+        self.end_entered.clear()
+        self.end_release.clear()
+        call = self.enqueue('finished', stream=stream)
+        self.assertEqual(self.supervisor.pump(HOST_RESOURCES['slice']), call['id'])
+        worker = self.supervisor.workers[call['id']]
+        await self.end_entered.wait()
+        self.enabled = False
+        self.end_release.set()
+        await worker
+        self.assertEqual(self.journal.execution(call['id'], 'caller')['state'], 'complete')
+        self.assertIsNotNone(self.bindings.snapshot(call['id'])['end'])
+        posts = self.posts
+        following = self.enqueue('held')
+        row = await self.run_call(following)
+        self.assertEqual(row['state'], 'queued')
+        self.assertEqual(self.posts, posts)
+        self.assertFalse(self.actor.may_serve_requests())
+
+    async def test_finished_stream_survives_later_permission_loss_without_new_dispatch(self):
+        await self.finished_result_without_new_dispatch(stream=True)
+
+    async def test_finished_json_survives_later_permission_loss_without_new_dispatch(self):
+        await self.finished_result_without_new_dispatch(stream=False)
+
+    async def test_actual_terminal_error_stays_failed_after_permission_loss(self):
+        self.mode = 'error'
+        self.end_release.clear()
+        call = self.enqueue()
+        self.supervisor.pump(HOST_RESOURCES['slice'])
+        worker = self.supervisor.workers[call['id']]
+        await self.end_entered.wait()
+        self.enabled = False
+        self.end_release.set()
+        await worker
+        self.assertEqual(self.journal.execution(call['id'], 'caller')['state'], 'failed')
+        self.assertIsNotNone(self.bindings.snapshot(call['id'])['end'])
+
+    async def test_permission_lost_during_output_stays_uncertain_without_end_proof(self):
+        owner = self
+
+        async def interrupted(parts):
+            for index, part in enumerate(parts.parts):
+                yield part
+                if index == 0:
+                    owner.enabled = False
+
+        with patch.object(Parts, '__aiter__', interrupted):
+            call = self.enqueue()
+            row = await self.run_call(call)
+        self.assertEqual(row['state'], 'uncertain')
+        self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
+        self.assertFalse(self.end_entered.is_set())
+        self.assertEqual(self.posts, 1)
 
 
 if __name__ == '__main__':
