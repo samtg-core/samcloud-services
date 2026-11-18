@@ -34,6 +34,15 @@ all admitted member leases before publishing that window or scoring cases.
 A short prompt only demonstrates a short prompt. The upstream non-thinking
 sampling settings must also be sent and verified in the eval's actual requests.
 
+The registered EXO provider preserves explicitly supplied `top_p`, `top_k` and
+`min_p` through both durable and compatibility queue intake. Probabilities must
+be finite numbers in [0,1], and `top_k` a nonnegative integer; boolean/string
+coercions are refused before creating a grant. Explicit null remains null.
+Omitted options add no fields or defaults to the saved request, preserving its
+existing identity. These native-only options do not change ordinary Ollama
+requests. The provider forwards the persisted values to EXO; a qualification
+must still inspect the actual native task options before claiming card settings.
+
 Validation includes no-effect deployment controls, mismatch refusal before any
 host/plane request, changed configuration/environment bindings, a helper that
 returns the wrong context, and actual pinned EXO wire types showing every card
