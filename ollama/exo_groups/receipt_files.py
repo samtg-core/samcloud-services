@@ -101,10 +101,30 @@ def _read(directory,name,uid,*,private=True):
 
 
 def collect_attempt(spec,*,boot_reader=boot_id):
+    return _collect_attempt(spec, boot_reader=boot_reader, historical=False)
+
+
+def collect_historical_attempt(spec,*,boot_reader=boot_id):
+    """Read old immutable metadata across reboot; never itself cleanup proof.
+
+    Normal live receipts continue requiring their original boot. Historical
+    callers must separately validate a normal prior cleanup or reboot evidence
+    AND exact plane settlement before authorizing any new preparation.
+    """
+    return _collect_attempt(spec, boot_reader=boot_reader, historical=True)
+
+
+def _collect_attempt(spec,*,boot_reader,historical):
+    current_boot=boot_reader()
+    try:
+        if str(UUID(current_boot)) != current_boot or UUID(current_boot).int == 0:
+            raise ValueError('invalid boot')
+    except (ValueError,TypeError,AttributeError):
+        raise ReceiptUnavailable('current kernel boot unavailable') from None
     keys={'resource_id','group_id','generation','lease_id','runtime_sha256','launch_sha256',
           'boot_id','uid','state_path','journal_path'}
     if (not isinstance(spec,dict) or set(spec)!=keys or type(spec['uid']) is not int
-            or spec['uid']!=os.getuid() or boot_reader()!=spec['boot_id']
+            or spec['uid']!=os.getuid() or (not historical and current_boot!=spec['boot_id'])
             or type(spec['generation']) is not int or spec['generation']<1
             or any(not isinstance(spec[k],str) or not re.fullmatch(r'[a-f0-9]{64}',spec[k])
                    for k in ('runtime_sha256','launch_sha256'))):
@@ -176,9 +196,10 @@ def collect_attempt(spec,*,boot_reader=boot_id):
         if ((actual.st_dev,actual.st_ino)!=(db_before.st_dev,db_before.st_ino)
                 or _identity(db_before)!=_identity(os.fstat(database))
                 or _identity(parent_before)!=_identity(os.fstat(parent))
-                or _identity(before)!=_identity(os.fstat(state)) or boot_reader()!=spec['boot_id']):
+                or _identity(before)!=_identity(os.fstat(state)) or boot_reader()!=current_boot):
             raise ReceiptUnavailable('host attempt changed during observation')
-        return {'uid':spec['uid'],'boot_id':spec['boot_id'],'binding':spec,'phase':row['phase'],
+        return {**({'observed_host_boot':current_boot} if historical else {}),
+                'uid':spec['uid'],'boot_id':spec['boot_id'],'binding':spec,'phase':row['phase'],
                 'prepared':prepared,'started':started[0] if started else None,
                 'launch_intent':launch,'cleanup':cleanup}
     finally:
