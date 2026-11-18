@@ -524,6 +524,7 @@ class ChatRequest(BaseModel):
     # exactly as they were. Ollama entry points refuse on it, so "64", 64.0 or
     # True cannot become a budget through pydantic's coercion.
     _reasoning_problem: Optional[str] = PrivateAttr(default=None)
+    _native_sampling: dict = PrivateAttr(default_factory=dict)
 
     @model_validator(mode='wrap')
     @classmethod
@@ -531,7 +532,14 @@ class ChatRequest(BaseModel):
         model = handler(data)
         if isinstance(data, dict):
             model._reasoning_problem = reasoning_request_error(data)
+            # Keep native options outside the ordinary Ollama request shape.
+            # Only a registered provider validates and forwards these values.
+            model._native_sampling = {key: data[key] for key in
+                                      ('top_p', 'top_k', 'min_p') if key in data}
         return model
+
+    def native_sampling(self):
+        return dict(self._native_sampling)
 
     def reasoning_problem(self):
         """Raw-input verdict, else the parsed values (a model built without a dict)."""

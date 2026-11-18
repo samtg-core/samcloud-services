@@ -6,6 +6,7 @@ initial reservation or second physical Slice lease.
 """
 
 import asyncio
+import math
 
 from ..inference_arbiter import CapacityDeferred, NotFound
 from ..inference_events import source_call
@@ -17,6 +18,22 @@ from .plan import HOST_RESOURCES
 
 
 class GroupProvider:
+    @staticmethod
+    def normalize_request(body, sampling):
+        """Preserve explicit native sampling, with no change to omitted fields."""
+        if not isinstance(sampling, dict) or set(sampling) - {'top_p', 'top_k', 'min_p'}:
+            raise ValueError('known native sampling options required')
+        for key, value in sampling.items():
+            if value is None:
+                continue
+            if key == 'top_k':
+                valid = type(value) is int and value >= 0
+            else:
+                valid = type(value) in (int, float) and 0 <= value <= 1 and math.isfinite(value)
+            if not valid:
+                raise ValueError('invalid native sampling option: ' + key)
+        return {**body, **sampling}
+
     def __init__(self, installation, actor):
         self.installation, self.actor = installation, actor
         self.source, self.queue = installation.source, installation.runtime.queue

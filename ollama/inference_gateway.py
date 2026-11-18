@@ -107,7 +107,14 @@ class GatewayQueue:
         req = self.service.ChatRequest(**body)
         if req.model != model:
             raise ValueError('request model differs from grant')
-        return {'operation': 'chat', 'body': req.model_dump(), 'release_after': False}
+        return {'operation': 'chat', 'body': self.provider_request(model, req), 'release_after': False}
+
+    def provider_request(self, model, req):
+        body = req.model_dump()
+        normalize = getattr(self.providers.get(model), 'normalize_request', None)
+        if normalize is not None:
+            body = normalize(body, req.native_sampling())
+        return body
 
     def router(self):
         return build_router(self.supervisor, self.resolve, self.validate_call)
@@ -211,9 +218,10 @@ class GatewayQueue:
         if operation == "chat" and model not in self.providers and req.reasoning_problem():
             raise HTTPException(422, "Invalid reasoning request")
         try:
+            body = self.provider_request(model, req) if operation == 'chat' else req.model_dump()
             grant = self.supervisor.journal.submit(identity, operation + ':' + key, resource, model)
             execution = self.supervisor.journal.enqueue(grant['id'], identity, 'call', {
-                'operation': operation, 'body': req.model_dump(), 'release_after': True})
+                'operation': operation, 'body': body, 'release_after': True})
         except Conflict as exc:
             raise HTTPException(409, str(exc)) from None
         except ValueError:
