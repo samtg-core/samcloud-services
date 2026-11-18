@@ -1044,3 +1044,12 @@ attempt needs its independent launch record, exact child birth identity and
 cleanup validated against that child. Historical rows remain intact. Rebooted,
 missing or unconfirmed prior attempts require separate reconciliation; this
 path never replays them or treats an empty process list as cleanup evidence.
+# Pending route preflight
+
+The transport verifier checks the actual outgoing MLX ring hop as well as the
+listener and firewall. It reads the destination's current route and asks the
+kernel to select an unbound UDP source, without sending a datagram. Both must
+match the explicitly qualified interface/address. This catches a host with the
+right Ethernet listener but a preferred Wi-Fi route before native startup.
+The check does not change routes or relax PF. A route failure retains ownership
+for reconciliation and supplies no new inference or launch permission.

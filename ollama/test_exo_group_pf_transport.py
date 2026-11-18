@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import socket
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -219,6 +220,8 @@ class LiveObserverTests(unittest.IsolatedAsyncioTestCase):
 
         def read(args):
             calls.append(args)
+            if args == ['/sbin/route', '-n', 'get', '192.168.1.84']:
+                return 'route to: 192.168.1.84\n  interface: en0\n'
             if args == ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']:
                 return self.policy.boot_id + '\n'
             if args == ['/sbin/ifconfig', '-a']:
@@ -230,12 +233,69 @@ class LiveObserverTests(unittest.IsolatedAsyncioTestCase):
             return b'pfctl-fixture' if str(path) == PFCTL else canonical(self.receipt)
 
         module = 'ollama.exo_groups.pf_transport.'
-        with patch(module + 'read_command', side_effect=read), patch(module + 'protected_file', side_effect=protected), patch('os.getuid', return_value=504):
+        with patch(module + 'read_command', side_effect=read), patch(module + 'protected_file', side_effect=protected), patch('os.getuid', return_value=504), patch('socket.socket') as sockets:
+            sockets.return_value.__enter__.return_value.getsockname.return_value = ('192.168.1.80', 49152)
             self.assertTrue(await verifier(self.endpoints(), self.environment()))
             first = len(calls)
             self.assertTrue(await verifier(self.endpoints(), self.environment()))
         self.assertEqual(len(calls), first * 2)  # No saved-snapshot acceptance.
         self.assertEqual(calls.count(['/usr/bin/sudo', '-n', '--', PFCTL, '-sr']), 4)
+        self.assertEqual(sockets.call_args.args, (socket.AF_INET, socket.SOCK_DGRAM))
+        probe = sockets.return_value.__enter__.return_value
+        self.assertEqual(probe.connect.call_count, 4)
+        probe.connect.assert_called_with(('192.168.1.84', 52518))
+        probe.send.assert_not_called()
+        probe.sendto.assert_not_called()
+        probe.sendall.assert_not_called()
+
+    async def test_wifi_route_refuses_before_any_privileged_read(self):
+        verifier = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
+        module = 'ollama.exo_groups.pf_transport.'
+        with patch(module + 'read_command', return_value='  interface: en1\n') as read, patch(module + 'protected_file') as protected, patch('os.getuid', return_value=504), patch('socket.socket') as sockets:
+            with self.assertRaisesRegex(PFUnavailable, 'qualified interface'):
+                await verifier(self.endpoints(), self.environment())
+            read.assert_called_once_with(['/sbin/route', '-n', 'get', '192.168.1.84'])
+            protected.assert_not_called()
+            sockets.assert_not_called()
+
+    async def test_wifi_source_refuses_even_when_interface_address_exists(self):
+        verifier = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
+        module = 'ollama.exo_groups.pf_transport.'
+        with patch(module + 'read_command', return_value='  interface: en0\n'), patch(module + 'protected_file') as protected, patch('os.getuid', return_value=504), patch('socket.socket') as sockets:
+            sockets.return_value.__enter__.return_value.getsockname.return_value = ('192.168.1.104', 49152)
+            with self.assertRaisesRegex(PFUnavailable, 'source address'):
+                await verifier(self.endpoints(), self.environment())
+            protected.assert_not_called()
+
+    async def test_route_probe_failure_is_unconfirmed_not_permission(self):
+        verifier = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
+        module = 'ollama.exo_groups.pf_transport.'
+        with patch(module + 'read_command', return_value='  interface: en0\n'), patch('os.getuid', return_value=504), patch('socket.socket', side_effect=OSError('route unavailable')):
+            with self.assertRaisesRegex(PFUnavailable, 'unconfirmed'):
+                await verifier(self.endpoints(), self.environment())
+
+    async def test_valid_kernel_firewall_cannot_approve_wrong_ring_route(self):
+        """Old checks accepted this exact valid-PF/multihomed-route shape."""
+        verifier = LivePFVerifier(self.policy, self.receipt['pfctl_sha256'])
+        commands = {arguments: name for name, arguments in show_commands(tuple(self.receipt['anchors'])).items()}
+
+        def read(args):
+            if args == ['/sbin/route', '-n', 'get', '192.168.1.84']:
+                return 'route to: 192.168.1.84\n  interface: en1\n'
+            if args == ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']:
+                return self.policy.boot_id + '\n'
+            if args == ['/sbin/ifconfig', '-a']:
+                return 'en0: flags=1\n\tinet 192.168.1.80 netmask 0xffffff00\nen1: flags=1\n\tinet 192.168.1.104 netmask 0xffffff00\n'
+            self.assertEqual(args[:4], ['/usr/bin/sudo', '-n', '--', PFCTL])
+            return self.snapshot[commands[tuple(args[4:])]]
+
+        def protected(path, **_):
+            return b'pfctl-fixture' if str(path) == PFCTL else canonical(self.receipt)
+
+        module = 'ollama.exo_groups.pf_transport.'
+        with patch(module + 'read_command', side_effect=read), patch(module + 'protected_file', side_effect=protected), patch('os.getuid', return_value=504):
+            with self.assertRaisesRegex(PFUnavailable, 'qualified interface'):
+                await verifier(self.endpoints(), self.environment())
 
 
 if __name__ == '__main__':

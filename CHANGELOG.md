@@ -1,5 +1,14 @@
 # Changelog & Working Notes
 
+## Unreleased — verify the actual ring route before EXO startup
+
+Refuse transport verification when the next MLX ring hop selects a different
+interface or source address from the qualified Ethernet policy. A multihomed
+host can have the correct listening address while its outgoing connection takes
+Wi-Fi and is correctly blocked by PF. Read the live route and use a UDP-connect
+source lookup without sending a datagram, before and after the existing live
+PF checks. No route, firewall rule, lease, native operation or retry is changed.
+
 ## Unreleased — bounded EXO receipt history above ten thousand events
 
 Permit up to 20,000 immutable event files when reading a historical host attempt,
