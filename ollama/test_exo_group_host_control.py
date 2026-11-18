@@ -189,8 +189,8 @@ class HostControlControls(IsolatedAsyncioTestCase):
         history = self.runtime.exo_host_control._preparation_history('lease_'+'9'*16)
         reader = SimpleNamespace(projection=AsyncMock(return_value=projection), close=AsyncMock())
         self.enterContext(patch.object(self.config, 'host_reader', return_value=reader))
-        collector = receipt_files.collect_attempt
-        self.enterContext(patch.object(host_control, 'observe_local_attempt', new=AsyncMock(side_effect=lambda spec:
+        collector = receipt_files.collect_historical_attempt
+        self.enterContext(patch.object(host_control, 'observe_local_attempt', new=AsyncMock(side_effect=lambda spec, **_kwargs:
             collector(spec, boot_reader=lambda: self.config.boot_id))))
         return projection, history, reader
 
@@ -745,6 +745,48 @@ class StartedHistoryControls(IsolatedAsyncioTestCase):
                 with self.assertRaises(host_control.HTTPException):
                     await host_control.HostControl._completed_preparations(fake, history)
                 reader.close.assert_awaited_once()
+
+    async def test_reboot_cleanup_and_exact_settlement_allow_history_without_restart(self):
+        from datetime import datetime, timezone
+        from .exo_groups.host_receipts import prepared_from_report
+        from .exo_groups.reboot_cleanup import RebootExpectation
+        from .exo_groups.cleanup import CleanupExpectation
+        from .exo_groups.rank_process import ProcessIdentity
+        fixture, fake, history, reader = await self.history(cleanup=False)
+        new_boot='11111111-2222-4333-8444-555555555555'
+        report=receipt_files.collect_historical_attempt(fixture.spec, boot_reader=lambda:new_boot)
+        prepared=prepared_from_report(fixture.plan,report['prepared'])
+        child=ProcessIdentity(**report['started']['child'])
+        started=CleanupExpectation(prepared.binding, child, prepared.listeners,
+            report['launch_intent']['baseline_in_use_bytes'], prepared.tolerance_bytes)
+        proof={'kind':'observed_rank_rebooted', **asdict(started.binding),
+            'lease_released':False, 'settlement_recorded':False,
+            'observation':{'binding':asdict(started.binding),'prepared':asdict(prepared),
+                'child':asdict(child),'previous_host_boot':fixture.boot,'current_host_boot':new_boot,
+                'booted_at':{'seconds':child.started_seconds+1,'microseconds':0},
+                'observed_at':datetime.fromtimestamp(child.started_seconds+2,timezone.utc).isoformat(),
+                'fenced_generation':started.binding.generation+1,'kernel_inventory_complete':True,
+                'boot_rechecked':True,'native_processes':[],'reserved_sockets':[],
+                'listeners_closed':[True]*len(prepared.listeners)}}
+        path=fixture.actor.state/'cleanup-evidence.json'
+        path.write_text(json.dumps(proof));path.chmod(0o600)
+        fake.deployment.boot_id=new_boot
+        reader.projection.return_value['generation']=started.binding.generation+1
+        before=list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts'))
+        async def observe(spec, *, historical=False):
+            self.assertTrue(historical)
+            return receipt_files.collect_historical_attempt(spec,boot_reader=lambda:new_boot)
+        with patch.object(host_control,'observe_local_attempt',side_effect=observe):
+            try:
+                await host_control.HostControl._completed_preparations(fake, history)
+            except host_control.HTTPException as error:
+                self.fail(f'An exactly settled rebooted attempt must allow historical preflight: HTTP {error.status_code}')
+            reader.projection.assert_awaited_once()
+            reader.projection.return_value['member']['settlement_recorded']=False
+            with self.assertRaises(host_control.HTTPException):
+                await host_control.HostControl._completed_preparations(fake, history)
+        self.assertEqual(before,list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts')))
+        self.assertEqual(path.read_text(),json.dumps(proof))
 
     async def test_started_rank_without_cleanup_cannot_be_replaced(self):
         _fixture, fake, history, reader = await self.history(cleanup=False)
