@@ -1,5 +1,14 @@
 # Changelog & Working Notes
 
+## Unreleased — completed EXO history survives a later coordinator fence
+
+A new fixed session can validate exact old cleanup and terminal settlement after
+the old coordinator generation has advanced. Historical settlement accepts an
+integer generation at least as new as the frozen launch; it never changes that
+launch, resumes old work or provides new start authority. Uncertain, active,
+unsettled, mismatched or lower-generation history still refuses. This permits
+cleanup-backed group continuation without resetting host journals.
+
 ## Unreleased — safe Ollama error diagnostics
 
 Capture bounded HTTP error details and detect error-only records inside accepted streams. Log fixed cause tags, captured lengths and hashes without raw backend text. Chat streaming callers receive a failure frame and `[DONE]`; the NDJSON completions stream gets a final safe error line. Synchronous generation uses the same typed error. Non-streaming routes now raise HTTP 500 for in-band errors rather than returning truncated successful chat content or a raw error dictionary with HTTP 200. Existing generation deadlines, retry, admission and cleanup policies are unchanged; a backend error remains uncertainty, not evidence of returned capacity. See `ollama/BACKEND_ERRORS.md` for timeout and truncation limits.

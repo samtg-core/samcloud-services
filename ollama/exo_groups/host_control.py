@@ -350,7 +350,10 @@ class HostControl:
                 lease = observed.get('lease', {})
                 if (projection.get('group_id') != run.group_id
                         or projection.get('owner_id') != expected.binding.owner_id
-                        or projection.get('generation') != run.generation
+                        # A later coordinator fence is expected after cleanup.
+                        # This is historical settlement, never start authority.
+                        or type(projection.get('generation')) is not int
+                        or projection['generation'] < run.generation
                         or projection.get('phase') != 'released'
                         or projection.get('release_requested') is not True
                         or observed.get('resource_id') != run.resource_id
