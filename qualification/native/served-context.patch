@@ -1,14 +1,20 @@
 diff --git a/src/exo/utils/served_context.py b/src/exo/utils/served_context.py
 new file mode 100644
-index 0000000..af5c844
+index 0000000..5549fa0
 --- /dev/null
 +++ b/src/exo/utils/served_context.py
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,42 @@
 +"""Explicit served token budgets for pinned workers; no ordinary default cap."""
 +
 +import os
 +import re
 +from collections.abc import Mapping
++from typing import final
++
++
++@final
++class ServedContextRejectedError(ValueError):
++    """An invalid request budget, with no cache or model work performed."""
 +
 +
 +def validate_served_token_budget(
@@ -33,9 +39,13 @@ index 0000000..af5c844
 +        or type(output_tokens) is not int
 +        or output_tokens < 1
 +    ):
-+        raise ValueError("explicit served context requires a valid token budget")
++        raise ServedContextRejectedError(
++            "explicit served context requires a valid token budget"
++        )
 +    if prompt_tokens + output_tokens > int(raw):
-+        raise ValueError("request token budget exceeds the configured served context")
++        raise ServedContextRejectedError(
++            "request token budget exceeds the configured served context"
++        )
 diff --git a/src/exo/utils/tests/test_served_context.py b/src/exo/utils/tests/test_served_context.py
 new file mode 100644
 index 0000000..ace692a
@@ -101,6 +111,35 @@ index f0a5495..eeb1e7d 100644
      accumulated_text = ""
      generated_text_parts: list[str] = []
      generation_start_time = time.perf_counter()
+diff --git a/src/exo/worker/runner/llm_inference/batch_generator.py b/src/exo/worker/runner/llm_inference/batch_generator.py
+index 9f4409b..ad3cd43 100644
+--- a/src/exo/worker/runner/llm_inference/batch_generator.py
++++ b/src/exo/worker/runner/llm_inference/batch_generator.py
+@@ -27,6 +27,7 @@ from exo.shared.types.worker.runner_response import (
+ )
+ from exo.utils.channels import MpReceiver, MpSender
+ from exo.utils.qualification_tokens import trace_qualification_tokens
++from exo.utils.served_context import ServedContextRejectedError
+ from exo.worker.disaggregated.server import PrefillRequest
+ from exo.worker.engines.base import Engine
+ from exo.worker.engines.mlx.cache import KVPrefixCache, encode_prompt
+@@ -197,6 +198,16 @@ class SequentialGenerator(Engine):
+             if self._queue:
+                 self._start_next()
+ 
++        except ServedContextRejectedError as error:
++            # This request was refused before prefill/cache use. Every rank
++            # reports its exact task ended so the provider can prove the error
++            # terminal, while the resident runner remains usable for a new call.
++            self._send_error(task, error)
++            output.append((task.task_id, FinishedResponse()))
++            self._active = None
++            if self._queue:
++                self._start_next()
++
+         except Exception as e:
+             self._send_error(task, e)
+             self._active = None
 diff --git a/src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py b/src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py
 new file mode 100644
 index 0000000..9a560df
@@ -157,3 +196,122 @@ index 0000000..9a560df
 +        prefill.assert_not_called()
 +    model.assert_not_called()
 +    cache_lookup.assert_not_called()
+diff --git a/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py b/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py
+new file mode 100644
+index 0000000..efee14b
+--- /dev/null
++++ b/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py
+@@ -0,0 +1,113 @@
++"""A known request rejection ends its task without killing a resident runner."""
++
++from collections.abc import Generator, Iterator
++from typing import cast
++from unittest.mock import Mock, patch
++
++import mlx.core as mx
++import pytest
++from mlx_lm.tokenizer_utils import TokenizerWrapper
++
++from exo.shared.types.chunks import ErrorChunk, GenerationChunk
++from exo.shared.types.common import CommandId, ModelId
++from exo.shared.types.events import ChunkGenerated, Event
++from exo.shared.types.tasks import TaskId, TextGeneration
++from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.shared.types.worker.instances import InstanceId
++from exo.shared.types.worker.runner_response import FinishedResponse, GenerationResponse
++from exo.utils.channels import MpReceiver, MpSender
++from exo.utils.served_context import ServedContextRejectedError
++from exo.worker.engines.mlx.types import Model
++from exo.worker.runner.llm_inference import batch_generator
++
++
++def agreed(
++    tasks: list[TextGeneration], _group: mx.distributed.Group | None
++) -> tuple[list[TextGeneration], list[TextGeneration]]:
++    return tasks, []
++
++
++def rejected(error: Exception) -> Generator[GenerationResponse]:
++    yield from ()
++    raise error
++
++
++def completed() -> Generator[GenerationResponse]:
++    yield from ()
++
++
++def unparsed(*_arguments: object) -> Iterator[GenerationChunk | None]:
++    return iter(())
++
++
++def engine_and_task() -> tuple[
++    batch_generator.SequentialGenerator, TextGeneration, list[Event]
++]:
++    sent: list[Event] = []
++    model = ModelId("qualification/qwen3")
++    engine = batch_generator.SequentialGenerator(
++        model=cast(Model, Mock()),
++        tokenizer=cast(TokenizerWrapper, Mock()),
++        group=None,
++        kv_prefix_cache=None,
++        tool_parser=None,
++        model_id=model,
++        device_rank=0,
++        cancel_receiver=cast(MpReceiver[TaskId], Mock()),
++        event_sender=cast(MpSender[Event], Mock(send=sent.append)),
++    )
++    task = TextGeneration(
++        instance_id=InstanceId("0" * 64),
++        command_id=CommandId("00000000-0000-0000-0000-000000000001"),
++        task_params=TextGenerationTaskParams(
++            model=model, input=[], max_output_tokens=16
++        ),
++    )
++    return engine, task, sent
++
++
++def test_request_rejection_finishes_and_the_next_task_can_complete() -> None:
++    engine, task, sent = engine_and_task()
++    message = "request token budget exceeds the configured served context"
++    with (
++        patch.object(batch_generator, "mx_all_gather_tasks", side_effect=agreed),
++        patch.object(batch_generator, "apply_chat_template", return_value="unused"),
++        patch.object(batch_generator, "apply_all_parsers", side_effect=unparsed),
++        patch.object(
++            batch_generator.SequentialGenerator,
++            "_build_generator",
++            side_effect=[rejected(ServedContextRejectedError(message)), completed()],
++        ),
++    ):
++        engine.submit(task)
++        result = list(engine.step())
++        assert len(result) == 1 and result[0][0] == task.task_id
++        assert isinstance(result[0][1], FinishedResponse)
++        assert len(sent) == 1 and isinstance(sent[0], ChunkGenerated)
++        assert sent[0].command_id == task.command_id
++        assert sent[0].chunk == ErrorChunk(
++            model=task.task_params.model, finish_reason="error", error_message=message
++        )
++        following = task.model_copy(update={"task_id": TaskId()})
++        engine.submit(following)
++        next_result = list(engine.step())
++        assert len(next_result) == 1 and next_result[0][0] == following.task_id
++        assert isinstance(next_result[0][1], FinishedResponse)
++        assert len(sent) == 1
++
++
++def test_an_unknown_generator_error_is_still_fatal() -> None:
++    engine, task, _sent = engine_and_task()
++    with (
++        patch.object(batch_generator, "mx_all_gather_tasks", side_effect=agreed),
++        patch.object(batch_generator, "apply_chat_template", return_value="unused"),
++        patch.object(batch_generator, "apply_all_parsers", return_value=iter(())),
++        patch.object(
++            batch_generator.SequentialGenerator,
++            "_build_generator",
++            return_value=rejected(ValueError("unknown backend failure")),
++        ),
++    ):
++        engine.submit(task)
++        with pytest.raises(ValueError, match="unknown backend failure"):
++            list(engine.step())
