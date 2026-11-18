@@ -26,18 +26,18 @@ PREFIX=b'EXO_RECEIPTS_V1:'
 MAX_FRAME=512*1024
 
 
-def _program(source):
+def _program(source, *, historical=False):
     return ("import sys,json,hashlib,os\n"
         "r=json.loads(sys.stdin.buffer.read(524289))\n"
         f"s={source!r}\n"
         "assert hashlib.sha256(s.encode()).hexdigest()==r['collector_sha256']\n"
         "n={};exec(compile(s,'<host-receipt-collector>','exec'),n)\n"
         "v={'request_id':r['request_id'],'collector_sha256':r['collector_sha256'],"
-        "'report':n['collect_attempt'](r['spec'])}\n"
+        f"'report':n[{('collect_historical_attempt' if historical else 'collect_attempt')!r}](r['spec'])}}\n"
         "print('EXO_RECEIPTS_V1:'+json.dumps(v,sort_keys=True,separators=(',',':'),allow_nan=False),flush=True)")
 
 
-async def observe_local_attempt(spec):
+async def observe_local_attempt(spec, *, historical=False):
     """Read the host's journal in a separate, bounded metadata observer.
 
     POSIX locks are per process: closing a raw descriptor for SQLite's file in
@@ -52,7 +52,7 @@ async def observe_local_attempt(spec):
     if len(request) > MAX_FRAME:
         raise ReceiptUnavailable('local host receipt request exceeds bound')
     try:
-        raw = await run_probe((sys.executable, '-I', '-S', '-B', '-c', _program(source)), request,
+        raw = await run_probe((sys.executable, '-I', '-S', '-B', '-c', _program(source, historical=historical)), request,
             environment={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'PYTHONDONTWRITEBYTECODE': '1'})
         if not isinstance(raw, bytes) or len(raw) > MAX_FRAME:
             raise ValueError('frame bound')
