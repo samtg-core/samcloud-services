@@ -192,7 +192,7 @@ class HostControlControls(IsolatedAsyncioTestCase):
         projection, history, reader = await self.settled_history()
         original = copy.deepcopy(projection)
         variants = [original | {'phase': 'releasing'}, original | {'group_id': 'foreign'},
-            original | {'generation': 2},
+            original | {'generation': original['generation'] - 1},
             original | {'member': original['member'] | {'cleanup_attested': False}},
             original | {'member': original['member'] | {'settlement_recorded': False}},
             original | {'member': original['member'] | {'lease_id': 'foreign'}},
@@ -645,6 +645,44 @@ class StartedHistoryControls(IsolatedAsyncioTestCase):
         self.assertEqual(before, list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts')))
         reader.projection.assert_awaited_once()
         reader.close.assert_awaited_once()
+
+    async def test_settled_expired_rank_after_coordinator_fence_allows_fresh_session(self):
+        fixture, fake, history, reader = await self.history()
+        value = reader.projection.return_value
+        value['generation'] += 1
+        value['member']['lease'].update(status='expired', settled_at='2026-11-18T11:38:25+00:00')
+        before = list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts'))
+        try:
+            await host_control.HostControl._completed_preparations(fake, history)
+        except host_control.HTTPException as error:
+            self.fail(f'Exact settled cleanup after a later fence must pass: HTTP {error.status_code}')
+        self.assertEqual(before, list(fixture.journal.db.execute('SELECT * FROM exo_host_rank_attempts')))
+        reader.projection.assert_awaited_once()
+        reader.close.assert_awaited_once()
+
+    async def test_later_fence_never_substitutes_for_cleanup_or_exact_settlement(self):
+        for mutation in ('unsettled', 'unattested', 'active', 'not_released', 'old_generation', 'boolean_generation'):
+            with self.subTest(mutation=mutation):
+                fixture, fake, history, reader = await self.history()
+                value = reader.projection.return_value
+                original = value['generation']
+                value['generation'] += 1
+                value['member']['lease'].update(status='expired', settled_at='2026-11-18T11:38:25+00:00')
+                if mutation == 'unsettled':
+                    value['member']['lease']['settled_at'] = None
+                elif mutation == 'unattested':
+                    value['member']['cleanup_attested'] = False
+                elif mutation == 'active':
+                    value['member']['lease']['status'] = 'active'
+                elif mutation == 'not_released':
+                    value['phase'] = 'uncertain'
+                elif mutation == 'old_generation':
+                    value['generation'] = original - 1
+                else:
+                    value['generation'] = True
+                with self.assertRaises(host_control.HTTPException):
+                    await host_control.HostControl._completed_preparations(fake, history)
+                reader.close.assert_awaited_once()
 
     async def test_started_rank_without_cleanup_cannot_be_replaced(self):
         _fixture, fake, history, reader = await self.history(cleanup=False)

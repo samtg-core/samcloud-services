@@ -57,3 +57,16 @@ preserves that lock; the old in-process collector demonstrably drops it. Other
 controls check identical receipt metadata, nonce/source/spec/uid/boot matching,
 output bounds, credential exclusion and no automatic observer retry. No model,
 fleet request or physical lease is used in these controls.
+
+## Settled history after a coordinator fence
+
+A released prior group may have a newer generation than the actual child
+launch: cleanup-backed continuation and ordinary fencing invalidate old
+commands by advancing that generation. Historical preparation accepts an
+integer generation at least as new as the frozen launch only when the exact
+old lease is terminal and settled, the group is released, and its attributed
+cleanup matches the independent prepared/child receipts. A lower or untyped
+generation, uncertain group, missing cleanup, active lease or missing settlement
+still refuses. No old launch or journal identity is changed, and no projection
+of historical settlement authorizes the next start. The new group still needs
+its own fresh member authority.
