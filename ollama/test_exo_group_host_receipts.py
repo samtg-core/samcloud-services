@@ -94,6 +94,48 @@ class ReceiptControls(unittest.IsolatedAsyncioTestCase):
         args.update(changes)
         return await (reader or self.reader).read(self.plan,binding=self.expected.binding,**args)
 
+    def metadata_events(self, count):
+        # Actual immutable private files, not a mocked directory enumeration.
+        for number in range(1, count + 1):
+            path = self.actor.state / f'event-{number:06d}.json'
+            if not path.exists():
+                path.write_text('{"type":"authority_read_required"}')
+                path.chmod(0o600)
+
+    async def test_complete_history_above_ten_thousand_events_retains_exact_cleanup(self):
+        await self.owner.on_connect()
+        await self.owner.start()
+        self.child.code = 0
+        self.actor.process_exited()
+        self.metadata_events(10168)
+        before = (self.actor.state / 'cleanup-evidence.json').read_bytes()
+        try:
+            result = await self.read()
+        except BindingRefused:
+            self.fail('A complete 10,168-event history within the byte budget must remain readable')
+        self.assertEqual(result.cleanup_bytes, before)
+        self.assertEqual(result.started.child, self.child.identity)
+        self.assertEqual(len(list(self.actor.state.glob('event-*.json'))), 10168)
+
+    async def test_extra_launch_after_ten_thousand_events_is_not_hidden(self):
+        await self.owner.on_connect()
+        await self.owner.start()
+        self.child.code = 0
+        self.actor.process_exited()
+        original = next(path.read_bytes() for path in self.actor.state.glob('event-*.json')
+                        if json.loads(path.read_bytes()).get('type') == 'rank_started')
+        self.metadata_events(10168)
+        path = self.actor.state / 'event-010169.json'
+        path.write_bytes(original)
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ReceiptUnavailable, 'ambiguous host launch'):
+            collect_attempt(self.spec)
+
+    async def test_explicit_larger_file_budget_still_refuses_oversize_index(self):
+        self.metadata_events(20001)
+        with self.assertRaisesRegex(ReceiptUnavailable, 'event index'):
+            collect_attempt(self.spec)
+
     async def test_preparation_read_is_independent_and_has_no_compute_or_cleanup_claim(self):
         result=await self.read()
         self.assertEqual(result.prepared,self.owner.prepared)

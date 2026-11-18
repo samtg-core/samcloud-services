@@ -70,3 +70,16 @@ generation, uncertain group, missing cleanup, active lease or missing settlement
 still refuses. No old launch or journal identity is changed, and no projection
 of historical settlement authorizes the next start. The new group still needs
 its own fresh member authority.
+
+## Explicit receipt-history observation budget
+
+The 18 November closed setup retained 10,168 Slice authority events while
+waiting for settlement. Its small event files fit within the existing 8 MiB
+content bound, but the old 10,000-file count bound refused before reading them.
+The reviewed collector now permits at most 20,000 event files, still at most
+8 MiB total and 128 KiB per private regular file. It reads every event, requires
+exactly one actual launch where appropriate, and retains all boot, inode,
+source, nonce, journal and child-cleanup comparisons. No event is dropped,
+compacted or edited; excess count or bytes still requires explicit handling.
+This is a bounded metadata observation change, not a work deadline or permission
+to retry inference. Long-lived event retention remains separate future work.

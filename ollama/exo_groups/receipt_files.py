@@ -22,6 +22,10 @@ class ReceiptUnavailable(ValueError):
     pass
 
 
+# Explicit metadata budgets: the observed closed setup has 10,168 small
+# authority events. Read its complete history, including every possible start;
+# do not truncate or reset it. The independent 8 MiB content bound is unchanged.
+MAX_EVENT_FILES=20000
 MAX_EVENT_BYTES=8*1024*1024
 
 
@@ -142,7 +146,7 @@ def collect_attempt(spec,*,boot_reader=boot_id):
             # and arbitrary files are never returned to the coordinator.
             names=os.listdir(state)
             events=[name for name in names if re.fullmatch(r'event-[0-9]{6}\.json',name)]
-            if len(events)>10000:
+            if len(events)>MAX_EVENT_FILES:
                 raise ReceiptUnavailable('host event index requires explicit reconciliation')
             started=[]
             event_bytes=0

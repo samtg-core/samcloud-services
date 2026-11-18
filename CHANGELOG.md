@@ -1,5 +1,13 @@
 # Changelog & Working Notes
 
+## Unreleased — bounded EXO receipt history above ten thousand events
+
+Permit up to 20,000 immutable event files when reading a historical host attempt,
+with the existing 8 MiB total and 128 KiB per-file limits unchanged. The captured
+closed setup had 10,168 small authority events. Scan the complete set and retain
+unique-launch, exact child/cleanup, journal, nonce, boot and inode checks. No
+history is removed or rewritten and oversized histories still refuse explicitly.
+
 ## Unreleased — completed EXO history survives a later coordinator fence
 
 A new fixed session can validate exact old cleanup and terminal settlement after
