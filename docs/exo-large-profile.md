@@ -43,6 +43,14 @@ existing identity. These native-only options do not change ordinary Ollama
 requests. The provider forwards the persisted values to EXO; a qualification
 must still inspect the actual native task options before claiming card settings.
 
+A completed result and permission to dispatch again are distinct. After a valid
+terminal response, exact all-rank command-end proof and the existing runtime /
+idle-instance checks, a successful result stays successful even if admission
+permission is invalidated. Fresh authority is still required before dispatch and
+throughout an active stream. Missing/stale end evidence or interrupted output
+remains uncertain. Physical leases still require positive cleanup and exact
+settlement; recording a completed call does not release the group.
+
 Validation includes no-effect deployment controls, mismatch refusal before any
 host/plane request, changed configuration/environment bindings, a helper that
 returns the wrong context, and actual pinned EXO wire types showing every card
