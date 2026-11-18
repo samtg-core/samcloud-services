@@ -45,6 +45,9 @@ class AssemblyControls(IsolatedAsyncioTestCase):
             self.context.reports[key] = replace(report, started=None, phase='prepared')
         self.effects, self.operations, self.errors = [], {}, []
         self.mode, self.lost = 'ok', False
+        self.low_memory = set()
+        self.capacity_reads = []
+        self.capacity_fault = None
         self.entered, self.release = asyncio.Event(), asyncio.Event()
         self.release.set()
         self.service = EXOService(self.fixture.runtime)
@@ -115,6 +118,21 @@ class AssemblyControls(IsolatedAsyncioTestCase):
             self.assertEqual(value['plan_sha256'], digest(asdict(self.actor.plan)))
         else:
             self.assertEqual(value['identity'], run_identity(command.binding))
+        if action == 'capacity':
+            self.capacity_reads.append(launch.rank)
+            needed = command.binding.expected.member.memory_mb * 1024 * 1024
+            report = {
+                'identity': run_identity(command.binding),
+                'uid': endpoint.uid, 'boot_id': self.provider.receipts.routes[launch.lease_id].boot_id,
+                'manager_empty': True, 'total_bytes': needed * 2,
+                'available_bytes': needed - 1 if launch.rank in self.low_memory else needed}
+            if launch.rank == 'wafer' and self.capacity_fault:
+                if self.capacity_fault == 'contact':
+                    return httpx.Response(503)
+                report.update(self.capacity_fault)
+            return httpx.Response(200, headers={'cache-control': 'no-store'}, json={
+                'request_id': value['request_id'], 'source_sha256': endpoint.source_sha256,
+                'configuration_sha256': endpoint.configuration_sha256, 'report': report})
         if action in ('prepare', 'start'):
             # Coordinator journal ownership precedes every network effect.
             row = self.assembly._submission(command, action)
@@ -130,6 +148,8 @@ class AssemblyControls(IsolatedAsyncioTestCase):
                     for member in self.parts.launches:
                         self.assertIsInstance(self.provider.completion._pin(member.lease_id), NoStartExpectation)
                 self.context.reports[launch.lease_id] = self.started_reports[launch.lease_id]
+                if self.mode == 'memory-lost-during-start':
+                    self.low_memory.add('wafer')
             self.operations[launch.lease_id, action] = {
                 'request_id': value['request_id'], 'action': action, 'state': 'returned'}
             if action == 'start' and self.mode == 'lost-start' and not self.lost:
@@ -161,6 +181,91 @@ class AssemblyControls(IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.state(self.native.call), 'queued')
         self.assertEqual(self.parts.posts, 0)  # No inference in assembly.
         self.assertTrue(await self.advance())
+
+    async def test_rank_ram_wait_keeps_all_claims_and_original_call_before_any_native_start(self):
+        original_group = copy.deepcopy(self.parts.group)
+        self.low_memory = {'wafer'}
+        for _ in range(2):
+            self.assertFalse(await self.advance())
+            self.assertEqual(self.assembly.saved()['phase'], 'waiting_capacity')
+            self.assertEqual(self.fixture.state(self.native.call), 'queued')
+            self.assertEqual(self.parts.group, original_group)
+            self.assertEqual(self.native.posts, 0)
+            self.assertFalse(any(x[0] == 'start' for x in self.effects))
+        self.assertEqual(self.effects, [('prepare', 'slice'), ('prepare', 'wafer'), ('prepare', 'obelisk')])
+        self.assertEqual(set(self.capacity_reads), {'slice', 'wafer', 'obelisk'})
+        self.provider.assembly = self.assembly
+        self.provider.publish()
+        self.assertEqual(self.provider.source.last_model[self.provider.resource, self.provider.model]['reason'],
+                         'exo_rank_memory')
+        # A fresh external capacity observation can resume the same demand.
+        self.low_memory.clear()
+        self.assertTrue(await self.advance(), self.assembly.saved())
+        self.assertEqual(self.native.posts, 1)
+        for rank in ('slice', 'wafer', 'obelisk'):
+            self.assertEqual(self.effects.count(('prepare', rank)), 1)
+            self.assertEqual(self.effects.count(('start', rank)), 1)
+
+    async def test_ram_is_rechecked_after_host_launches_before_instance_post(self):
+        self.mode = 'memory-lost-during-start'
+        self.assertFalse(await self.advance())
+        self.assertEqual(self.assembly.saved()['phase'], 'waiting_capacity')
+        self.assertEqual(self.native.posts, 0)
+        self.assertEqual(self.fixture.state(self.native.call), 'queued')
+        for rank in ('slice', 'wafer', 'obelisk'):
+            self.assertEqual(self.effects.count(('start', rank)), 1)
+        self.mode = 'ok'
+        self.low_memory.clear()
+        self.assertTrue(await self.advance(), self.assembly.saved())
+        self.assertEqual(self.native.posts, 1)
+        for rank in ('slice', 'wafer', 'obelisk'):
+            self.assertEqual(self.effects.count(('start', rank)), 1)
+
+    async def test_started_instance_is_not_denied_by_its_own_resident_memory(self):
+        self.assertTrue(await self.advance())
+        reads = len(self.capacity_reads)
+        self.low_memory = {'slice', 'wafer', 'obelisk'}
+        self.assertTrue(await self.advance())
+        self.assertEqual(len(self.capacity_reads), reads)
+        self.assertEqual(self.native.posts, 1)
+
+    async def test_bad_capacity_observation_is_unknown_and_never_starts_or_frees_claims(self):
+        original = copy.deepcopy(self.parts.group)
+        for fault in ('contact', {'boot_id': 'foreign'}, {'uid': True},
+                      {'identity': {}}, {'manager_empty': False},
+                      {'available_bytes': True}, {'available_bytes': -1},
+                      {'available_bytes': None}, {'available_bytes': 10**30},
+                      {'available_bytes': 0, 'total_bytes': 1}):
+            self.capacity_fault = fault
+            with self.subTest(fault=fault):
+                self.assertFalse(await self.advance())
+                self.assertIsNotNone(self.assembly.saved()['error_type'])
+                self.assertEqual(self.native.posts, 0)
+                self.assertFalse(any(x[0] == 'start' for x in self.effects))
+                self.assertEqual(self.fixture.state(self.native.call), 'queued')
+                self.assertEqual(self.parts.group, original)
+
+    async def test_capacity_wait_has_no_hot_retry_and_resumes_on_existing_external_wake(self):
+        self.low_memory = {'wafer'}
+        async def factory(provider):
+            self.assertIs(provider, self.provider)
+            return self.assembly
+        self.fixture.source.paused = False
+        self.provider.bind_assembly_factory(factory)
+        async with asyncio.timeout(2):
+            await asyncio.shield(self.provider._task)
+        reads = len(self.capacity_reads)
+        self.assertEqual(self.assembly.saved()['phase'], 'waiting_capacity')
+        self.assertIs(self.provider.permitted(self.provider.resource), False)
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.capacity_reads), reads)
+        self.assertEqual(self.native.posts, 0)
+        self.low_memory.clear()
+        self.provider.wake()  # Existing host/resource event, not a new loop.
+        async with asyncio.timeout(2):
+            await asyncio.shield(self.provider._task)
+        self.assertEqual(self.assembly.saved()['phase'], 'ready')
+        self.assertEqual(self.native.posts, 1)
         self.assertEqual(len(self.effects), 7)
 
     async def test_lost_start_reply_recovers_actual_receipt_without_another_post(self):

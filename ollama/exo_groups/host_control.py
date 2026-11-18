@@ -11,6 +11,7 @@ import base64
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -18,6 +19,8 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from ..inference_events import source_call
 
 from .deployment import HostDeployment
 from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
@@ -508,6 +511,25 @@ class HostControl:
         async def status(request: Request):
             body = await self._body(request, {'identity'})
             return self._response(body['request_id'], await self._observed_status(body['identity']))
+
+        @router.post('/capacity')
+        async def capacity(request: Request):
+            body = await self._body(request, {'identity'})
+            owner = self._owner(body['identity'])
+            # Use the host's existing canonical collector, not EXO discovery,
+            # file sizes, ledger availability or an earlier successful sample.
+            reading = await source_call(self.runtime.manager._collect_stats)
+            available, total = (reading.get(key) for key in
+                                ('memory_available_mb', 'memory_total_mb'))
+            if (type(available) is not int or type(total) is not int
+                    or not 0 <= available <= total):
+                raise HTTPException(503, 'Fresh host RAM capacity unavailable')
+            return self._response(body['request_id'], {
+                'identity': run_identity(owner.actor.spec.binding),
+                'boot_id': self.deployment.boot_id, 'uid': os.getuid(),
+                'manager_empty': not bool(self.runtime.manager.models),
+                'available_bytes': available * 1024 * 1024,
+                'total_bytes': total * 1024 * 1024})
 
         @router.post('/prepare')
         async def prepare(request: Request):
