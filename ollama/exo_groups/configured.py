@@ -34,7 +34,8 @@ from .service import EXOService
 
 
 _PINS = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-         for name in ('configured.py', 'qualification.py', 'calls.py', 'factory.py', 'host_control.py')}
+         for name in ('configured.py', 'qualification.py', 'calls.py', 'factory.py', 'host_control.py',
+                      'assembly.py', 'load_capacity.py', 'install.py', 'startup.py')}
 
 
 class AttendedCredential:
@@ -208,9 +209,11 @@ class SessionControl:
     def status(self):
         saved = self.provider._saved()
         task = self.service.tasks.get('coordinator')
+        assembly = None if self.provider.assembly is None else self.provider.assembly.saved()
         return {'group_id': None if saved is None else saved['group_id'],
             'generation': None if saved is None else saved['generation'],
             'phase': self.provider.actor.report.phase, 'reason': self.provider.actor.report.reason,
+            'assembly_phase': None if assembly is None else assembly['phase'],
             'group_phase': self.provider.actor.group_snapshot.get('phase')
                 if isinstance(self.provider.actor.group_snapshot, dict) else None,
             'credential_bound': self.service.credential._value is not None,

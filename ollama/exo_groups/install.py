@@ -216,12 +216,22 @@ class GroupProvider:
         if (resource != self.resource or self.source.paused or self._closed
                 or self.source.permission is not True):
             return None
+        if self._waiting_capacity():
+            return False
         return True if (self._ready and not self._busy() and self.backend is not None
             and self._actor_epoch == self.actor._epoch and self.actor.may_serve_requests()
             and not self.installation.runtime.manager.models) else None
 
+    def _waiting_capacity(self):
+        return (self.assembly is not None
+                and self.assembly.saved()['phase'] == 'waiting_capacity'
+                and self.actor.may_start_ranks())
+
     def publish(self):
         available = self.permitted(self.resource) is True
+        if not available and self._waiting_capacity():
+            self.source.publish(self.resource, 'unavailable', 'exo_rank_memory', model=self.model)
+            return
         self.source.publish(self.resource, 'available' if available else 'unknown',
                             'exo_group_covered' if available else 'exo_group_unconfirmed', model=self.model)
 

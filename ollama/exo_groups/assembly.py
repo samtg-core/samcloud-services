@@ -11,6 +11,7 @@ import time
 from ..inference_arbiter import Conflict, NotFound
 from .host_control import run_identity
 from .host_http import HostCommands
+from .load_capacity import LoadCapacityGate, LoadCapacityPending
 from .prepare import canonical, digest
 
 
@@ -33,6 +34,10 @@ class GroupAssembly:
         self.actor, self.plan = provider.actor, provider.actor.plan
         self.journal, self.contract = provider.queue.supervisor.journal, backend.contract
         self.service = commands[0].service
+        self.load_capacity = LoadCapacityGate(commands, receipts.routes)
+        if self.provider.readiness.startup.load_capacity is not None:
+            raise ValueError('private startup already has a load-capacity owner')
+        self.provider.readiness.startup.load_capacity = self.load_capacity
         with self.journal.transaction():
             self.journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_group_assembly (
                 owner TEXT NOT NULL,request_key TEXT NOT NULL,group_id TEXT NOT NULL,
@@ -122,6 +127,13 @@ class GroupAssembly:
                 report = await self._receipt(command)
                 if report.started is not None and self._submission(command, 'start') is None:
                     raise Conflict('host started without this coordinator submission')
+            startup = self.provider.readiness.startup
+            try:
+                startup.starts.snapshot(self.plan.owner_id, self.plan.request_key)
+            except NotFound:
+                phase = 'checking_capacity'
+                self._record(phase)
+                await self.load_capacity.check(self._current)
             # Every independent preparation pin precedes the first start.
             phase = 'starting_hosts'
             self._record(phase)
@@ -134,10 +146,11 @@ class GroupAssembly:
             self._current()
             phase = 'starting_instance'
             self._record(phase)
-            startup = self.provider.readiness.startup
             try:
                 submitted = startup.starts.snapshot(self.plan.owner_id, self.plan.request_key)
             except NotFound:
+                # Startup rechecks RAM after its own file and private-state
+                # observations, immediately before the first instance POST.
                 await startup.submit()
             else:
                 if submitted['contract_sha256'] != self.contract.sha256:
@@ -149,6 +162,11 @@ class GroupAssembly:
             await self.provider.readiness.attest()
             self._record('ready')
             return True
+        except LoadCapacityPending:
+            self._record('waiting_capacity')
+            self.journal.capacity_event(self.provider.resource, self.provider.model,
+                                        'unavailable', 'exo_rank_memory')
+            return False
         except Exception as error:
             self._record(phase, type(error).__name__)
             self.journal.capacity_event(self.provider.resource, self.provider.model,

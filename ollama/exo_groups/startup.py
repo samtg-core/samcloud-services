@@ -86,6 +86,7 @@ class InstanceStartup:
             raise ValueError('exact startup actor, bindings and runtime verifier required')
         self.actor, self.private, self.starts = actor, private, starts
         self.contract, self.launches, self.verify_runtime = contract, launches, verify_runtime
+        self.load_capacity = None  # Bound by this provider's GroupAssembly.
 
     def _authorized(self, epoch):
         return self.actor._epoch == epoch and self.actor.may_start_ranks()
@@ -99,6 +100,11 @@ class InstanceStartup:
         runtime = await self.verify_runtime()
         state = await self.private.state()
         self.contract.check_empty(self.actor.plan, self.launches, state, runtime_sha256=runtime)
+        if self.load_capacity is not None:
+            def current():
+                if not self._authorized(epoch):
+                    raise BindingRefused('startup authority changed during capacity observation')
+            await self.load_capacity.check(current)
         if not self._authorized(epoch):
             raise BindingRefused('startup authority changed before submission')
         return await self.private.create_instance(self.starts, self.actor.plan, self.contract,

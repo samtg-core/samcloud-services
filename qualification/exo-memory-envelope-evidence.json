@@ -1,0 +1,33 @@
+{
+  "native_commit": "2b7d860eadcd57eb0ddd4bb74e8cd293af30c6dd",
+  "native_parent": "246a48dd2e4c7b1bfdd30b09364960b3521c5856",
+  "native_patch_sha256": "0b3308d516229671c63e8d1355e44b647434a50f815c3d2b43ff49331646f158",
+  "native_tests": {
+    "passed": 653,
+    "skipped": 3,
+    "slow_deselected": 190,
+    "profile": "CPU only; unchanged default test selection"
+  },
+  "native_typecheck": "0 errors, 0 warnings, 0 notes",
+  "native_ruff": "pass",
+  "nix_fmt": {
+    "formatted_files": 806,
+    "changed_files": 0,
+    "exit_code": 0,
+    "scope": "isolated temporary source in existing Slice VM; no GPU/model/service operation"
+  },
+  "old_native_negative_control": "one expected HTTP400 failure, zero errors with unchanged API.create_instance method",
+  "old_provider_predicate_negative_control": "one expected assertion failure, zero errors with the initial available-RAM draft predicate",
+  "actual_host_metadata": "all three staged rank views agree on the exact 235B manifest, file bytes, full-context F16 cache and per-rank envelopes; kernel/wired/locked-memory reads fit the existing envelopes",
+  "residency_or_full_context_fit_proven": false,
+  "fleet_installed": false,
+  "active_authority_restored": false,
+  "core_lifetime_contract_issue": "https://github.com/samtg-core/samcloud/issues/21",
+  "native_patch_format": "git diff --unified=0; apply with git apply --unidiff-zero on exact native_parent",
+  "native_patch_applies_to_exact_parent": true,
+  "provider_tests": {
+    "passed": 537,
+    "scope": "all 49 EXO software-control modules; CPU/offline; no fleet, physical lease or model action"
+  },
+  "provider_ruff": "pass"
+}

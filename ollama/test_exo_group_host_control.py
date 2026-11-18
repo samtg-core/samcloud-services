@@ -364,6 +364,57 @@ class HostControlControls(IsolatedAsyncioTestCase):
         self.assertIsNone(report['child'])
         self.assertFalse(report['operations'])
 
+    async def test_capacity_reads_fresh_host_ram_without_starting_or_releasing(self):
+        owner = await self.bind()
+        identity = run_identity(owner.actor.spec.binding)
+        reading = {'memory_available_mb': 100, 'memory_total_mb': 200}
+        policy = {'boot_id': self.config.boot_id, 'wired_limit_bytes': 180 * 1024 * 1024,
+                  'kernel_wired_bytes': 10 * 1024 * 1024, 'device_inuse_bytes': 5 * 1024 * 1024}
+        with patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True) as read, \
+                patch.object(host_control, 'metal_policy', return_value=policy):
+            report = (await self.post('capacity', identity=identity)).json()['report']
+            self.assertEqual(report['available_bytes'], 100 * 1024 * 1024)
+            reading['memory_available_mb'] = 150
+            second = (await self.post('capacity', identity=identity)).json()['report']
+            self.assertEqual(second['available_bytes'], 150 * 1024 * 1024)
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(report['wired_limit_bytes'], policy['wired_limit_bytes'])
+        self.assertEqual(report['identity'], identity)
+        self.assertEqual(report['boot_id'], self.config.boot_id)
+        self.assertTrue(report['manager_empty'])
+        self.assertEqual(owner._attempt()['phase'], 'prepared')
+        self.assertFalse(owner.actor.launch_attempted)
+        self.assertIsNone(owner.actor.receipt)
+
+    async def test_capacity_rejects_an_actual_boot_change(self):
+        owner = await self.bind()
+        reading = {'memory_available_mb': 100, 'memory_total_mb': 200}
+        with patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True), \
+                patch.object(host_control, 'metal_policy', return_value={'boot_id': 'foreign'}):
+            response = await self.post('capacity', identity=run_identity(owner.actor.spec.binding))
+            self.assertEqual(response.status_code, 503)
+        self.assertFalse(owner.actor.launch_attempted)
+
+    async def test_capacity_requires_exact_host_identity_and_configured_caller(self):
+        owner = await self.bind()
+        identity = run_identity(owner.actor.spec.binding)
+        with patch.object(self.runtime.manager, '_collect_stats', create=True) as read:
+            self.assertEqual((await self.post('capacity', identity=identity | {'generation': 99})).status_code, 409)
+            self.caller = {'valid': True, 'owner_id': 'user:foreign'}
+            self.assertEqual((await self.post('capacity', identity=identity)).status_code, 403)
+            read.assert_not_called()
+
+    async def test_capacity_bad_or_missing_read_refuses_instead_of_reusing_previous(self):
+        owner = await self.bind()
+        identity = run_identity(owner.actor.spec.binding)
+        for reading in ({}, {'memory_available_mb': None, 'memory_total_mb': 200},
+                        {'memory_available_mb': True, 'memory_total_mb': 200},
+                        {'memory_available_mb': -1, 'memory_total_mb': 200},
+                        {'memory_available_mb': 201, 'memory_total_mb': 200}):
+            with self.subTest(reading=reading), patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True):
+                self.assertEqual((await self.post('capacity', identity=identity)).status_code, 503)
+        self.assertFalse(owner.actor.launch_attempted)
+
     async def test_disconnect_does_not_cancel_start_and_same_request_never_restarts(self):
         owner = await self.bind()
         started = asyncio.Event()

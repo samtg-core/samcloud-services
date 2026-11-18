@@ -145,6 +145,15 @@ class DeploymentControls(unittest.IsolatedAsyncioTestCase):
                 HostDeployment(self.plan, self.files, **(self.options | {'prefill_step_size': invalid}))
         self.assertFalse(list(self.state_base.iterdir()))
 
+    async def test_native_memory_envelopes_follow_pipeline_not_acquisition_order(self):
+        changed = replace(self.plan, members=tuple(reversed(self.plan.members)))
+        configured = HostDeployment(changed, self.files, **self.options)
+        compiled = configured.compile(self.binding)
+        expected = ','.join(str(m.memory_mb) for m in
+                            sorted(self.plan.members, key=lambda m: m.pipeline_rank))
+        self.assertEqual(compiled.environment['EXO_LEASED_MEMORY_MB'], expected)
+        self.assertFalse(list(self.state_base.iterdir()))
+
     async def test_prefill_step_is_bound_to_host_configuration_and_launch_environment(self):
         runtime = Path(self.files.runtime['root'])
         runtime.chmod(0o700)
