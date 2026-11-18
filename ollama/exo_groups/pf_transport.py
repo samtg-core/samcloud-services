@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import subprocess
 from uuid import UUID
@@ -221,6 +222,33 @@ def interface_addresses(text):
     return result
 
 
+def observe_ring_egress(policy, peers):
+    """Check the next ring hop's actual unbound source without sending data.
+
+    MLX binds its listener to the hostfile address, but its outgoing connection
+    follows the OS route. Merely finding the intended Ethernet address on an
+    interface does not prove that a multihomed host will use it to connect.
+    A UDP connect performs the kernel's route/source selection without sending
+    a datagram or touching the live ring's TCP listener.
+    """
+    if (peers != policy.peers and not (policy.rank in ('slice', 'obelisk')
+            and peers == (policy.peers[0], policy.peers[2]))):
+        raise PFUnavailable('ring route requires the exact configured membership')
+    peer = peers[(peers.index(policy.local_ip) + 1) % len(peers)]
+    route = read_command(['/sbin/route', '-n', 'get', peer])
+    interfaces = re.findall(r'^\s*interface:\s*(\S+)\s*$', route, re.M)
+    if interfaces != [policy.interface]:
+        raise PFUnavailable('ring peer route does not use the qualified interface')
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect((peer, policy.ports[3]))
+            source = probe.getsockname()[0]
+    except OSError:
+        raise PFUnavailable('ring peer source selection is unconfirmed') from None
+    if source != policy.local_ip:
+        raise PFUnavailable('ring peer route selects an unqualified source address')
+
+
 class LivePFVerifier:
     """Fixed local receipt, explicit host policy; no fake/saved-report fallback."""
 
@@ -249,10 +277,12 @@ class LivePFVerifier:
                 or any(environment.get('EXO_LEASED_' + name + '_PORT') != str(port)
                        for name, port in zip(('API', 'PEER', 'DISCOVERY', 'RING'), p.ports))):
             raise PFUnavailable('live confinement requested for another rank or endpoint')
-        return await asyncio.to_thread(self._observe)
+        peers = tuple(environment['EXO_LEASED_PEER_IPS'].split(','))
+        return await asyncio.to_thread(self._observe, peers)
 
-    def _observe(self):
+    def _observe(self, peers):
         p = self.policy
+        observe_ring_egress(p, peers)
         receipt = json.loads(protected_file(RECEIPT, maximum=262144))
         if hashlib.sha256(protected_file(PFCTL, maximum=4194304)).hexdigest() != self.pfctl_sha256:
             raise PFUnavailable('Apple PF binary changed')
@@ -274,4 +304,5 @@ class LivePFVerifier:
                 raise PFUnavailable('PF evaluation path changed during observation')
         if read_command(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']).strip() != boot:
             raise PFUnavailable('host rebooted during observation')
+        observe_ring_egress(p, peers)
         return True
