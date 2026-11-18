@@ -125,11 +125,16 @@ class AssemblyControls(IsolatedAsyncioTestCase):
                 'identity': run_identity(command.binding),
                 'uid': endpoint.uid, 'boot_id': self.provider.receipts.routes[launch.lease_id].boot_id,
                 'manager_empty': True, 'total_bytes': needed * 2,
-                'available_bytes': needed - 1 if launch.rank in self.low_memory else needed}
+                'available_bytes': 0,
+                'wired_limit_bytes': needed - 1 if launch.rank in self.low_memory else needed,
+                'kernel_wired_bytes': needed // 4, 'device_inuse_bytes': needed // 8}
             if launch.rank == 'wafer' and self.capacity_fault:
                 if self.capacity_fault == 'contact':
                     return httpx.Response(503)
-                report.update(self.capacity_fault)
+                if self.capacity_fault == 'occupied':
+                    report['kernel_wired_bytes'] = needed + 1
+                else:
+                    report.update(self.capacity_fault)
             return httpx.Response(200, headers={'cache-control': 'no-store'}, json={
                 'request_id': value['request_id'], 'source_sha256': endpoint.source_sha256,
                 'configuration_sha256': endpoint.configuration_sha256, 'report': report})
@@ -182,7 +187,7 @@ class AssemblyControls(IsolatedAsyncioTestCase):
         self.assertEqual(self.parts.posts, 0)  # No inference in assembly.
         self.assertTrue(await self.advance())
 
-    async def test_rank_ram_wait_keeps_all_claims_and_original_call_before_any_native_start(self):
+    async def test_rank_wired_policy_wait_keeps_claims_and_original_call_before_any_native_start(self):
         original_group = copy.deepcopy(self.parts.group)
         self.low_memory = {'wafer'}
         for _ in range(2):
@@ -235,7 +240,10 @@ class AssemblyControls(IsolatedAsyncioTestCase):
                       {'identity': {}}, {'manager_empty': False},
                       {'available_bytes': True}, {'available_bytes': -1},
                       {'available_bytes': None}, {'available_bytes': 10**30},
-                      {'available_bytes': 0, 'total_bytes': 1}):
+                      {'available_bytes': 0, 'total_bytes': 1},
+                      {'wired_limit_bytes': None}, {'wired_limit_bytes': True},
+                      {'wired_limit_bytes': 0}, {'kernel_wired_bytes': -1},
+                      {'device_inuse_bytes': None}):
             self.capacity_fault = fault
             with self.subTest(fault=fault):
                 self.assertFalse(await self.advance())
@@ -244,6 +252,22 @@ class AssemblyControls(IsolatedAsyncioTestCase):
                 self.assertFalse(any(x[0] == 'start' for x in self.effects))
                 self.assertEqual(self.fixture.state(self.native.call), 'queued')
                 self.assertEqual(self.parts.group, original)
+
+    async def test_zero_free_ram_does_not_reject_a_queue_admitted_metal_envelope(self):
+        # The fixture advertises zero currently available RAM on every host.
+        # The explicit wired envelopes and non-pageable headroom still fit.
+        self.assertTrue(await self.advance(), self.assembly.saved())
+        self.assertEqual(self.native.posts, 1)
+
+    async def test_foreign_locked_memory_holds_same_claims_until_capacity_returns(self):
+        original = copy.deepcopy(self.parts.group)
+        self.capacity_fault = 'occupied'
+        self.assertFalse(await self.advance())
+        self.assertEqual(self.assembly.saved()['phase'], 'waiting_capacity')
+        self.assertEqual(self.native.posts, 0)
+        self.assertEqual(self.parts.group, original)
+        self.capacity_fault = None
+        self.assertTrue(await self.advance(), self.assembly.saved())
 
     async def test_capacity_wait_has_no_hot_retry_and_resumes_on_existing_external_wake(self):
         self.low_memory = {'wafer'}

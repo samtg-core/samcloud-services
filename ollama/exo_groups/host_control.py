@@ -32,9 +32,10 @@ from .host_receipts import observe_local_attempt
 from .token_receipts import collect_tokens
 from .rank_process import Listener, ProcessIdentity, RunBinding
 from .rank_runtime import LaunchPreflightPending
+from .load_capacity import metal_policy
 
 
-_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py',
+_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'load_capacity.py', 'staging_files.py',
                  'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
@@ -299,8 +300,10 @@ class HostControl:
                 report = await observe_local_attempt(spec)
                 prepared = report['prepared']
                 data = prepared['binding']['expected']
-                launch = dict(data['binding']); launch['layers'] = tuple(launch['layers'])
-                member = dict(data['member']); member['layers'] = tuple(member['layers'])
+                launch = dict(data['binding'])
+                launch['layers'] = tuple(launch['layers'])
+                member = dict(data['member'])
+                member['layers'] = tuple(member['layers'])
                 expected = ExpectedMember(LaunchBinding(**launch), MemberPlan(**member))
                 run = RunBinding.from_expected(expected, row['runtime_sha256'])
                 pin = NoStartExpectation(run, prepared['host_boot'], prepared['launch_sha256'],
@@ -524,12 +527,18 @@ class HostControl:
             if (type(available) is not int or type(total) is not int
                     or not 0 <= available <= total):
                 raise HTTPException(503, 'Fresh host RAM capacity unavailable')
+            try:
+                policy = await source_call(metal_policy, reading)
+                if policy['boot_id'] != self.deployment.boot_id:
+                    raise ValueError('host boot differs')
+            except Exception:
+                raise HTTPException(503, 'Fresh host Metal policy unavailable') from None
             return self._response(body['request_id'], {
                 'identity': run_identity(owner.actor.spec.binding),
                 'boot_id': self.deployment.boot_id, 'uid': os.getuid(),
                 'manager_empty': not bool(self.runtime.manager.models),
                 'available_bytes': available * 1024 * 1024,
-                'total_bytes': total * 1024 * 1024})
+                'total_bytes': total * 1024 * 1024, **policy})
 
         @router.post('/prepare')
         async def prepare(request: Request):

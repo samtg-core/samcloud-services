@@ -368,19 +368,32 @@ class HostControlControls(IsolatedAsyncioTestCase):
         owner = await self.bind()
         identity = run_identity(owner.actor.spec.binding)
         reading = {'memory_available_mb': 100, 'memory_total_mb': 200}
-        with patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True) as read:
+        policy = {'boot_id': self.config.boot_id, 'wired_limit_bytes': 180 * 1024 * 1024,
+                  'kernel_wired_bytes': 10 * 1024 * 1024, 'device_inuse_bytes': 5 * 1024 * 1024}
+        with patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True) as read, \
+                patch.object(host_control, 'metal_policy', return_value=policy):
             report = (await self.post('capacity', identity=identity)).json()['report']
             self.assertEqual(report['available_bytes'], 100 * 1024 * 1024)
             reading['memory_available_mb'] = 150
             second = (await self.post('capacity', identity=identity)).json()['report']
             self.assertEqual(second['available_bytes'], 150 * 1024 * 1024)
             self.assertEqual(read.call_count, 2)
+            self.assertEqual(report['wired_limit_bytes'], policy['wired_limit_bytes'])
         self.assertEqual(report['identity'], identity)
         self.assertEqual(report['boot_id'], self.config.boot_id)
         self.assertTrue(report['manager_empty'])
         self.assertEqual(owner._attempt()['phase'], 'prepared')
         self.assertFalse(owner.actor.launch_attempted)
         self.assertIsNone(owner.actor.receipt)
+
+    async def test_capacity_rejects_an_actual_boot_change(self):
+        owner = await self.bind()
+        reading = {'memory_available_mb': 100, 'memory_total_mb': 200}
+        with patch.object(self.runtime.manager, '_collect_stats', return_value=reading, create=True), \
+                patch.object(host_control, 'metal_policy', return_value={'boot_id': 'foreign'}):
+            response = await self.post('capacity', identity=run_identity(owner.actor.spec.binding))
+            self.assertEqual(response.status_code, 503)
+        self.assertFalse(owner.actor.launch_attempted)
 
     async def test_capacity_requires_exact_host_identity_and_configured_caller(self):
         owner = await self.bind()

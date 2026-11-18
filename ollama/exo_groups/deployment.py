@@ -176,6 +176,11 @@ class HostDeployment:
             'EXO_RANK_NAME': binding.rank, 'EXO_LEASED_GROUP_ID': binding.group_id,
             'EXO_LEASED_GENERATION': str(binding.generation),
             'EXO_LEASED_PEER_IPS': ','.join(self.peer_ips),
+            # The ordinary queues own these exact per-rank envelopes. Native
+            # fixed placement validates weights+full cache against them rather
+            # than comparing the parent checkpoint with discovery's free RAM.
+            'EXO_LEASED_MEMORY_MB': ','.join(str(m.memory_mb) for m in
+                sorted(self.plan.members, key=lambda m: m.pipeline_rank)),
             'EXO_LEASED_API_KEY_FILE': str(native_home / 'private-api.key'),
             **{f'EXO_LEASED_{name}_PORT': str(port)
                for name, port in zip(('API', 'PEER', 'DISCOVERY', 'RING'), self.ports)},
