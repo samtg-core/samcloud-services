@@ -276,6 +276,24 @@ class FixedFactoryControls(IsolatedAsyncioTestCase):
         self.assertEqual(self.creates, 0)
         self.assertFalse(self.host_operations)
 
+    async def test_mismatched_prefill_steps_refuse_before_any_host_or_group_request(self):
+        changed = copy.copy(self.layouts[1])
+        changed.prefill_step_size = 256
+        hosts = (self.layouts[0], changed, self.layouts[2])
+        with self.assertRaises(ValueError):
+            HostFleet(hosts, self.endpoints, self.plane, **self.fleet_args)
+        self.assertEqual(self.creates, 0)
+        self.assertFalse(self.host_operations)
+
+    async def test_mismatched_served_contexts_refuse_before_any_host_or_group_request(self):
+        changed = copy.copy(self.layouts[1])
+        changed.served_context_length = 1024
+        with self.assertRaises(ValueError):
+            HostFleet((self.layouts[0], changed, self.layouts[2]), self.endpoints,
+                      self.plane, **self.fleet_args)
+        self.assertEqual(self.creates, 0)
+        self.assertFalse(self.host_operations)
+
     async def test_factory_refuses_a_provider_using_a_different_staging_verifier(self):
         self.actor.verify_staging = core_fixture.staged_fixture
         with self.assertRaises(ValueError):

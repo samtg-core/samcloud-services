@@ -45,13 +45,20 @@ def run_identity(binding):
 
 
 def configuration_sha256(deployment):
-    return digest({'plan': asdict(deployment.plan), 'files': deployment.files_json,
+    configuration = {'plan': asdict(deployment.plan), 'files': deployment.files_json,
         'runtime_sha256': deployment.runtime_sha256, 'boot_id': deployment.boot_id,
         'home': str(deployment.home), 'state_base': str(deployment.state_base),
         'peer_ips': deployment.peer_ips, 'ports': deployment.ports,
         'cleanup_tolerance_bytes': deployment.cleanup_tolerance_bytes,
         'qualification_token_limit': deployment.qualification_token_limit,
-        'transport_sha256': deployment.transport_sha256})
+        'transport_sha256': deployment.transport_sha256}
+    # Preserve existing profile identities when this explicit accommodation is
+    # absent. A changed step must bind a new host configuration and launch hash.
+    if deployment.prefill_step_size is not None:
+        configuration['prefill_step_size'] = deployment.prefill_step_size
+    if deployment.served_context_length is not None:
+        configuration['served_context_length'] = deployment.served_context_length
+    return digest(configuration)
 
 
 class HostControl:

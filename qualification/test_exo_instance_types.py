@@ -97,6 +97,22 @@ class ExplicitInstanceControls(unittest.TestCase):
         self.assertIsInstance(result.instance, MlxRingInstance)
         return result.instance
 
+    def test_explicit_served_context_changes_every_card_without_editing_parent(self):
+        original = copy.deepcopy(self.parent)
+        wire = self.build(served_context_length=4096)
+        instance = CreateInstanceParams.model_validate(wire).instance
+        contexts = {s.model_card.context_length for s in instance.shard_assignments.runner_to_shard.values()}
+        self.assertEqual(contexts, {4096})
+        self.assertEqual(self.parent, original)
+        contract = InstanceContract.prepare(self.plan, canonical(self.manifest), canonical(self.parent),
+            self.endpoints, runtime_sha256='e'*64, served_context_length=4096, **self.options)
+        self.assertEqual(contract.context_length, 4096)
+
+    def test_served_context_cannot_exceed_native_or_silently_coerce(self):
+        for value in (True, 0, 32769, '4096'):
+            with self.subTest(value=value), self.assertRaises(BindingRefused):
+                self.build(served_context_length=value)
+
     def test_provider_contract_uses_actual_aliases_and_same_placement(self):
         from exo.shared.types.state import State
         from exo.shared.types.worker.runners import RunnerReady

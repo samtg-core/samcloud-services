@@ -114,6 +114,8 @@ class ContractCompiler:
                 'runtime_sha256': self.deployment.runtime_sha256, 'group_id': local.group_id,
                 'generation': local.generation, 'ring_port': self.deployment.ports[3],
                 'endpoints': [asdict(endpoint) for endpoint in endpoints]}
+            if self.deployment.served_context_length is not None:
+                request['served_context_length'] = self.deployment.served_context_length
             raw = canonical(request)
             if len(raw) > MAX_INPUT:
                 raise ValueError('compiler input exceeds bound')
@@ -150,6 +152,9 @@ class ContractCompiler:
             contract = InstanceContract(**value['contract'])
             if contract.sha256 != value['contract_sha256']:
                 raise ValueError('compiled contract digest differs')
+            if (self.deployment.served_context_length is not None
+                    and contract.context_length != self.deployment.served_context_length):
+                raise ValueError('compiled contract has a different served context')
             for name in ('request_json', 'state_instance_json'):
                 if canonical(decode_json(getattr(contract, name))).decode() != getattr(contract, name):
                     raise ValueError('noncanonical compiled contract')

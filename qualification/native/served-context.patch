@@ -1,0 +1,317 @@
+diff --git a/src/exo/utils/served_context.py b/src/exo/utils/served_context.py
+new file mode 100644
+index 0000000..5549fa0
+--- /dev/null
++++ b/src/exo/utils/served_context.py
+@@ -0,0 +1,42 @@
++"""Explicit served token budgets for pinned workers; no ordinary default cap."""
++
++import os
++import re
++from collections.abc import Mapping
++from typing import final
++
++
++@final
++class ServedContextRejectedError(ValueError):
++    """An invalid request budget, with no cache or model work performed."""
++
++
++def validate_served_token_budget(
++    prompt_tokens: int,
++    output_tokens: int,
++    environment: Mapping[str, str] | None = None,
++) -> None:
++    """Count the whole encoded prompt, including any cached prefix.
++
++    A profile is an explicit install-time control. Refuse an over-budget request
++    before cache creation or prefill rather than truncating its input or output.
++    """
++    environment = os.environ if environment is None else environment
++    raw = environment.get("EXO_SERVED_CONTEXT_LENGTH")
++    if raw is None:
++        return
++    if not re.fullmatch(r"[1-9][0-9]*", raw):
++        raise ValueError("EXO_SERVED_CONTEXT_LENGTH must be a positive decimal integer")
++    if (
++        type(prompt_tokens) is not int
++        or prompt_tokens < 0
++        or type(output_tokens) is not int
++        or output_tokens < 1
++    ):
++        raise ServedContextRejectedError(
++            "explicit served context requires a valid token budget"
++        )
++    if prompt_tokens + output_tokens > int(raw):
++        raise ServedContextRejectedError(
++            "request token budget exceeds the configured served context"
++        )
+diff --git a/src/exo/utils/tests/test_served_context.py b/src/exo/utils/tests/test_served_context.py
+new file mode 100644
+index 0000000..ace692a
+--- /dev/null
++++ b/src/exo/utils/tests/test_served_context.py
+@@ -0,0 +1,30 @@
++import pytest
++
++from exo.utils.served_context import validate_served_token_budget
++
++
++def test_ordinary_profile_has_no_new_default_cap() -> None:
++    validate_served_token_budget(262144, 32768, {})
++
++
++def test_exact_whole_prompt_and_output_budget_fits() -> None:
++    validate_served_token_budget(49152, 16384, {"EXO_SERVED_CONTEXT_LENGTH": "65536"})
++
++
++def test_one_token_past_profile_refuses_without_silent_truncation() -> None:
++    with pytest.raises(ValueError, match="exceeds the configured served context"):
++        validate_served_token_budget(
++            49153, 16384, {"EXO_SERVED_CONTEXT_LENGTH": "65536"}
++        )
++
++
++@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", " 65536", "false", "065536"])
++def test_invalid_explicit_window_never_falls_back(value: str) -> None:
++    with pytest.raises(ValueError, match="positive decimal integer"):
++        validate_served_token_budget(1, 1, {"EXO_SERVED_CONTEXT_LENGTH": value})
++
++
++@pytest.mark.parametrize("counts", [(-1, 1), (1, 0), (1, -1), (True, 1)])
++def test_configured_budget_cannot_hide_invalid_counts(counts: tuple[int, int]) -> None:
++    with pytest.raises(ValueError, match="valid token budget"):
++        validate_served_token_budget(*counts, {"EXO_SERVED_CONTEXT_LENGTH": "65536"})
+diff --git a/src/exo/worker/engines/mlx/generator/generate.py b/src/exo/worker/engines/mlx/generator/generate.py
+index f0a5495..eeb1e7d 100644
+--- a/src/exo/worker/engines/mlx/generator/generate.py
++++ b/src/exo/worker/engines/mlx/generator/generate.py
+@@ -32,6 +32,7 @@ from exo.shared.types.worker.runner_response import (
+     GenerationResponse,
+ )
+ from exo.utils.inference_profile import get_prefill_step_size
++from exo.utils.served_context import validate_served_token_budget
+ from exo.worker.engines.mlx.auto_parallel import (
+     PipelineFirstLayer,
+     PipelineLastLayer,
+@@ -600,6 +601,8 @@ def mlx_generate(
+     if vision is not None:
+         all_prompt_tokens = vision.prompt_tokens
+     media_regions: list[MediaRegion] = vision.media_regions if vision else []
++    max_tokens = task.max_output_tokens or MAX_TOKENS
++    validate_served_token_budget(len(all_prompt_tokens), max_tokens)
+ 
+     # Do not use the prefix cache if we are trying to do benchmarks.
+     is_bench = task.bench
+@@ -738,7 +741,6 @@ def mlx_generate(
+     # stream_generate starts from the last token
+     last_token = prompt_tokens[-2:]
+ 
+-    max_tokens = task.max_output_tokens or MAX_TOKENS
+     accumulated_text = ""
+     generated_text_parts: list[str] = []
+     generation_start_time = time.perf_counter()
+diff --git a/src/exo/worker/runner/llm_inference/batch_generator.py b/src/exo/worker/runner/llm_inference/batch_generator.py
+index 9f4409b..ad3cd43 100644
+--- a/src/exo/worker/runner/llm_inference/batch_generator.py
++++ b/src/exo/worker/runner/llm_inference/batch_generator.py
+@@ -27,6 +27,7 @@ from exo.shared.types.worker.runner_response import (
+ )
+ from exo.utils.channels import MpReceiver, MpSender
+ from exo.utils.qualification_tokens import trace_qualification_tokens
++from exo.utils.served_context import ServedContextRejectedError
+ from exo.worker.disaggregated.server import PrefillRequest
+ from exo.worker.engines.base import Engine
+ from exo.worker.engines.mlx.cache import KVPrefixCache, encode_prompt
+@@ -197,6 +198,16 @@ class SequentialGenerator(Engine):
+             if self._queue:
+                 self._start_next()
+ 
++        except ServedContextRejectedError as error:
++            # This request was refused before prefill/cache use. Every rank
++            # reports its exact task ended so the provider can prove the error
++            # terminal, while the resident runner remains usable for a new call.
++            self._send_error(task, error)
++            output.append((task.task_id, FinishedResponse()))
++            self._active = None
++            if self._queue:
++                self._start_next()
++
+         except Exception as e:
+             self._send_error(task, e)
+             self._active = None
+diff --git a/src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py b/src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py
+new file mode 100644
+index 0000000..9a560df
+--- /dev/null
++++ b/src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py
+@@ -0,0 +1,50 @@
++"""An over-budget full prompt never consults a cached suffix or runs a model."""
++
++from typing import cast
++from unittest.mock import Mock, patch
++
++import pytest
++from mlx_lm.tokenizer_utils import TokenizerWrapper
++
++from exo.shared.types.common import ModelId
++from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.worker.engines.mlx.cache import KVPrefixCache
++from exo.worker.engines.mlx.generator import generate
++from exo.worker.engines.mlx.types import Model
++
++
++def test_full_prompt_budget_refuses_before_cache_lookup_or_prefill(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setenv("EXO_SERVED_CONTEXT_LENGTH", "32")
++    model = Mock(side_effect=AssertionError("model execution forbidden"))
++    cache_lookup = Mock()
++    cache = Mock(get_kv_cache=cache_lookup)
++    task = TextGenerationTaskParams(
++        model=ModelId("qualification/qwen3"), input=[], max_output_tokens=16
++    )
++    # Only len() is reached; no MLX arrays, arithmetic or model are constructed.
++    prompt = list(range(17))
++    with (
++        patch.object(generate.mx, "reset_peak_memory"),
++        patch.object(generate.mx.random, "seed"),
++        patch.object(generate, "encode_prompt", return_value=prompt),
++        patch.object(generate, "fix_unmatched_think_end_tokens", return_value=prompt),
++        patch.object(generate, "system_prompt_token_count", return_value=0),
++        patch.object(generate, "make_kv_cache") as create_cache,
++        patch.object(generate, "prefill") as prefill,
++    ):
++        result = generate.mlx_generate(
++            cast(Model, model),
++            cast(TokenizerWrapper, Mock()),
++            task,
++            "input",
++            cast(KVPrefixCache, cache),
++            None,
++        )
++        with pytest.raises(ValueError, match="exceeds the configured served context"):
++            next(result)
++        create_cache.assert_not_called()
++        prefill.assert_not_called()
++    model.assert_not_called()
++    cache_lookup.assert_not_called()
+diff --git a/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py b/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py
+new file mode 100644
+index 0000000..efee14b
+--- /dev/null
++++ b/src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py
+@@ -0,0 +1,113 @@
++"""A known request rejection ends its task without killing a resident runner."""
++
++from collections.abc import Generator, Iterator
++from typing import cast
++from unittest.mock import Mock, patch
++
++import mlx.core as mx
++import pytest
++from mlx_lm.tokenizer_utils import TokenizerWrapper
++
++from exo.shared.types.chunks import ErrorChunk, GenerationChunk
++from exo.shared.types.common import CommandId, ModelId
++from exo.shared.types.events import ChunkGenerated, Event
++from exo.shared.types.tasks import TaskId, TextGeneration
++from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.shared.types.worker.instances import InstanceId
++from exo.shared.types.worker.runner_response import FinishedResponse, GenerationResponse
++from exo.utils.channels import MpReceiver, MpSender
++from exo.utils.served_context import ServedContextRejectedError
++from exo.worker.engines.mlx.types import Model
++from exo.worker.runner.llm_inference import batch_generator
++
++
++def agreed(
++    tasks: list[TextGeneration], _group: mx.distributed.Group | None
++) -> tuple[list[TextGeneration], list[TextGeneration]]:
++    return tasks, []
++
++
++def rejected(error: Exception) -> Generator[GenerationResponse]:
++    yield from ()
++    raise error
++
++
++def completed() -> Generator[GenerationResponse]:
++    yield from ()
++
++
++def unparsed(*_arguments: object) -> Iterator[GenerationChunk | None]:
++    return iter(())
++
++
++def engine_and_task() -> tuple[
++    batch_generator.SequentialGenerator, TextGeneration, list[Event]
++]:
++    sent: list[Event] = []
++    model = ModelId("qualification/qwen3")
++    engine = batch_generator.SequentialGenerator(
++        model=cast(Model, Mock()),
++        tokenizer=cast(TokenizerWrapper, Mock()),
++        group=None,
++        kv_prefix_cache=None,
++        tool_parser=None,
++        model_id=model,
++        device_rank=0,
++        cancel_receiver=cast(MpReceiver[TaskId], Mock()),
++        event_sender=cast(MpSender[Event], Mock(send=sent.append)),
++    )
++    task = TextGeneration(
++        instance_id=InstanceId("0" * 64),
++        command_id=CommandId("00000000-0000-0000-0000-000000000001"),
++        task_params=TextGenerationTaskParams(
++            model=model, input=[], max_output_tokens=16
++        ),
++    )
++    return engine, task, sent
++
++
++def test_request_rejection_finishes_and_the_next_task_can_complete() -> None:
++    engine, task, sent = engine_and_task()
++    message = "request token budget exceeds the configured served context"
++    with (
++        patch.object(batch_generator, "mx_all_gather_tasks", side_effect=agreed),
++        patch.object(batch_generator, "apply_chat_template", return_value="unused"),
++        patch.object(batch_generator, "apply_all_parsers", side_effect=unparsed),
++        patch.object(
++            batch_generator.SequentialGenerator,
++            "_build_generator",
++            side_effect=[rejected(ServedContextRejectedError(message)), completed()],
++        ),
++    ):
++        engine.submit(task)
++        result = list(engine.step())
++        assert len(result) == 1 and result[0][0] == task.task_id
++        assert isinstance(result[0][1], FinishedResponse)
++        assert len(sent) == 1 and isinstance(sent[0], ChunkGenerated)
++        assert sent[0].command_id == task.command_id
++        assert sent[0].chunk == ErrorChunk(
++            model=task.task_params.model, finish_reason="error", error_message=message
++        )
++        following = task.model_copy(update={"task_id": TaskId()})
++        engine.submit(following)
++        next_result = list(engine.step())
++        assert len(next_result) == 1 and next_result[0][0] == following.task_id
++        assert isinstance(next_result[0][1], FinishedResponse)
++        assert len(sent) == 1
++
++
++def test_an_unknown_generator_error_is_still_fatal() -> None:
++    engine, task, _sent = engine_and_task()
++    with (
++        patch.object(batch_generator, "mx_all_gather_tasks", side_effect=agreed),
++        patch.object(batch_generator, "apply_chat_template", return_value="unused"),
++        patch.object(batch_generator, "apply_all_parsers", return_value=iter(())),
++        patch.object(
++            batch_generator.SequentialGenerator,
++            "_build_generator",
++            return_value=rejected(ValueError("unknown backend failure")),
++        ),
++    ):
++        engine.submit(task)
++        with pytest.raises(ValueError, match="unknown backend failure"):
++            list(engine.step())
