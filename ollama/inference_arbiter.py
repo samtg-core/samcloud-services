@@ -124,6 +124,11 @@ class Arbiter:
                 updated REAL NOT NULL,
                 UNIQUE(grant_id,client_key)
             );
+            -- State follows the potentially very large saved request. Without
+            -- a covering index, metadata-only scheduling/health reads traverse
+            -- historical request overflow pages on the asyncio event loop.
+            CREATE INDEX IF NOT EXISTS executions_state_grant_created
+                ON executions(state,grant_id,created);
             CREATE TABLE IF NOT EXISTS execution_events (
                 execution_id TEXT NOT NULL REFERENCES executions(id),
                 seq INTEGER NOT NULL,
