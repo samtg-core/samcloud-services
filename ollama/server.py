@@ -30,6 +30,7 @@ into a backend that cannot answer.
 
 import asyncio
 import os
+import re
 import sys
 import json
 import tempfile
@@ -269,10 +270,16 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
     unauthenticated or out-of-scope requests.
     """
 
-    def __init__(self, app, verify_url: str, required_scope: str):
+    def __init__(self, app, verify_url: str, required_scope: str,
+                 alternate_scopes: tuple[str, ...] = ()):
         super().__init__(app)
         self.verify_url = verify_url
         self.required_scope = required_scope
+        if alternate_scopes and (not required_scope or any(
+                not re.fullmatch(r"(?:device|group):[A-Za-z0-9_.-]+", value)
+                for value in alternate_scopes)):
+            raise ValueError("explicit caller scopes required")
+        self.caller_scopes = tuple(dict.fromkeys((required_scope, *alternate_scopes)))
         self._cache: dict[str, tuple[float, dict]] = {}  # token_hash -> (expiry, identity)
 
     def _cache_key(self, token: str) -> str:
@@ -312,11 +319,14 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
 
         # Verify with SAMcloud
         try:
-            url = self.verify_url
-            if self.required_scope:
-                url += f"?scope={self.required_scope}"
             async with httpx.AsyncClient(verify=False, timeout=10) as client:
-                resp = await client.get(url, headers={"Authorization": token})
+                for scope in self.caller_scopes:
+                    url = self.verify_url + (f"?scope={scope}" if scope else "")
+                    resp = await client.get(url, headers={"Authorization": token})
+                    # Only a confirmed scope denial permits another explicitly
+                    # configured scope. Never fall through an outage/401/5xx.
+                    if resp.status_code != 403:
+                        break
         except Exception as e:
             log.warning(f"SAMcloud verify failed: {e}")
             return JSONResponse(
@@ -455,6 +465,7 @@ app.add_middleware(
     SamcloudAuthMiddleware,
     verify_url=SC_VERIFY_URL,
     required_scope=SC_REQUIRED_SCOPE,
+    alternate_scopes=config.SC_ALTERNATE_CALLER_SCOPES,
 )
 
 # Installed explicitly by the service bootstrap once queue admission/ownership
@@ -629,6 +640,7 @@ async def service_docs():
             "method": "SAMcloud token verification",
             "header": "Authorization: Bearer <your-sc-token>",
             "required_scope": SC_REQUIRED_SCOPE,
+            "alternate_scopes": list(config.SC_ALTERNATE_CALLER_SCOPES),
             "exempt_paths": list(AUTH_EXEMPT_PATHS),
         },
         "endpoints": {
@@ -1400,8 +1412,6 @@ def _fix_tool_calls(tool_calls: list[dict]) -> list[dict]:
         fixed.append(fc)
     return fixed
 
-
-import re
 
 # Gemma 4 tool call format:
 #   <|tool_call>call:func_name{key:<|"|">value<|"|">, key2:<|"|">value2<|"|">}<tool_call|>

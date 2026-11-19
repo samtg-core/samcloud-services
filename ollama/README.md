@@ -163,3 +163,19 @@ throughput and host-health benchmarks are separate.
 Current queue/native deployments may run pinned source ahead of this repository
 main. Record their exact revisions in the deployment configuration; installing
 this harness does not upgrade a serving gateway or prove rail availability.
+
+### Sharing a queued provider with other service clients
+
+`SC_REQUIRED_SCOPE` remains the existing host/device policy. A deployment may
+add `SC_ALTERNATE_CALLER_SCOPES=group:services` to accept shared service consumers
+without removing its device clients. Alternatives are opt-in, comma-separated
+`group:` or `device:` scopes. The gateway asks the plane to check each scope;
+only a confirmed403 advances to the next alternative. Invalid credentials,
+registry outages and unexpected responses refuse the request. Successful scoped
+identity checks use the existing cache. `/guide` reports both the primary and
+alternate scopes. With the variable unset, the original policy is unchanged.
+
+This only grants API access. All inference still enters the same durable queue
+and physical capacity admission. Select a provider for new work; an accepted
+execution and every recovery remain with their original provider/key. Enabling
+this on Obelisk does not reconfigure callers or move their accepted work.

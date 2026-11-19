@@ -127,6 +127,11 @@ SC_RESOURCE_ID = _env("SC_RESOURCE_ID", f"{SC_DEVICE}/gpu-0")
 # --- auth middleware ---
 SC_VERIFY_URL = _env("SC_VERIFY_URL", f"{SC_BASE}/auth/verify")
 SC_REQUIRED_SCOPE = _env("SC_REQUIRED_SCOPE", f"device:{SC_DEVICE}")
+# Opt-in caller alternatives retain the original device's clients. Every
+# alternative is checked by the registry; a transport failure is not a denial.
+SC_ALTERNATE_CALLER_SCOPES = tuple(
+    scope.strip() for scope in os.environ.get("SC_ALTERNATE_CALLER_SCOPES", "").split(",")
+    if scope.strip())
 AUTH_ENABLED = _env_bool("AUTH_ENABLED", True)
 AUTH_CACHE_TTL = _env_int("AUTH_CACHE_TTL", 300)
 
