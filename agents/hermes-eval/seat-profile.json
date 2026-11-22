@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "agent": "hermes-eval",
+  "container": "cont-hermes-eval",
+  "rail": {
+    "cmd": "samcloud-rail.prod",
+    "image": "ghcr.io/samcloud/hermes-rail:3.18.0",
+    "listener_version": "3.18.0"
+  },
+  "model": {
+    "provider": "samcloud-queue-stint",
+    "base_url": "http://127.0.0.1:8800/v1",
+    "name": "qwen3.8:27b-mlx",
+    "note": "OWN provider block. hermes-eval consumes the gateway via HTTP; it does NOT share or swap hermes-samcloud's provider (c1139). The eval harness selects the arm model via OPENAI_BASE_URL / config, not via this seat's default provider."
+  },
+  "scope": {
+    "purposes": ["eval", "model-trial"],
+    "no": ["chat", "delivery", "operator-session"]
+  },
+  "isolation": {
+    "workspace": "fresh",
+    "profile": "fresh",
+    "copy": "none (no session/memory/skills/auth/cron from any agent)"
+  }
+}
