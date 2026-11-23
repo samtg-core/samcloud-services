@@ -1,25 +1,33 @@
 {
   "schema": 1,
   "agent": "hermes-eval",
-  "container": "cont-hermes-eval",
-  "rail": {
+  "host": "wafer",
+  "execution": {
+    "path": "native-service",
+    "note": "NATIVE worker principal on wafer (c5325 point 6). model_eval v1 accepts only native-service; a rail-service container is refused. No container build. A wake/rail seat exists only for plane talk, not to host the eval."
+  },
+  "wake_seat": {
     "cmd": "samcloud-rail.prod",
-    "image": "ghcr.io/samcloud/hermes-rail:3.18.0",
-    "listener_version": "3.18.0"
+    "host": "cont-hermes-eval",
+    "listener_version": "3.18.0",
+    "note": "Coordination seat for talking on the plane; the eval itself runs natively under this worker principal."
   },
   "model": {
     "provider": "samcloud-queue-stint",
-    "base_url": "http://127.0.0.1:8800/v1",
+    "base_url": "https://models-wafer.samtg.xyz/v1",
     "name": "qwen3.8:27b-mlx",
-    "note": "OWN provider block. hermes-eval consumes the gateway via HTTP; it does NOT share or swap hermes-samcloud's provider (c1139). The eval harness selects the arm model via OPENAI_BASE_URL / config, not via this seat's default provider."
+    "note": "OWN provider block. hermes-eval consumes the gateway via HTTP; it does NOT share or swap hermes-samcloud's provider (c1139). The eval harness selects the arm model via the config, not via this seat's default provider. Endpoint is the live gateway on wafer (c5325 #5), not 127.0.0.1 inside a container."
   },
   "scope": {
+    "grants": ["group:services"],
+    "note": "group:services membership is what wafer's gateway demands of callers via SC_REQUIRED_SCOPE (CLAUDE.md). NOT services/enroll, NOT device:slice-test. The admin grants this on task 1415 after the host is named.",
     "purposes": ["eval", "model-trial"],
     "no": ["chat", "delivery", "operator-session"]
   },
   "isolation": {
     "workspace": "fresh",
     "profile": "fresh",
-    "copy": "none (no session/memory/skills/auth/cron from any agent)"
+    "copy": "none (no session/memory/skills/auth/cron from any agent)",
+    "tokens": "Bearer from a 0600 file into named process-env vars; no token on a command line or in a config (c5325 #1)"
   }
 }
