@@ -240,6 +240,31 @@ class Arbiter:
         return next((row for row in rows if permitted_model is None or
                      permitted_model(resource,row['model']) is True),None)
 
+    def holds_stint(self, resource, now=None):
+        """A conversation mid-stint keeps a foreign claim waiting for the GPU.
+
+        Only with an idle grace configured: then a work_session grant holds while
+        it executes or has been idle for less than the grace (and is inside
+        fairness, if set). A finished conversation stops holding once its grace
+        lapses, so other services queue between conversations. Without an idle
+        grace nothing holds and a foreign claim drains the resource as before.
+        """
+        policy = self.stint_policy
+        if policy is None or policy.idle_grace_seconds is None:
+            return False
+        row = self.db.execute("SELECT * FROM grants WHERE resource=? AND state='granted'",
+                              (resource,)).fetchone()
+        if row is None or row['lifetime'] != 'work_session' or row['release_requested']:
+            return False
+        now = time.time() if now is None else now
+        if (policy.fairness_seconds is not None and row['stint_started'] is not None
+                and now - row['stint_started'] >= policy.fairness_seconds):
+            return False
+        if row['active_execution']:
+            return True
+        idle = row['idle_since'] if row['idle_since'] is not None else row['stint_started']
+        return idle is not None and now - idle < policy.idle_grace_seconds
+
     def pending_models(self, resource):
         """Actual saved inference demand, not an idle requester's affinity."""
         return [row['model'] for row in self.db.execute('''SELECT g.model, MIN(e.created) AS first
