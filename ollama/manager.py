@@ -33,7 +33,7 @@ from typing import Optional
 
 from . import capacity
 from . import config
-from .ollama_client import OllamaClient, estimate_memory_mb
+from .ollama_client import OllamaClient, OllamaLoadExited, estimate_memory_mb
 from .exo_client import ExoClient, ExoUnavailable
 from .llama_client import LlamaServerClient, LlamaInstance
 from .whisper_client import WhisperClient
@@ -1321,8 +1321,14 @@ class ModelManager:
 
         # Load with indefinite keep_alive — our lease system manages memory
         log.info(f"Loading {model_name} into Ollama (keep_alive={OLLAMA_KEEP_ALIVE})...")
-        self.ollama.load_model(model_name, keep_alive=OLLAMA_KEEP_ALIVE,
-                              **({'service_owned':True} if self.durable_inference else {}))
+        try:
+            self.ollama.load_model(model_name, keep_alive=OLLAMA_KEEP_ALIVE,
+                                  **({'service_owned':True} if self.durable_inference else {}))
+        except OllamaLoadExited:
+            if not lease_id or initial is None or not self.durable_inference:
+                raise RuntimeError('Failed load has no exact reservation to retire') from None
+            self.reconcile_initial_reservation(model_name, expected_lease=lease_id)
+            raise
 
         # Get actual VRAM from Ollama ps, and the window it actually got.
         # Both are read AFTER the load and neither is assumed: the window is
@@ -2270,7 +2276,7 @@ class ModelManager:
         )
         return lease_id
 
-    def reconcile_initial_reservation(self, model_name: str):
+    def reconcile_initial_reservation(self, model_name: str, *, expected_lease=None):
         """Explicit recovery under held queue admission, never a retry timer.
 
         This retires a known initial allocation; it neither unloads a model nor
@@ -2294,7 +2300,7 @@ class ModelManager:
                     all(isinstance(row, dict) and isinstance(row.get('name'), str) and
                         row['name'].removesuffix(':latest') != name.removesuffix(':latest')
                         for row in running))
-        return initial.reconcile_absent(model_name, confirm_absent=absent)
+        return initial.reconcile_absent(model_name, confirm_absent=absent, expected_lease=expected_lease)
 
     def _request_lease(self, model_name: str, memory_mb: int, *, before_load: bool = False) -> Optional[str]:
         """Lease memory for a model on the shared GPU resource.

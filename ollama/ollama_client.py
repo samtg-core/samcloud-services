@@ -241,6 +241,12 @@ def _checked_chunk(chunk, seen):
     return chunk
 
 
+class OllamaLoadExited(Exception):
+    """Ollama 0.40.17 WaitUntilRunning observed the reaped MLX load child."""
+    result = {"kind": "error", "status": 500, "code": "ollama_load_exited",
+              "detail": "Ollama load process exited before serving"}
+
+
 class OllamaRefused(Exception):
     """Complete 400/404 JSON refusal received BEFORE any generation frames.
 
@@ -551,6 +557,18 @@ class OllamaClient:
             payload['stream'] = False
         r = self._http.post("/api/generate", json=payload,
             timeout=self._owned_stream_timeout if service_owned else 300)
+        if (service_owned and r.status_code == 500 and not r.history
+                and r.request.url.host in {"localhost", "127.0.0.1", "::1"}
+                and r.headers.get("content-type", "").split(";")[0].strip() == "application/json"
+                and len(r.content) < ERROR_BODY_LIMIT):
+            try:
+                error = r.json()
+            except ValueError:
+                error = None
+            # WaitUntilRunning emits this exact error only after cmd.Wait().
+            # The similarly worded completion-path LastError is not a wait receipt.
+            if error == {"error": "mlx runner exited unexpectedly: signal: killed"}:
+                raise OllamaLoadExited("Ollama load process exited before serving")
         r.raise_for_status()
         return r.json()
 

@@ -12,6 +12,25 @@ from .ollama_client import OllamaClient, OllamaBackendError, OllamaRefused
 
 
 class RefusalClient(unittest.TestCase):
+    def test_only_owned_local_load_with_exact_child_exit_is_qualified(self):
+        from .ollama_client import OllamaLoadExited
+        detail = "mlx runner exited unexpectedly: signal: killed"
+        for host, owned, body, expected in [
+            ("localhost", True, {"error": detail}, OllamaLoadExited),
+            ("localhost", False, {"error": detail}, httpx.HTTPStatusError),
+            ("remote", True, {"error": detail}, httpx.HTTPStatusError),
+            ("localhost", True, {"error": detail + "?"}, httpx.HTTPStatusError),
+            ("localhost", True, {"error": "mlx runner failed: EOF"}, httpx.HTTPStatusError),
+        ]:
+            with self.subTest(host=host, owned=owned, body=body):
+                url = "http://" + host
+                client = OllamaClient(base_url=url)
+                client._http.close()
+                with httpx.Client(base_url=url, transport=httpx.MockTransport(
+                        lambda req: httpx.Response(500, json=body))) as client._http:
+                    with self.assertRaises(expected):
+                        client.load_model("qwen", service_owned=owned)
+
     def test_sync_chat_and_generate_distinguish_complete_refusal_from_unknown(self):
         from .ollama_client import OllamaRefused
         cases = [(400, {'error': 'PRIVATE invalid input'}, OllamaRefused),

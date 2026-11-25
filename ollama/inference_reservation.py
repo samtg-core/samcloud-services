@@ -335,7 +335,7 @@ class InitialReservations:
             db.execute("UPDATE initial_reservations SET state='retired' WHERE model=?", (model,))
             return row['lease_id']
 
-    def reconcile_absent(self, model, *, confirm_absent):
+    def reconcile_absent(self, model, *, confirm_absent, expected_lease=None):
         """Retire ONLY the saved exact lease after affirmative provider absence.
 
         Trusted service code must hold resource admission against new compute
@@ -351,6 +351,8 @@ class InitialReservations:
             row = db.execute('SELECT * FROM initial_reservations WHERE model=?', (model,)).fetchone()
             if row is None or not row['lease_id']:
                 raise Conflict('no exact initial lease identity to reconcile')
+            if expected_lease is not None and row['lease_id'] != expected_lease:
+                raise Conflict('failed load belongs to a different reservation')
             try:
                 absent = confirm_absent(model)
             except Exception:

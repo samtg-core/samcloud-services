@@ -114,7 +114,7 @@ class WhisperLifecycle(unittest.TestCase):
         m.models,m.durable_inference = {},True
         m.ollama = SimpleNamespace(list_running=Mock(return_value=[]))
         m.initial_reservations = SimpleNamespace(reconcile_absent=Mock(
-            side_effect=lambda name,confirm_absent:confirm_absent(name)))
+            side_effect=lambda name,confirm_absent,expected_lease=None:confirm_absent(name)))
         with patch.object(lifecycle,'cold_whisper_absent',return_value=False):
             self.assertFalse(m.reconcile_initial_reservation(manager.WHISPER_DEFAULT))
         m.ollama.list_running.assert_not_called()
