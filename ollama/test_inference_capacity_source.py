@@ -343,5 +343,28 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.capacity.permitted('gpu'))
 
 
+class DeviceStatsPublication(unittest.IsolatedAsyncioTestCase):
+    async def test_local_measurement_continues_with_device_owned_telemetry(self):
+        from unittest.mock import AsyncMock, Mock, patch
+        from .manager import ModelManager
+
+        for queued in (True, False):
+            for publish in (True, False):
+                with self.subTest(queued=queued, publish=publish):
+                    reading = {'memory_available_mb': 20480, 'memory_used_mb': 9000}
+                    source = Mock(refresh=AsyncMock()) if queued else None
+                    manager = Mock(inference_capacity_source=source)
+                    manager._collect_stats.return_value = reading
+                    with patch('ollama.manager.config.PUBLISH_RESOURCE_STATS', publish), \
+                         patch('ollama.manager.asyncio.sleep', side_effect=asyncio.CancelledError):
+                        with self.assertRaises(asyncio.CancelledError):
+                            await ModelManager.stats_loop(manager)
+                    manager._collect_stats.assert_called_once_with()
+                    if queued:
+                        source.invalidate.assert_called_once_with()
+                        source.refresh.assert_awaited_once_with(reading)
+                    self.assertEqual(manager.sc.push_stats.call_count, int(publish))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -34,6 +34,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 # --- samcloud registry ---
+# Disable only after the device reporter is publishing resource utilisation.
+PUBLISH_RESOURCE_STATS = _env_bool("PUBLISH_RESOURCE_STATS", True)
 SC_BASE = _env("SC_BASE", "https://cloud.samtg.xyz/api/v1")
 
 # The credential file the bearer is read from when SC_TOKEN is NOT in the
