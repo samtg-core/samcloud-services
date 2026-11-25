@@ -265,12 +265,26 @@ class ManagerCapacitySource:
                         required = initial.required_memory(model, required)
                         pending = self.runtime.queue.supervisor.journal.pending_models(resource)
                         saved = initial.snapshot(model)
+                        journal = self.runtime.queue.supervisor.journal
                         if model in pending:
                             if saved is not None and saved['state'] in ('unknown','handed_off','retiring'):
                                 handoff.begin()
                                 return
                             from .inference_arbiter import CapacityDeferred
                             from .manager import LEASE_TTL
+                            if saved is None or saved['state'] not in ('queued','reserved'):
+                                # No reservation for bytes this host cannot hold.
+                                # When the registry has room but the host does
+                                # not, a grant would be active bytes nobody uses
+                                # until its TTL. The call waits here instead and
+                                # says so. A registry that is short queues the
+                                # request below: a place in line holds no bytes.
+                                early = cold_capacity(resource,required,
+                                    physical=physical,registry=registry,work_permitted=True)
+                                if early['reason'] == 'physical_capacity':
+                                    journal.memory_wait(resource,model,required)
+                                    publish('unavailable','physical_capacity')
+                                    continue
                             try:
                                 owned = await source_call(lambda:initial.stage(model,
                                     resource=resource, service_id=initial.service,
@@ -307,6 +321,20 @@ class ManagerCapacitySource:
                             return
                     verdict = cold_capacity(resource,required,
                         physical=physical,registry=registry,work_permitted=True)
+                    if handoff is not None:
+                        if (verdict['reason'] == 'physical_capacity' and model in pending
+                                and initial.snapshot(model)['state'] == 'reserved'):
+                            # Promoted, never handed to a provider, and the
+                            # host cannot hold it: give the exact lease back
+                            # now. The check above keeps it from re-staging
+                            # until the memory is there.
+                            await source_call(lambda:initial.release_unused(model))
+                            if self.paused or epoch != self.epoch:
+                                return
+                        if verdict['reason'] == 'physical_capacity':
+                            journal.memory_wait(resource,model,required)
+                        elif verdict['state'] == 'available':
+                            journal.memory_wait(resource,model,None)
                     if verdict['state'] == 'available':
                         self.observed_residency[resource,model] = (model,None,None)
                     publish(verdict['state'],verdict['reason'])

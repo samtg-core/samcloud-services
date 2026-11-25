@@ -1,5 +1,20 @@
 # Changelog & Working Notes
 
+## Unreleased — no reservation for memory the host cannot hold
+
+Pending demand no longer takes an active registry lease when the registry has
+room and the host does not. Before, `stage()` was granted the bytes, the fresh
+physical check refused the load, and the unused lease stood for its full TTL.
+Then a new one was taken (wafer, 24-25 Nov: 19,253 MB for Inkling, hourly). A
+host misfit now waits locally and takes no lease. A promoted reservation that
+was never handed to a provider and that the host still cannot hold is released
+by its exact ID (`InitialReservations.release_unused`). A short registry still
+queues on the plane: a place in line holds no bytes. Queued callers see the
+wait on `GET /v1/inference/executions/{id}` as `wait_reason`, "waiting for
+memory: needs N MB…". Streaming callers see it in the queued heartbeat. A
+deferral's own reason is left alone. An unknown physical reading keeps the
+existing hold.
+
 ## Unreleased — bounded EXO receipt history above ten thousand events
 
 Permit up to 20,000 immutable event files when reading a historical host attempt,
