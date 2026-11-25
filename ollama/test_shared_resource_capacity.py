@@ -67,6 +67,9 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         return {'id':'gpu','allocation_mode':'shared','expiry_policy':'hold',
             'available_memory_mb':max(0,100-sum(r['memory_mb'] for r in occupying)),
             'leases':[dict(r) for r in self.rows if r['status'] in ('active','queued')],
+            'queue':[{'lease_id':r['id'],'service_id':r.get('service_id'),'agent_id':r.get('agent_id'),
+                      'memory_mb':r.get('memory_mb'),'exclusive':bool(r.get('exclusive'))}
+                     for r in self.rows if r['status']=='queued'],
             'unsettled':[dict(r) for r in occupying if r['status']=='expired']}
 
     def request(self, **body):
@@ -292,14 +295,32 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.capacity.permitted('gpu'))
         self.assertIsNone(self.wait_reason(call))
 
-    async def test_holder_labels_are_checked_and_an_empty_list_means_earlier_requests(self):
+    async def test_a_registry_wait_names_the_queue_ahead_and_exclusive_wins(self):
+        self.unity()
+        self.rows.append({'id':'excl','status':'queued','service_id':None,'agent_id':'user:36',
+            'resource_id':'gpu','exclusive':1,'memory_mb':50,'expires_at':'2099-01-01T00:00:00Z'})
+        call=self.queued_call()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.wait_reason(call),
+            'waiting for memory: needs 100 MB of gpu, held now by unity-service (100 MB); '
+            'behind 1 queued request (user:36 (exclusive)); '
+            'the model is in the resource queue and holds no memory while it waits')
+        await self.source.refresh(self.physical)  # our own place in line is not "ahead"
+        self.assertIn('behind 1 queued request (user:36 (exclusive))',self.wait_reason(call))
+
+    async def test_holder_labels_are_checked_capped_and_empty_means_earlier_requests(self):
         call=self.queued_call()
         journal=self.runtime.queue.supervisor.journal
-        journal.memory_wait('gpu','qwen',100,[])
-        self.assertIn('held now by earlier requests',self.wait_reason(call))
+        journal.memory_wait('gpu','qwen',100,[],[])
+        self.assertIn('of gpu, behind earlier requests;',self.wait_reason(call))
+        journal.memory_wait('gpu','qwen',100,[f's{i} (1 MB)' for i in range(5)],['q (exclusive)','r'])
+        self.assertIn('held now by s0 (1 MB), s1 (1 MB), s2 (1 MB) and 2 more; '
+                      'behind 2 queued requests (q (exclusive), r);',self.wait_reason(call))
         for bad in ('unity',[''],[None]):
             with self.assertRaises(ValueError):
                 journal.memory_wait('gpu','qwen',100,bad)
+        with self.assertRaises(ValueError):
+            journal.memory_wait('gpu','qwen',100,None,['q'])
 
     async def test_a_deferral_reason_is_not_overwritten_by_the_memory_note(self):
         call=self.queued_call()

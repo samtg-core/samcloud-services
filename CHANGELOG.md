@@ -9,7 +9,10 @@ claude-services-slice/gpu-0, held now by claude-services-slice/unity-service
 (32768 MB); the model is in the resource queue and holds no memory while it
 waits`. Before, the field was empty (slice, 25 Nov 07:21-07:33: four calls
 behind unity's quickval). The labels come from the registry read the refresh
-already made; this service's own leases are not listed. It clears when the
+already made; this service's own leases are not listed. Queued requests ahead
+of ours are named too ("behind 1 queued request (user:36 (exclusive))"), an
+exclusive lease reads "(exclusive)" whatever its size, and each list names three
+then counts the rest. It clears when the
 model is available, and on dispatch, as before. Test:
 `test_a_registry_wait_names_who_holds_the_memory` fails without the change.
 

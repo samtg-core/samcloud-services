@@ -14,17 +14,28 @@ from .inference_events import source_call
 from .inference_bootstrap import cold_capacity
 
 
+def _label(row):
+    who = str(row.get('service_id') or row.get('agent_id') or 'another holder')
+    mb = row.get('memory_mb')
+    # An exclusive blocks the whole pool, whatever its size.
+    return (f'{who} (exclusive)' if row.get('exclusive') else
+            f'{who} ({mb} MB)' if type(mb) is int else who)
+
+
 def _holders(registry,own_service):
-    """Labels for the active leases on a resource that are not this service's."""
-    out = []
-    for row in registry.get('leases') or []:
-        if not isinstance(row,dict) or row.get('status') != 'active' or row.get('service_id') == own_service:
+    """Labels for what a queued lease of ours waits on: the active leases that
+    are not ours, and the queued requests ahead of our first place in line."""
+    active = [_label(row) for row in registry.get('leases') or []
+              if isinstance(row,dict) and row.get('status') == 'active'
+              and row.get('service_id') != own_service]
+    ahead = []
+    for row in registry.get('queue') or []:
+        if not isinstance(row,dict):
             continue
-        who = str(row.get('service_id') or row.get('agent_id') or 'another holder')
-        mb = row.get('memory_mb')
-        out.append(f'{who} ({mb} MB)' if type(mb) is int else
-                   f'{who} (exclusive)' if row.get('exclusive') else who)
-    return out
+        if row.get('service_id') == own_service:
+            break
+        ahead.append(_label(row))
+    return active, ahead
 
 
 class ManagerCapacitySource:
@@ -306,8 +317,8 @@ class ManagerCapacitySource:
                                 # The lease waits in the resource queue. Say
                                 # whose leases hold the memory, from the same
                                 # registry read; ours are not a reason.
-                                journal.memory_wait(resource,model,required,
-                                    _holders(registry,initial.service))
+                                active,ahead = _holders(registry,initial.service)
+                                journal.memory_wait(resource,model,required,active,ahead)
                                 publish('unavailable','registry_queued')
                                 continue
                             if self.paused or epoch != self.epoch:
