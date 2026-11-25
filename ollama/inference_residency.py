@@ -64,6 +64,9 @@ class ResidencyStore:
                 id TEXT PRIMARY KEY, allocation TEXT NOT NULL REFERENCES allocations(id),
                 predecessor TEXT NOT NULL UNIQUE, ttl_seconds INTEGER NOT NULL,
                 state TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS residency_successors (
+                operation TEXT PRIMARY KEY REFERENCES residency_rollovers(id) ON DELETE CASCADE,
+                successor TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS residency_ends (
                 allocation TEXT NOT NULL, lease_id TEXT NOT NULL UNIQUE,
                 resource TEXT NOT NULL, model TEXT NOT NULL, memory_mb INTEGER NOT NULL,
@@ -241,6 +244,8 @@ class ResidencyStore:
             covered = response['status'] == 'active' and expiry > self.clock()
             self.db.execute('UPDATE allocations SET lease_id=?,expires_at=?,state=?,pending_id=NULL WHERE id=?',
                 (new_id,response['expires_at'],'covered' if covered else 'uncovered',operation.allocation))
+            self.db.execute("INSERT INTO residency_successors(operation,successor) VALUES(?,?)",
+                            (operation.id,new_id))
             self.db.execute("UPDATE residency_rollovers SET state='applied' WHERE id=?", (operation.id,))
             self.db.execute('COMMIT')
         except BaseException:
