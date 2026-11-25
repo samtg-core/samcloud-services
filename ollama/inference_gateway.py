@@ -381,7 +381,9 @@ class GatewayQueue:
                     break
                 now = asyncio.get_running_loop().time()
                 if now >= heartbeat_at:
-                    yield ': model-service ' + page['state'] + '\n\n' if operation == 'chat' else '\n'
+                    waiting = page.get('wait_reason')
+                    note = page['state'] + (': ' + waiting if page['state'] == 'queued' and waiting else '')
+                    yield ': model-service ' + note + '\n\n' if operation == 'chat' else '\n'
                     heartbeat_at = now + 10
                 await asyncio.sleep(.1)
             try:

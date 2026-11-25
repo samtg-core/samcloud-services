@@ -310,6 +310,31 @@ class InitialReservations:
                        ('handed_off' if consume else 'reserved', receipt['expires_at'], model))
             return lease
 
+    def release_unused(self, model):
+        """Give back a promoted reservation that no provider was handed.
+
+        stage() never authorizes a load; only reserve() hands a receipt to the
+        loader, and it marks the row handed_off first. A 'reserved' row the
+        host cannot physically hold is active bytes nothing is using: release
+        that exact lease instead of holding it to its TTL. A lost DELETE leaves
+        the row 'retiring', which the existing handoff reconciles by ID.
+        """
+        if model not in self.models:
+            raise ValueError('configured model required')
+        with self._owned() as db:
+            row = db.execute('SELECT * FROM initial_reservations WHERE model=?', (model,)).fetchone()
+            if row is None or row['state'] != 'reserved' or not row['lease_id']:
+                raise Conflict('only an unconsumed promoted reservation can be given back')
+            db.execute("UPDATE initial_reservations SET state='retiring' WHERE model=?", (model,))
+            try:
+                receipt = self.client.release_lease(row['lease_id'])
+            except Exception:
+                raise Conflict('lease release outcome unknown; reconcile same saved ID') from None
+            if not isinstance(receipt, dict) or receipt.get('status') not in ('released', 'cancelled', 'settled'):
+                raise Conflict('lease release is not confirmed')
+            db.execute("UPDATE initial_reservations SET state='retired' WHERE model=?", (model,))
+            return row['lease_id']
+
     def reconcile_absent(self, model, *, confirm_absent):
         """Retire ONLY the saved exact lease after affirmative provider absence.
 

@@ -435,6 +435,7 @@ class Arbiter:
                 (execution_id, after, call['state'] == 'complete', limit + 1)).fetchall()
             page = [dict(row) for row in rows[:limit]]
             return {'execution_id': execution_id, 'state': call['state'], 'events': page,
+                    'wait_reason': call['wait_reason'],
                     'next_cursor': page[-1]['seq'] if page else after, 'has_more': len(rows) > limit}
 
     def existing_execution(self, grant_id, owner, client_key, request, *, yield_grant_keys=()):
@@ -779,6 +780,28 @@ class Arbiter:
             self.db.execute("UPDATE grants SET state='queued',active_execution=NULL,updated=?,"
                 'queue_order=?,stint_started=NULL,idle_since=NULL WHERE id=?',
                 (now,link['parent_queue_order'] if link else self._next_order(),grant['id']))
+
+    MEMORY_WAIT = 'waiting for memory'
+
+    def memory_wait(self, resource, model, required_mb):
+        """Tell a model's queued callers why they wait; required_mb=None clears it.
+
+        Trusted capacity source only. It holds no reservation and blocks
+        nothing: it names the wait on calls already queued, the same field a
+        caller reads on GET /v1/inference/executions/{id}. A deferral's own
+        reason is never overwritten or cleared here.
+        """
+        required(resource), required(model)
+        if required_mb is not None and (type(required_mb) is not int or required_mb <= 0):
+            raise ValueError('positive memory requirement required')
+        reason = (None if required_mb is None else
+                  f'{self.MEMORY_WAIT}: needs {required_mb} MB this host cannot free yet; '
+                  'no reservation is held while it waits')
+        with self.transaction():
+            self.db.execute("UPDATE executions SET wait_reason=?,updated=? WHERE state='queued' "
+                "AND wait_reason IS NOT ? AND (wait_reason IS NULL OR wait_reason LIKE ?) "
+                'AND grant_id IN (SELECT id FROM grants WHERE resource=? AND model=?)',
+                (reason, time.time(), reason, self.MEMORY_WAIT + '%', resource, model))
 
     def capacity_available(self, resource):
         """Trusted fresh permission only; never exposed as an owner API write."""
