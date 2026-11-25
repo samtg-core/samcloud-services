@@ -255,6 +255,23 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.capacity.permitted('gpu'))
         self.assertIsNone(self.wait_reason(call))
 
+    async def test_resource_wakeup_preserves_another_models_memory_wait(self):
+        call = self.queued_call()
+        self.physical['memory_available_mb'] = 50
+        await self.source.refresh(self.physical)
+        reason = self.wait_reason(call)
+        self.assertTrue(reason.startswith('waiting for memory'))
+
+        # A smaller model on the same GPU can fit and wake the resource.
+        journal = self.runtime.queue.supervisor.journal
+        journal.capacity_available('gpu')
+        self.assertEqual(self.wait_reason(call), reason)
+        self.assertEqual(self.requests, [])
+
+        self.physical['memory_available_mb'] = 20000
+        await self.source.refresh(self.physical)
+        self.assertIsNone(self.wait_reason(call))
+
     async def test_promoted_reservation_the_host_cannot_hold_is_given_back(self):
         unity=self.unity()
         call=self.queued_call()
