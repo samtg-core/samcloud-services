@@ -213,6 +213,79 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.saved()['generation'], 1)
         self.assertEqual(sum(isinstance(c, tuple) and c[0] == 'create' for c in self.calls), 1)
 
+    async def test_liveness_hints_during_slow_staging_do_not_starve_create(self):
+        from .exo_groups.events import RegistryEventFeed
+        feed = RegistryEventFeed(self.actor.plane, (self.actor,), None)
+        entered, release = asyncio.Event(), asyncio.Event()
+        reads = 0
+        async def slow_stage(*args):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                entered.set()
+                await release.wait()
+            return await fixtures.staged_fixture(*args)
+        self.actor.verify_staging = slow_stage
+        self.actor.note_demand(self.call['id'])
+        self.actor.events_reconciled()
+        await asyncio.wait_for(entered.wait(), 2)
+        epoch = self.actor._epoch
+        for _ in range(5):
+            await feed._heartbeat()
+            await feed._event({'type': 'resource.changed',
+                'data': {'resource_id': 'unrelated/gpu-0'}})
+            await feed._event({'type': 'resource.stats',
+                'data': {'resource_id': self.plan.members[0].resource_id,
+                         'memory_pct': 20, 'compute_pct': 0, 'health': 'green'}})
+        try:
+            self.assertEqual(self.actor._epoch, epoch)
+            self.assertFalse(self.saved()['create_started'])
+        finally:
+            release.set()
+        self.assertEqual((await self.actor.wait()).phase, 'admitted')
+        self.assertTrue(self.actor.may_start_ranks())
+        self.assertEqual(sum(isinstance(c, tuple) and c[0] == 'create' for c in self.calls), 1)
+        self.assertEqual(reads, 2)  # Before create, then before admitted authority.
+
+    async def test_liveness_cannot_mask_relevant_event_during_authority_refresh(self):
+        await self.start()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.actor.authority.refresh
+        async def slow_refresh():
+            entered.set()
+            await release.wait()
+            return await original()
+        self.actor.authority.refresh = slow_refresh
+        self.actor.refresh()
+        await asyncio.wait_for(entered.wait(), 2)
+        self.actor.refresh()
+        self.group.update(generation=2, phase='releasing')
+        self.actor.on_event({'type': 'lease.group_changed',
+            'data': {'resource_id': self.plan.members[0].resource_id}})
+        self.assertFalse(self.actor.may_start_ranks())
+        release.set()
+        self.assertEqual((await self.actor.wait()).phase, 'fenced')
+        self.assertFalse(self.actor.may_start_ranks())
+        self.assertEqual(self.saved()['generation'], 1)
+
+    async def test_contact_loss_during_slow_staging_still_prevents_create(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_stage(*args):
+            entered.set()
+            await release.wait()
+            return await fixtures.staged_fixture(*args)
+        self.actor.verify_staging = slow_stage
+        self.actor.note_demand(self.call['id'])
+        self.actor.events_reconciled()
+        await asyncio.wait_for(entered.wait(), 2)
+        self.actor.refresh()
+        self.actor.events_lost()
+        release.set()
+        self.assertEqual((await self.actor.wait()).phase, 'unknown')
+        self.assertFalse(self.saved()['create_started'])
+        self.assertFalse(self.server_created)
+        self.assertFalse(self.actor.may_start_ranks())
+
     async def test_close_drains_pending_metadata_and_keeps_ownership_record(self):
         self.release.clear()
         self.actor.note_demand(self.call['id'])

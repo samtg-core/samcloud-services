@@ -32,10 +32,14 @@ class RuntimeObservation:
 
 
 def launch_sha256(actor, environment):
+    return spec_launch_sha256(actor.spec, environment)
+
+
+def spec_launch_sha256(spec, environment):
     # Do not publish raw environment values, which can contain the private EXO
     # API configuration. The coordinator's plane credential never belongs here.
-    return digest({'binding': asdict(actor.spec.binding), 'argv': list(actor.spec.argv),
-                   'cwd': str(actor.spec.cwd), 'environment_sha256': digest(environment)})
+    return digest({'binding': asdict(spec.binding), 'argv': list(spec.argv),
+                   'cwd': str(spec.cwd), 'environment_sha256': digest(environment)})
 
 
 def record_host_attempt(owner, journal):
@@ -170,6 +174,7 @@ class HostRankRuntime:
                 or not isinstance(environment, dict)
                 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in environment.items())
                 or any(any(part in k.upper() for part in ('TOKEN', 'BEARER', 'SAMCLOUD_AUTH'))
+                       and not (k == 'EXO_LEASED_TOKEN_TRACE' and environment[k] == '16')
                        for k in environment)
                 or actor.launch_attempted or actor.phase != 'prepared'
                 or not isinstance(boot_id, str) or str(UUID(boot_id)) != boot_id
@@ -183,6 +188,7 @@ class HostRankRuntime:
         self._watcher_factory, self.exit_watch = watcher_factory, None
         self._lock, self._closed = asyncio.Lock(), False
         self._event_epoch, self._events_ready = 0, False
+        self._connected = asyncio.Event()
         self.observation_error = None
         self._journal, self.prepared = None, None
 
@@ -353,11 +359,13 @@ class HostRankRuntime:
 
     async def on_connect(self):
         self._events_ready = False
+        self._connected.clear()
         self._event_epoch += 1
         epoch = self._event_epoch
         result = await self.adapter.on_connect()
         if epoch == self._event_epoch:
             self._events_ready = True
+            self._connected.set()
         self.inventory_changed()
         return result
 
@@ -368,6 +376,17 @@ class HostRankRuntime:
         if feed is None:
             feed = self._event_feed = RegistryEventFeed.host(self)
         return await feed.consume_once()
+
+    async def wait_connected(self, subscription):
+        """Wait on the existing event transition, never poll or own its task."""
+        waiter = asyncio.create_task(self._connected.wait())
+        try:
+            await asyncio.wait((waiter, subscription), return_when=asyncio.FIRST_COMPLETED)
+            if subscription.done() or not self._events_ready:
+                raise ObservationUnknown('host event observation unavailable; same attempt retained')
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
 
     async def on_event(self, event):
         result = await self.adapter.on_event(event)
@@ -381,6 +400,7 @@ class HostRankRuntime:
 
     def on_disconnect(self):
         self._events_ready = False
+        self._connected.clear()
         self._event_epoch += 1
         self.adapter.on_disconnect()
 

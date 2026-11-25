@@ -1,3 +1,105 @@
+## EXO comparison ownership and fixed bindings — 16 November 2026
+
+The numerical observer now joins the original execution, demand, group intent
+and private binding in one read. It keeps the canonical group owner (`user:58`)
+separate from the authenticated queue username (`codex`). The public queue's
+owner checks and stored names are unchanged. The joined observation also requires
+the complete state, exact frozen contract and matching saved request digest.
+Foreign/unlinked calls, changed contracts or requests, missing all-rank end and
+uncertain/failed work refuse before any host receipt read. Session source pins
+include this provenance helper. The HTTP/SQLite regression fails on the preceding
+source with the real identity shape, then passes with this fix. Its physical
+admission and token receipts are synthetic; it is not distributed model proof.
+
+The source passes 450 group controls, 357 critical gateway/SDK controls and 708
+controls on Obelisk's Python 3.14.10 (overlapping counts). No native compute or
+external connections occur in those controls. All three frozen-v4 interpreters
+also pass read-only file/Args/ring checks and inspect the exact fixed startup
+composition without journal, credential, network, process or model operations.
+The bindings use the measured host journals and preserve each existing local
+queue configuration; only Slice gains the explicitly configured small EXO model.
+No entrypoint is installed and a live transport verifier remains mandatory.
+
+A fresh interface survey changes Wafer's peer from its absent Ethernet address
+192.168.1.19 to active Wi-Fi 192.168.1.80. Slice uses Ethernet192.168.1.3 and
+Obelisk remains on Wi-Fi192.168.1.84. These are current small-trial settings, not
+an Ethernet performance claim. Live confinement and actual three-host generation
+remain the next deployment/model gates. Native8e21bc3 and its frozen artifacts
+are unchanged; Wafer's normal5176 gateway was not restarted for this source fix.
+
+## Wafer queued gateway — 16 November 2026
+
+At Sam's request, Wafer's normal gateway now serves release `5176ff0` through
+its first durable inference queue. The EXO composition is still draft and
+unselected. The old clean `1dc3e7f` deploy clone and launcher backup are preserved;
+Ollama was not restarted. All five existing model IDs, the device-scoped
+`wafer-model-service` identity (`user:60`), environment and context settings are
+retained. The runtime is a byte-identical, separately sealed copy of the old
+Python environment, qualified in its new location.
+
+The actual Wafer Python 3.14.6 passes 701 offline controls and the required
+route, context, in-flight and stream checks. A real queued Qwen3-1.7B call
+completed with `OK.`; its logical grant released. A normal queued, non-forced
+unload then released the exact 3,354 MiB residency lease. Both journal executions
+are complete, both grants released, no uncertain work or unsettled capacity.
+The new journal is `/Users/wafer-services/var/samcloud-services-queue/queue.sqlite`
+(mode0600). No default idle/fairness timer was enabled. Like the other queued
+gateways, direct compatibility calls require a stable `Idempotency-Key`; native
+queue clients already supply durable intent keys.
+
+Qualification caught and fixed a raw-receipt portability issue: reads may update
+access time. The check now pins the existing content identity plus link count;
+replacement, content changes and additional links still refuse. A stale context
+test response fixture was also repaired to report its successful HTTP status.
+The final normal gateway release includes both fixes. Live EXO host control,
+transport enforcement and distributed model qualification are still separate
+rollout steps. The earlier evidence below is retained with its source scope.
+
+## Earlier attended startup qualification — e68a6b3, 16 November 2026
+
+This remains a draft, uninstalled model-service candidate. `FleetConfiguration`
+is now the explicit trusted startup callback for the fixed Slice coordinator;
+`host_configuration` supplies each other host role. It binds the existing
+journal, ordinary host queues, exact frozen deployments and host HTTPS endpoints.
+There is no environment-selected profile or implicit production activation.
+
+The attended coordinator starts without a standing coordinator credential or
+registry subscription. Its already-authenticated configured owner explicitly
+activates `/v1/exo/session/activate` using that owner's existing request header.
+The credential stays in gateway memory, separate from each host manager's own
+service credential, and is never persisted or passed to native processes. The
+existing supervisor owns and drains activation across observer disconnects.
+Cleanup or settlement refusal retains it; successful shutdown clears it. Status,
+explicit subscription reconnection and exact existing member settlement use
+fixed metadata routes. No request can choose a model, path, audience or command.
+No group is acquired without queued demand and live staging/authority checks.
+
+The optional qualification profile alone sets `EXO_LEASED_TOKEN_TRACE=16`.
+`token_receipts.py` reads fresh private, boot/UID/command/task/rank-bound receipts;
+`qualification.py` compares all 16 raw IDs on every rank with the pinned actual
+M5 whole-model chat oracle. The original three prompts, exact rendered/encoded
+input, sampling options, usage/cache path and independent all-rank end must
+match. The frontend exposes 45 IDs because its thinking parser suppresses one
+opening marker per prompt; the numerical criterion remains all 48 raw IDs.
+A mismatch fails; partial or unproven observations stay unconfirmed. Comparison
+cannot start inference, retry a call, establish physical admission or free HOLD.
+
+Validation: 442 group controls, 357 critical gateway/SDK controls and 700 controls
+on Obelisk's Python 3.14.10 pass, with overlapping counts. The actual frozen-v4
+interpreter on all three hosts also verifies its complete files and exact native
+arguments twice, without native imports, lease operations or service selection.
+The deliberately unconfigured live transport verifier refuses as required.
+Source qualification is not a distributed model pass.
+
+Native source `8e21bc36d4e0859c3c73959ce435b3bb4bb186f0` has all required gates
+passing (601 default tests, three existing skips, 190 default slow exclusions).
+The same wheel and frozen-v4 artifacts are prepared and hash-audited on all three
+hosts, unselected. [Native source and evidence2307](https://cloud.samtg.xyz/api/v1/files/2307/raw)
+retain the exact oracle, runtime manifests and cleanup receipts. Live enforced
+transport and actual small three-host inference still precede the 235B model's
+measured context/memory fit and full21 evaluations. No approval or merge is
+requested while this PR remains draft.
+
 ## Obelisk compatibility candidate
 
 This stacked candidate reconciles provider commit `0073e4f` with Obelisk's
@@ -25,7 +127,7 @@ and actual small queued three-host model proof still precede large staging.
 
 # EXO provider integration
 
-## Current native qualification
+## Earlier native qualification — 15 November 2026
 
 Core PR19 is merged and live as **0.13.11 / 1d396f5**; the exact-member authority
 handler was independently checked. The native candidate is committed as
@@ -716,3 +818,191 @@ current group authority, distributed inference or a host launch.
 The exact fleet transport verifier and coordinator-to-host launch/receipt
 orchestration still precede activation. No new public route, source selection,
 standing model-service restart or rank start is enabled by this module.
+
+## Opt-in host control on the existing model-service endpoint
+
+`EXOService(runtime, deployment=...)` exposes fixed `/v1/exo/host` metadata and
+control routes. The existing authentication middleware must verify the exact
+configured coordinator owner. Requests cannot choose a model, deployment, path,
+command, environment or credential. `files` freshly checks sealed files and live
+transport before acquisition; an unconfigured verifier refuses. Responses bind
+the request nonce, control-source hash and fixed configuration hash and forbid
+caching. No redirect, automatic reconnect or request timeout is introduced.
+
+The `prepare` route takes only the complete exact member binding and fixed plan
+digest. The coordinator checks its saved full group intent/member/runtime before
+sending it. The host independently reads its scoped member using the manager's
+own credential: exact owner, group, generation, resource, active lease
+envelope and admitted/serving authority must match. The submitted expiry may
+predate a renewal but cannot exceed the observed lease. The scoped projection
+does not disclose the full coordinator intent; host configuration stays fixed.
+Preparation calls `HostDeployment.bind` then `EXOService.attach_host` and waits
+on that subscription's connection event, without a timer or polling loop. It
+does not start a rank. Start separately rechecks files, transport and authority.
+
+Status, receipts, start, stop and the permanent never-started fence require the
+exact registered attempt. A failed preparation with no owner can be read through
+status, but stays unconfirmed; absence of a host record is not cleanup evidence.
+No preparation or start is retried after an ambiguous outcome. Status never
+grants authority. Partial private setup preserves its journaled owner/feed and
+the existing permanent no-start cleanup path, including during service drain.
+Receipts are collected from its actual journal/private state and the HTTP reader
+uses the same preparation, child-birth and cleanup validator as the SSH reader.
+Neither route settles or releases a lease.
+
+Start/stop/fence decisions commit once in the host journal before a finite task
+is registered with the existing supervisor. HTTP cancellation cannot cancel that
+task. The same nonce observes the original operation; a new nonce cannot repeat
+it. An old owned row without a task is reported as unknown, never restarted.
+`HostCommands` likewise commits a single POST decision in the coordinator's
+existing inference journal, checks its frozen member/runtime and fresh authority
+before start, and belongs to that installed queue's service lifecycle. A lost
+reply keeps the committed row; recovery reads status/receipts. Shutdown pauses
+new starts and drains these finite tasks before closing observers. A drain that
+begins during runtime verification prevents the late start.
+
+Thirty CPU controls added since host configuration cover these contracts with
+real journal/sealed-file fixtures and isolated ASGI/HTTPS transports; native
+spawn is forbidden. Group controls401 and critical gateway/SDK357 pass. This
+source is uninstalled. These controls are not proof of network enforcement or
+distributed inference. The admitted small-model
+three-host qualification remains required before staging the large model.
+
+## Assembly through the existing provider
+
+`GroupProvider.bind_assembly_factory` takes one trusted asynchronous factory,
+configured outside public inference requests. After all exact members are
+admitted, the existing finite provider task owns configuration and a
+`GroupAssembly`. The factory must supply that same provider's backend, three
+host commands, independent receipt routes and readiness owner. A configuration
+decision commits before the factory runs; an ambiguous factory cannot be called
+again automatically after failure or a new process.
+
+Assembly prepares all hosts and pins their independently observed preparations
+before the first start. Each start must produce its exact live child receipt.
+The original private-instance startup then submits once, and serving requires
+the existing full private-state check and attributed core acknowledgement.
+Only then can ordinary provider capacity checks dispatch the queued inference.
+Assembly itself does not generate an answer or request another physical lease.
+
+An owned host POST is reconciled through status and receipts. A lost native
+instance acceptance is reconciled against the same contract and private state;
+neither starts nor instance creation are re-POSTed. A failed pass withdraws
+capacity and returns to the existing event stream. Internal authority refreshes
+do not cause a hot retry loop when an API has not opened. Service shutdown drains
+the same finite provider/host tasks and still refuses an unsettled group.
+
+Nine assembly controls cover the full sequence, both kinds of lost reply,
+unknown start without a receipt, observer cancellation, failed configuration,
+drain and unavailable private API. Group controls410 and gateway/SDK357 pass.
+They use isolated transports and physical fixtures, not a distributed model.
+No default factory is selected; actual transport enforcement and the admitted
+small three-host model remain deployment qualification gates.
+
+## Fixed fleet and frozen contract compiler
+
+`HostFleet` takes all three exact `HostDeployment` objects, pinned HTTPS host
+endpoints, the coordinator's own `CoordinatorPlane`, manifests and each host's
+existing inference-journal path. It reconstructs and compares the complete file
+policies. Its `verify` callback must be the acquisition actor's staging verifier:
+all three hosts must freshly verify their files and live transport before the
+first group request. There is no guessed journal path or credential fallback.
+
+In the trusted startup configure function, construct the fleet and acquisition
+actor, bind that actor through `runtime.bind_exo`, then construct `EXOService`
+with Slice's local deployment. Bind `AssemblyFactory(fleet, service,
+ContractCompiler(fleet.local, runtime.queue.supervisor), group_scope=...)` to
+that installed provider. Return the service to the existing startup lifecycle;
+the factory runs only later, inside the admitted provider's owned task. The
+scope is an explicit existing audience, not a membership change. Coordinator
+headers stay in authenticated model-service clients; each host's independent
+member reader still uses its own manager credential.
+
+The admitted factory re-reads the exact group and members, freezes their launch
+bindings, compiles the contract, and checks its node and ring endpoints against
+the host deployments. It wires the existing private client, backend, independent
+receipt routes, host commands and readiness owner. The private API key is read
+only after host preparation creates it. The service also owns and closes the
+fleet's clients if no group was acquired. A private metadata workspace must exist,
+be owned by the host uid and be writable/searchable only by that owner before
+acquisition; a missing or redirected directory fails preflight.
+
+`ContractCompiler` uses the same queue supervisor to own one finite CPU helper
+across observer cancellation. The helper is the pinned frozen Python3.13 with
+`-I -S -B`, exact provider-source pins and the existing frozen bootstrap. It
+imports the real EXO API types, rather than guessing their wire aliases. Input,
+output and diagnostics are bounded; metadata bytes, nonce and contract digests
+are checked. The minimal child environment excludes inherited credentials.
+Native compute imports, networking, child creation and file writes are forbidden
+in the helper. Only this retained metadata child can be killed and reaped after
+a protocol violation; inference ranks keep their separate lifecycle. A failed
+compiler operation remains the same failed operation, never an automatic rerun.
+
+Fourteen compiler/factory controls plus one deployment-preflight control bring
+the group suite to425; the critical gateway/SDK suite remains357, passing
+serially. The actual shipping compiler also ran on Slice's frozen3.13.1 with
+real complete staged files and its own scratch supervisor: its contract exactly
+matches the earlier real-EXO-type reference. No model, group, physical lease,
+rank or network operation was performed. These are source and CPU integration
+results, not distributed inference or a measured memory-fit result. The fixed
+startup selection, live transport enforcement and small-model qualification
+still precede activation and large-model staging.
+
+## Explicit Darwin PF transport qualification
+
+`PFPolicy` pins the host uid and boot, LAN interface, three peer IPv4 addresses
+and all four ports. `LivePFVerifier` is an explicit `HostDeployment` callback.
+Its policy and Apple `pfctl` digest enter the deployment configuration identity;
+the verifier source enters the host-control source identity. No verifier or
+firewall profile is selected by an environment variable or default constructor.
+
+The qualification rules use one `com.apple/990.SamcloudEXO` anchor under the
+host's inspected stock anchor path. TCP peer and ring traffic is allowed only
+between the three addresses on their measured interfaces; the private API stays
+on loopback. Other inbound TCP on the reserved ports is blocked for dynamically
+updated host addresses, including IPv6. Reserved UDP is blocked for multicast
+as well as local destinations. Outbound traffic to the reserved ports is
+limited to the same peers and loopback. Other port numbers are unaffected.
+
+An attended, per-host installer is maintained in the operator runtime kit. It
+checks the current boot, route source, empty reserved ports, disabled PF, stock
+main rules, absent enable references and scaffold-only existing anchors before
+installing. It never loads the main ruleset, flushes global states or replaces
+another anchor. It retains one exact `pfctl -E` reference with persist-before-
+action evidence. Partial/unknown installation refuses repetition. The proposed
+rollback runs only after EXO is drained and deselected, checks empty ports and
+states again, removes our anchor rules and exact reference, and removes only
+our own unchanged read delegation.
+
+The sole service privilege is a digest-pinned list of exact `pfctl` show
+commands in one sudoers file. There is no shell permission, argument wildcard,
+rule mutation permission, additional credential, root daemon or polling loop.
+The verifier reads a root-owned installed receipt as configuration, then queries
+the live kernel on every call. Disabled PF, changed anchor inventory or rules,
+another effective filter, a skipped LAN interface, changed address/boot/binary,
+missing owned reference, unexpected reserved-port states or any failed read
+refuses admission. It rechecks the evaluation path before returning. No timeout
+or automatic retry is introduced. An invalid receipt is never live permission.
+
+The initial inspection's wildcard anchor query produced `DIOCGETRULES` errors
+with exit zero on two hosts. The verifier rejects diagnostics even when the
+process exits zero and instead reads each literal, enumerated anchor. CPU tests
+use synthetic snapshots; unprivileged per-host `pfctl -n` and `visudo -c` checks
+prove syntax only. Actual rule installation, positive/negative network probes
+and the admitted distributed model remain separate deployment evidence.
+
+## Coordinator liveness during long file audits
+
+Registry keepalives, utilisation-only `resource.stats`, and unrelated events coalesce into an active coordinator
+reconciliation. They do not change its observation epoch: the three-host file
+audit can outlast several keepalives. When no reconciliation is active they
+still request a fresh read. Exact resource/lease changes, new demand and event
+contact loss continue to invalidate immediately, including during an audit.
+Existing authority still expires against the continuous clock. This introduces
+no polling loop, deadline, physical operation or inference retry.
+
+An attended coordinator restart retains the activation decision in the journal
+but loses its credential. The same owner must explicitly repeat the original
+activation request id to restore the header in memory and subscribe again.
+A different request id or owner is refused. This restores observation of the
+same saved demand/group; it does not enqueue another inference execution.

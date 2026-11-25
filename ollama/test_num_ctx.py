@@ -70,6 +70,8 @@ class FakeHTTP:
         self.show_calls = 0
 
     class _Resp:
+        status_code = 200
+
         def __init__(self, body):
             self._body = body
 

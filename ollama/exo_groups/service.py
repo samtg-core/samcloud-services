@@ -28,11 +28,14 @@ class EXOService:
     changes an attempt, starts ranks or resubmits inference.
     """
 
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, deployment=None, defer_coordinator=False):
+        from .deployment import HostDeployment
         installation = getattr(runtime, 'exo', None)
         host = getattr(runtime, 'host_rank', None)
-        if (getattr(runtime, 'exo_service', None) is not None
-                or installation is None and host is None
+        if (type(defer_coordinator) is not bool or defer_coordinator and installation is None
+                or getattr(runtime, 'exo_service', None) is not None
+                or installation is None and host is None and deployment is None
+                or deployment is not None and not isinstance(deployment, HostDeployment)
                 or installation is not None and (
                     not isinstance(installation, EXOInstallation)
                     or installation.runtime is not runtime or installation.closed)
@@ -47,9 +50,17 @@ class EXOService:
         if host is not None:
             self.roles['host'] = host
         self.tasks = {}
+        self.commands = []
+        self.host_clients = []
         self.failures = {}
         self.started = self.closed = self.closing = False
+        self.draining = False
+        self.deferred_coordinator = defer_coordinator
         self._close_lock = asyncio.Lock()
+        self.control = None
+        if deployment is not None:
+            from .host_control import HostControl
+            self.control = HostControl(runtime, deployment, self)
 
     def start(self):
         if (self.started or self.closed or self.closing
@@ -60,8 +71,50 @@ class EXOService:
         self.runtime.exo_service = self
         self.started = True
         for role in self.roles:
-            self._subscribe(role)
+            if role != 'coordinator' or not self.deferred_coordinator:
+                self._subscribe(role)
         return self
+
+    def connect_coordinator(self):
+        """Explicit first connection after the attended owner provides its header."""
+        if (not self.started or self.closed or self.closing or self.draining
+                or not self.deferred_coordinator or 'coordinator' not in self.roles
+                or 'coordinator' in self.tasks):
+            raise RuntimeError('fresh deferred coordinator connection required')
+        self.deferred_coordinator = False
+        return self._subscribe('coordinator')
+
+    def attach_host(self, owner):
+        """Attach an already journaled owner, including partial setup on drain."""
+        if (not self.started or self.closed or self.closing
+                or not isinstance(owner, HostRankRuntime) or owner.closed
+                or getattr(self.runtime, 'host_rank', None) is not owner
+                or getattr(owner, '_queue_runtime', None) is not self.runtime
+                or 'host' in self.roles and self.roles['host'] is not owner):
+            raise RuntimeError('exact newly registered host owner required')
+        if 'host' not in self.roles:
+            self.roles['host'] = owner
+            self._subscribe('host')
+        return self.tasks['host']
+
+    def own_host_commands(self, commands):
+        from .host_http import HostCommands
+        installation = self.roles.get('coordinator')
+        if (not isinstance(commands, HostCommands) or self.closed or self.closing or self.draining
+                or installation is None or installation.closed
+                or commands.actor not in [p.actor for p in installation.providers.values()]
+                or commands.journal is not self.runtime.queue.supervisor.journal
+                or commands.actor.task_factory != self.runtime.queue.supervisor.prepare):
+            raise ValueError('host commands must belong to this installed queue coordinator')
+        self.commands.append(commands)
+
+    def own_host_client(self, client):
+        from .host_http import HostControlClient
+        if (not isinstance(client, HostControlClient) or self.closed or self.closing or self.draining
+                or 'coordinator' not in self.roles):
+            raise ValueError('configured coordinator host client required')
+        if client not in self.host_clients:
+            self.host_clients.append(client)
 
     def _subscribe(self, role):
         task = asyncio.create_task(self._consume(role))
@@ -124,6 +177,14 @@ class EXOService:
                 return
             if not self.started:
                 raise RuntimeError('EXO service has not been started')
+            self.draining = True
+            if self.control is not None:
+                self.control.pause()
+                await self.control.drain()
+            for commands in self.commands:
+                commands.pause()
+            for commands in self.commands:
+                await commands.drain()
             # Do not cancel observers, explicit authority alarms or child owners
             # as a shortcut through uncertain work. Component close methods
             # verify cleanup/exact settlement and retain ownership on refusal.
@@ -141,6 +202,10 @@ class EXOService:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
             if host is not None and not host.closed:
                 await self.runtime.close_exo_rank()
+            clients = {id(client): client for client in self.host_clients}
+            clients.update({id(commands.client): commands.client for commands in self.commands})
+            for client in clients.values():
+                await client.close()
             self.closed = True
 
 

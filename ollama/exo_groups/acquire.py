@@ -124,6 +124,10 @@ class GroupAcquisition:
                 or not kind.startswith(('resource.', 'lease.'))
                 or data.get('resource_id') not in resources):
             return False
+        if kind == 'resource.stats':
+            # Utilisation telemetry is not an ownership/capacity mutation.
+            # The feed coalesces it as liveness, like a keepalive.
+            return False
         # Other holders on a required host can unblock our ordinary queued
         # member, so these hints are relevant before our lease id is known too.
         self.wake()
@@ -145,6 +149,20 @@ class GroupAcquisition:
                 if not done.cancelled():
                     done.exception()
             task.add_done_callback(finished)
+
+    def refresh(self):
+        """Coalesce liveness hints without invalidating an in-flight read.
+
+        A keepalive or unrelated event says the feed is alive, not that this
+        group's authority changed. Starting another epoch for each such hint
+        can starve a full host-file audit that takes longer than a keepalive.
+        Exact resource/lease events and contact loss still invalidate at once.
+        No hint extends the continuous-clock authority of an existing receipt.
+        """
+        if self._closed:
+            return
+        if self._task is None or self._task.done():
+            self.wake()
 
     async def wait(self):
         task = self._task

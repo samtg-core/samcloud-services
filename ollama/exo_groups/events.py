@@ -102,7 +102,7 @@ class RegistryEventFeed:
             await self.host.on_heartbeat()
         else:
             for actor in self.actors:
-                actor.wake()
+                actor.refresh()
 
     async def _event(self, event):
         if self.host is not None:
@@ -114,7 +114,7 @@ class RegistryEventFeed:
         else:
             for actor in self.actors:
                 if not actor.on_event(event):
-                    actor.wake()  # Visible activity can suppress keepalives.
+                    actor.refresh()  # Visible activity can suppress keepalives.
 
     async def consume_once(self):
         if self.closed or self.running or self.host is not None and (

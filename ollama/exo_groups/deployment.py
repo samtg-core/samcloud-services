@@ -7,6 +7,7 @@ The host reader always uses the manager's own already-verified credential.
 
 import asyncio
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from ipaddress import IPv4Address, IPv4Network
 import json
 import os
@@ -17,8 +18,9 @@ import stat
 from uuid import UUID
 
 from .evidence import write_new
+from .clock import authority_clock
 from .host_authority import HostAuthorityAdapter, HostPlaneReader
-from .member import ExpectedMember
+from .member import ExpectedMember, check_projection
 from .plan import GroupPlan, HOST_RESOURCES
 from .prepare import canonical, digest
 from .rank_lifecycle import RankLifecycle, RankSpec
@@ -46,7 +48,9 @@ def _owned_directory(path, uid, *, private):
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError('unredirected deployment directory required')
     info = path.lstat()
-    if info.st_uid != uid or private and stat.S_IMODE(info.st_mode) & 0o077:
+    if (info.st_uid != uid or private and (
+            stat.S_IMODE(info.st_mode) & 0o077 or stat.S_IMODE(info.st_mode) & 0o700 != 0o700
+            or not os.access(path, os.W_OK | os.X_OK))):
         raise ValueError('owned private deployment directory required')
 
 
@@ -75,7 +79,8 @@ class HostDeployment:
 
     def __init__(self, plan, files, *, manifest, parent, runtime_sha256, boot_id, home, state_base,
                  peer_ips, api_port, peer_port, discovery_port, ring_port,
-                 cleanup_tolerance_bytes, verify_transport, collector=collect_host):
+                 cleanup_tolerance_bytes, verify_transport, collector=collect_host,
+                 qualification_token_limit=None):
         if (not isinstance(plan, GroupPlan) or not isinstance(files, HostFiles) or files.rank not in _RANKS
                 or files.resource_id != HOST_RESOURCES[files.rank]
                 or type(files.uid) is not int or files.uid < 0
@@ -84,7 +89,9 @@ class HostDeployment:
                 or not re.fullmatch('[a-f0-9]{64}', runtime_sha256)
                 or str(UUID(boot_id)) != boot_id or UUID(boot_id).int == 0
                 or not callable(verify_transport) or not callable(collector)
-                or type(cleanup_tolerance_bytes) is not int or cleanup_tolerance_bytes < 0):
+                or type(cleanup_tolerance_bytes) is not int or cleanup_tolerance_bytes < 0
+                or qualification_token_limit is not None and (
+                    type(qualification_token_limit) is not int or qualification_token_limit != 16)):
             raise ValueError('exact host files, boot, runtime and live transport verifier required')
         self.plan = plan
         # Freeze mutable policy dictionaries before producing any spec or file.
@@ -98,6 +105,10 @@ class HostDeployment:
         names = {pin['path'] for pin in files.runtime['files']}
         if not {'run_text.py', 'python/bin/python3.13', 'source/src/exo/main.py'} <= names:
             raise ValueError('pinned frozen interpreter, launcher and node source required')
+        if qualification_token_limit is not None and not {
+                'source/src/exo/utils/qualification_tokens.py',
+                'source/src/exo/worker/runner/llm_inference/batch_generator.py'} <= names:
+            raise ValueError('pinned raw-token observation source required')
         if (self.state_base == self.home / '.exo'
                 or any(self.state_base.is_relative_to(p) for p in (self.runtime_root, self.model_root))):
             raise ValueError('private attempt state must be outside immutable artifacts and standing EXO home')
@@ -112,7 +123,13 @@ class HostDeployment:
             raise ValueError('four distinct explicit unprivileged ports required')
         self.peer_ips, self.ports = peer_ips, ports
         self.cleanup_tolerance_bytes = cleanup_tolerance_bytes
+        self.qualification_token_limit = qualification_token_limit
         self.verify_transport, self.collector = verify_transport, collector
+        self.transport_sha256 = getattr(verify_transport, 'configuration_sha256', None)
+        if self.transport_sha256 is not None and (
+                not isinstance(self.transport_sha256, str)
+                or not re.fullmatch('[a-f0-9]{64}', self.transport_sha256)):
+            raise ValueError('exact explicit transport configuration fingerprint required')
         self.previous = None
 
     @property
@@ -149,6 +166,8 @@ class HostDeployment:
             **{f'EXO_LEASED_{name}_PORT': str(port)
                for name, port in zip(('API', 'PEER', 'DISCOVERY', 'RING'), self.ports)},
         }
+        if self.qualification_token_limit is not None:
+            environment['EXO_LEASED_TOKEN_TRACE'] = str(self.qualification_token_limit)
         argv = (str(self.runtime_root / 'python/bin/python3.13'), '-I', '-S', '-B',
                 str(self.runtime_root / 'run_text.py'), '--namespace', namespace,
                 '--offline', '--no-downloads', '--no-batch', '--api-port', str(api),
@@ -167,6 +186,8 @@ class HostDeployment:
                 or compiled != self.compile(compiled.expected.binding)
                 or os.getuid() != files.uid):
             raise ValueError('exact own-host compiled deployment required')
+        _owned_directory(self.home, files.uid, private=False)
+        _owned_directory(self.state_base, files.uid, private=True)
         observed = await asyncio.to_thread(self.collector, asdict(files), self.previous)
         if observed.get('uid') != files.uid or observed.get('boot_id') != self.boot_id:
             raise ValueError('host uid or boot changed')
@@ -180,6 +201,43 @@ class HostDeployment:
         if await self.verify_transport(compiled.spec, compiled.environment) is not True:
             raise ValueError('live exact transport enforcement unconfirmed')
         return observed
+
+    def host_reader(self, runtime):
+        if (runtime.manager.initial_reservations.owner == self.plan.owner_id
+                or not isinstance(runtime.manager.sc.token, str) or not runtime.manager.sc.token
+                or set(runtime.settings.models.values()) != {self.files.resource_id}):
+            raise ValueError('distinct verified own-host service identity required')
+        return HostPlaneReader(lambda: 'Bearer ' + runtime.manager.sc.token,
+                               owner_id=runtime.manager.initial_reservations.owner)
+
+    async def admit_preparation(self, runtime, binding):
+        """Fresh own-member read only; configuration/binding is not permission.
+
+        The coordinator checks its saved full group intent before sending this
+        binding. The host's scoped projection independently checks ownership,
+        admission and the exact declared envelope, without borrowing that token.
+        This observation never replaces the rank's launch-time authority read.
+        """
+        compiled = self.compile(binding)
+        reader = self.host_reader(runtime)
+        try:
+            started = authority_clock()
+            value = await reader.projection(compiled.expected)
+            received = authority_clock()
+            decision = check_projection(compiled.expected, value,
+                request_started_monotonic=started, received_monotonic=received,
+                now_monotonic=authority_clock())
+            if not decision.allows_start(authority_clock()):
+                raise ValueError('exact own member is not freshly admitted')
+            lease = value['member']['lease']
+            # The saved launch expiry may predate a renewal, but cannot invent
+            # a later authority envelope. Actual start still reads it afresh.
+            if not (datetime.fromisoformat(lease['granted_at'])
+                    < datetime.fromisoformat(binding.expires_at)
+                    <= datetime.fromisoformat(lease['expires_at'])):
+                raise ValueError('launch expiry is outside the observed lease envelope')
+        finally:
+            await reader.close()
 
     async def bind(self, runtime, binding, *, emit):
         """Prepare and journal one host attempt, without starting its rank/feed."""
@@ -235,8 +293,7 @@ class HostDeployment:
         expected_launch_sha = launch_sha256(actor, compiled.environment)
         # Callback stays local to the already-verified manager. There is no
         # coordinator header argument, token file copy or credential in env.
-        reader = HostPlaneReader(lambda: 'Bearer ' + runtime.manager.sc.token,
-                                 owner_id=runtime.manager.initial_reservations.owner)
+        reader = self.host_reader(runtime)
         adapter = HostAuthorityAdapter(actor, reader)
         owner = HostRankRuntime(actor, adapter, verify_runtime=verify, environment=compiled.environment,
                                 boot_id=self.boot_id, verify_unstarted=verify_prepared)
