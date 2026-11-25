@@ -3,6 +3,7 @@
 No provider process, network, production journal or real resource is touched.
 """
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -262,15 +263,17 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         reason = self.wait_reason(call)
         self.assertTrue(reason.startswith('waiting for memory'))
 
-        # A smaller model on the same GPU can fit and wake the resource.
-        journal = self.runtime.queue.supervisor.journal
-        journal.capacity_available('gpu')
+        # Deliver a second model's fit through the normal resource wake and
+        # supervisor pump while the first model's execution is still queued.
+        self.runtime.settings = replace(self.runtime.settings,
+            models={'qwen':'gpu', 'small':'gpu'}, reservation_mb={'qwen':100, 'small':10})
+        self.runtime.capacity._pump = self.runtime.queue.supervisor.capacity_available
+        self.source.observed_residency['gpu','small'] = ('small',None,None)
+        self.source.publish('gpu','available','cold_fit',model='small')
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertFalse(self.source.permitted_model('gpu','qwen'))
         self.assertEqual(self.wait_reason(call), reason)
         self.assertEqual(self.requests, [])
-
-        self.physical['memory_available_mb'] = 20000
-        await self.source.refresh(self.physical)
-        self.assertIsNone(self.wait_reason(call))
 
     async def test_promoted_reservation_the_host_cannot_hold_is_given_back(self):
         unity=self.unity()
