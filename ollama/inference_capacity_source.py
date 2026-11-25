@@ -14,6 +14,19 @@ from .inference_events import source_call
 from .inference_bootstrap import cold_capacity
 
 
+def _holders(registry,own_service):
+    """Labels for the active leases on a resource that are not this service's."""
+    out = []
+    for row in registry.get('leases') or []:
+        if not isinstance(row,dict) or row.get('status') != 'active' or row.get('service_id') == own_service:
+            continue
+        who = str(row.get('service_id') or row.get('agent_id') or 'another holder')
+        mb = row.get('memory_mb')
+        out.append(f'{who} ({mb} MB)' if type(mb) is int else
+                   f'{who} (exclusive)' if row.get('exclusive') else who)
+    return out
+
+
 class ManagerCapacitySource:
     def __init__(self,runtime,binding,*,work_permitted=None):
         if work_permitted is not None and type(work_permitted) is not bool:
@@ -290,6 +303,11 @@ class ManagerCapacitySource:
                                     resource=resource, service_id=initial.service,
                                     memory_mb=required, ttl_seconds=LEASE_TTL))
                             except CapacityDeferred:
+                                # The lease waits in the resource queue. Say
+                                # whose leases hold the memory, from the same
+                                # registry read; ours are not a reason.
+                                journal.memory_wait(resource,model,required,
+                                    _holders(registry,initial.service))
                                 publish('unavailable','registry_queued')
                                 continue
                             if self.paused or epoch != self.epoch:

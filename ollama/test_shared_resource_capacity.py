@@ -274,6 +274,33 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.capacity.permitted('gpu'))
         self.assertIsNone(self.wait_reason(call))
 
+    async def test_a_registry_wait_names_who_holds_the_memory(self):
+        unity=self.unity()
+        call=self.queued_call()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.rows[-1]['status'],'queued')
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'],'registry_queued')
+        self.assertEqual(self.wait_reason(call),
+            'waiting for memory: needs 100 MB of gpu, held now by unity-service (100 MB); '
+            'the model is in the resource queue and holds no memory while it waits')
+        await self.source.refresh(self.physical)  # still queued: same words, no second lease
+        self.assertEqual(len(self.requests),1)
+        self.assertIn('held now by unity-service (100 MB)',self.wait_reason(call))
+        unity['status']='released'
+        self.rows[-1]['status']='active'
+        await self.source.refresh(self.physical)
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertIsNone(self.wait_reason(call))
+
+    async def test_holder_labels_are_checked_and_an_empty_list_means_earlier_requests(self):
+        call=self.queued_call()
+        journal=self.runtime.queue.supervisor.journal
+        journal.memory_wait('gpu','qwen',100,[])
+        self.assertIn('held now by earlier requests',self.wait_reason(call))
+        for bad in ('unity',[''],[None]):
+            with self.assertRaises(ValueError):
+                journal.memory_wait('gpu','qwen',100,bad)
+
     async def test_a_deferral_reason_is_not_overwritten_by_the_memory_note(self):
         call=self.queued_call()
         journal=self.runtime.queue.supervisor.journal
