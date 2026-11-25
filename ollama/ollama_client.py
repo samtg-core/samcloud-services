@@ -26,6 +26,12 @@ _ERROR_PREFIXES = (
     ("an error was encountered while running the model", "model_runtime"),
     ("context canceled", "context_cancelled"),
 )
+# Ollama 0.40.17 can report this MLX error via LastError() on a failed
+# runner transport. It identifies a Metal allocation failure, not child exit.
+_MLX_METAL_OOM = (
+    "mlx runner failed: panic: mlx: [METAL] Command buffer execution failed: "
+    "Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)."
+)
 # 0.33.0 raises tool_parse only in the harmony parser's done branch
 # (harmony/harmonyparser.go:445), and the chat route reports it after the
 # runner's Completion call has returned (server/routes.go:2892). Unlike every
@@ -154,6 +160,10 @@ class OllamaBackendError(Exception):
             self.subtype = "tool_parse"
         elif phase == "status" and raw.startswith(_TOOL_PARSE_STATUS_HEAD):
             self.subtype = "tool_parse"
+        if (status == 500 and phase == "status" and chunks_before == 0
+                and isinstance(detail, str) and not self.detail_truncated
+                and detail.startswith(_MLX_METAL_OOM)):
+            self.subtype = "mlx_metal_oom"
         xml_kind = None
         if self.subtype == "unclassified" and isinstance(detail, str) and not self.detail_truncated:
             xml_kind = next((kind for prefix, kind in _XML_TOOL_PARSE_PREFIXES
