@@ -90,8 +90,8 @@ class Startup(unittest.IsolatedAsyncioTestCase):
         self.registry.get_resource=Mock(return_value={'id':resource,'expiry_policy':'hold'})
         self.registry.request_lease=Mock()
         self.manager.status=Mock(return_value={})
-        server.inference_startup=QueueStartup(QueueSettings(self.root/'shared.sqlite',{'qwen':resource},
-            reservation_mb={'qwen':100},shared_queue_enabled=True),work_permitted=True)
+        server.inference_startup=QueueStartup(QueueSettings(self.root/'shared.sqlite',{'qwen':resource, 'small':resource},
+            reservation_mb={'qwen':100, 'small':25},shared_queue_enabled=True),work_permitted=True)
         await self.boot()
         runtime=server.inference_runtime
         self.assertIsNotNone(runtime.shared_resource)
@@ -99,7 +99,14 @@ class Startup(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.manager.initial_reservations.wait)
         self.registry.request_lease.assert_not_called()
         self.assertFalse(runtime.capacity.permitted(resource))
+        runtime.capacity_source.publish(resource, 'unavailable', 'physical_capacity', model='qwen')
+        runtime.capacity_source.publish(resource, 'available', 'cold_fit', model='small')
         report=await server.status()
+        queue = report['resource_queue']
+        self.assertEqual(queue['capacity']['reason'], 'cold_fit')
+        self.assertEqual(queue['capacity_by_model']['qwen']['reason'], 'physical_capacity')
+        self.assertEqual(queue['capacity_by_model']['small'], queue['capacity'])
+        self.registry.request_lease.assert_not_called()
         self.assertEqual(report['resource_queue']['handoff'],'idle')
 
     async def test_shared_queue_refuses_free_policy_or_wrong_resource_before_install(self):
