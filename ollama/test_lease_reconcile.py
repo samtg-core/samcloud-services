@@ -82,7 +82,9 @@ class Box:
         mgr.llama.available_models = lambda: []
         mgr.unload = lambda name, force=False: self.unloaded.append(name)
 
-        def _request_lease(model_name, memory_mb):
+        def _request_lease(model_name, memory_mb, *, before_load=False):
+            check(before_load == (not self.leased),
+                  "only the initial reservation is marked before-load")
             self.leased.append(memory_mb)
             self.events.append(("request", memory_mb))
             # The first lease is always granted; the RECONCILE is what this
