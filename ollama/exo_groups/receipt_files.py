@@ -186,3 +186,42 @@ def collect_attempt(spec,*,boot_reader=boot_id):
             os.close(database)
         os.close(parent)
         os.close(state)
+
+
+def verify_prepare_only(session, uid, state, prefix, binding, boot):
+    """Check both known pre-registration exits after the exact lease was fenced."""
+    parent, name = session.rsplit('/', 1)
+    base = _directory(parent)
+    try:
+        if state == 'owned' and prefix == 'prepare':
+            try:
+                os.stat(name, dir_fd=base, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise ReceiptUnavailable('read-only preparation has local state')
+        if state != 'unconfirmed' or prefix is not None:
+            raise ReceiptUnavailable('unknown preparation boundary')
+        directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
+        try:
+            info = os.fstat(directory)
+            if info.st_uid != uid or info.st_mode & 0o077 or set(os.listdir(directory)) != {'deployment.json', 'attempt'}:
+                raise ReceiptUnavailable('unexpected files in incomplete preparation')
+            deployment = decode(_read(directory, 'deployment.json', uid))
+            attempt = os.open('attempt', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                info = os.fstat(attempt)
+                if info.st_uid != uid or info.st_mode & 0o077 or set(os.listdir(attempt)) != {'prepared.json'}:
+                    raise ReceiptUnavailable('attempt advanced beyond preparation')
+                prepared = decode(_read(attempt, 'prepared.json', uid))
+            finally:
+                os.close(attempt)
+            if (deployment.get('kind') != 'prepared_host_configuration' or deployment.get('host_boot') != boot
+                    or canonical(deployment.get('binding')) != canonical(binding['expected'])
+                    or deployment.get('runtime_sha256') != binding['runtime_sha256']
+                    or prepared.get('state') != 'prepared_not_launched'
+                    or canonical(prepared.get('binding')) != canonical(binding)):
+                raise ReceiptUnavailable('historical preparation binding differs')
+        finally:
+            os.close(directory)
+    finally:
+        os.close(base)

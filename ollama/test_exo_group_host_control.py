@@ -225,6 +225,50 @@ class HostControlControls(IsolatedAsyncioTestCase):
         with self.assertRaises(host_control.HTTPException):
             await self.runtime.exo_host_control._completed_preparations(history)
 
+    async def test_fenced_pre_registration_history_requires_exact_local_boundary_and_settlement(self):
+        projection, _, reader = await self.settled_history()
+        control = self.runtime.exo_host_control
+        prior = replace(self.fixture.binding, lease_id='lease_' + '2' * 16, group_id='group_' + 'b' * 24)
+        compiled = self.config.compile(prior)
+        projection.update(group_id=prior.group_id, generation=prior.generation + 1)
+        projection['member']['lease_id'] = projection['member']['lease']['id'] = prior.lease_id
+        record = dict(resource_id=prior.resource_id, lease_id=prior.lease_id, prefix='prepare',
+                      state='owned', identity_json=json.dumps(asdict(prior)))
+        await control._completed_preparations([record])
+        projection['generation'] = prior.generation
+        with self.assertRaises(host_control.HTTPException):
+            await control._completed_preparations([record])
+        projection['generation'] += 1
+        compiled.session.mkdir(mode=0o700)
+        with self.assertRaises(host_control.HTTPException):
+            await control._completed_preparations([record])
+        attempt = compiled.session / 'attempt'
+        attempt.mkdir(mode=0o700)
+        def receipt(path, value):
+            path.write_text(json.dumps(value))
+            path.chmod(0o400)
+        receipt(compiled.session / 'deployment.json', dict(kind='prepared_host_configuration',
+                host_boot=self.config.boot_id, binding=asdict(compiled.expected),
+                runtime_sha256=self.config.runtime_sha256))
+        receipt(attempt / 'prepared.json', dict(state='prepared_not_launched',
+                binding=asdict(compiled.spec.binding)))
+        record.update(state='unconfirmed', prefix=None)
+        await control._completed_preparations([record])
+        projection['member']['settlement_recorded'] = False
+        with self.assertRaises(host_control.HTTPException):
+            await control._completed_preparations([record])
+        projection['member']['settlement_recorded'] = True
+        (attempt / 'launch.json').touch()
+        with self.assertRaises(host_control.HTTPException):
+            await control._completed_preparations([record])
+        (attempt / 'launch.json').unlink()
+        db = self.runtime.queue.supervisor.journal.db
+        db.execute("INSERT INTO exo_host_controls(resource_id,lease_id,action,request_id,identity_json,state,created) "
+                   "VALUES(?,?,'start',?,?,'owned',0)", (prior.resource_id, prior.lease_id, 'd'*64, record['identity_json']))
+        with self.assertRaises(host_control.HTTPException):
+            await control._completed_preparations([record])
+        self.fixture.spawner.assert_not_called()
+
     async def test_prepare_disconnect_keeps_same_supervisor_task_and_member(self):
         self.isolated_member_plane()
         self.admit_release.clear()
