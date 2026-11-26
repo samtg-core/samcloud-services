@@ -94,6 +94,15 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item['model']['hashed_bytes'] == item['runtime']['hashed_bytes'] == 0
                             for item in self.reports))
 
+    async def test_saved_proof_and_hash_cache_detach_from_reader_owned_reports(self):
+        proof = await self.verifier.verify(self.plan, self.manifest)
+        by_rank = {report['rank']: report for report in self.reports}
+        ordered = [by_rank[rank] for rank, _ in proof.hosts]
+        self.assertEqual(proof.observations_json.encode(), canonical(ordered))
+        by_rank['wafer']['model']['files'].clear()
+        self.assertTrue(self.verifier.previous['wafer']['model']['files'])
+        proof.check(self.plan)
+
     async def test_rejected_runtime_report_identifies_rank_and_keeps_previous_proof(self):
         await self.verifier.verify(self.plan, self.manifest)
         previous = self.verifier.previous

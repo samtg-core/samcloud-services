@@ -222,13 +222,14 @@ class StagingVerifier:
                 logging.getLogger(__name__).warning(
                     "EXO staging verification failed rank=%s phase=%s", host.rank, phase)
                 raise
+        observations = canonical(reports)
         proof = VerifiedStaging(digest(asdict(plan)), plan.rank_manifest_sha256,
             self.runtime_sha256, self.policy_sha256,
-            tuple((host.rank, host.resource_id) for host in policies), digest(reports),
-            canonical(reports).decode())
+            tuple((host.rank, host.resource_id) for host in policies),
+            hashlib.sha256(observations).hexdigest(), observations.decode())
+        del observations
         proof.check(plan)
-        self.previous = json.loads(canonical({host.rank: report for host, report in zip(
-            policies, reports, strict=True)}))
+        self.previous = {report['rank']: report for report in json.loads(proof.observations_json)}
         return proof
 
 
