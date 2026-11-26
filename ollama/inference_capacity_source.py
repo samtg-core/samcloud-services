@@ -271,7 +271,13 @@ class ManagerCapacitySource:
                     # Run 3 keeps the existing demand-driven model estimate.
                     # A deployment may explicitly override it, but starting a
                     # queue does not require a fixed whole-machine reservation.
+                    from .manager import match_whisper_model
                     required = settings.reservation_mb.get(model)
+                    whisper = match_whisper_model(model)
+                    if whisper is not None:
+                        # The loader uses this same catalogue size. An explicit
+                        # reservation can raise it on both sides of the handoff.
+                        required = max(whisper[2], required or 0)
                     if required is None:
                         from .manager import VLM_MODELS
                         vlm=next((info for info in VLM_MODELS.values() if info['default']==model),None)

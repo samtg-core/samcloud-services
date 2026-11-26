@@ -106,6 +106,28 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
                 await self.source.refresh(self.physical)
                 self.assertFalse(self.runtime.capacity.permitted('gpu'))
 
+    async def test_cold_whisper_fit_matches_loader_and_respects_larger_budget(self):
+        from unittest.mock import Mock
+        from .manager import match_whisper_model
+
+        self.manager.ollama = SimpleNamespace(memory_estimate_mb=Mock(return_value=4000))
+        for model in ('whisper-small', 'whisper-large-v3-turbo'):
+            catalogue_mb = match_whisper_model(model)[2]
+            for override in (None, catalogue_mb - 100, catalogue_mb + 100):
+                with self.subTest(model=model, override=override):
+                    budgets = {} if override is None else {model: override}
+                    self.binding.models = {model: 'gpu'}
+                    self.runtime.settings = QueueSettings(
+                        Path(self.tmp.name) / 'queue.sqlite', {model: 'gpu'}, reservation_mb=budgets)
+                    required = max(catalogue_mb, override or 0)
+                    self.resource['available_memory_mb'] = required - 1
+                    await self.source.refresh(self.physical)
+                    self.assertEqual(self.source.last['gpu']['reason'], 'registry_capacity')
+                    self.resource['available_memory_mb'] = required
+                    await self.source.refresh(self.physical)
+                    self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.manager.ollama.memory_estimate_mb.assert_not_called()
+
     async def test_existing_sizing_reads_model_estimate_without_allocating_or_loading(self):
         from unittest.mock import Mock
         self.runtime.settings = QueueSettings(Path(self.tmp.name)/'queue.sqlite',{'qwen':'gpu'})
