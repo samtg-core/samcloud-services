@@ -7,6 +7,7 @@ require a durable once-only decision in the coordinator's existing journal.
 
 import asyncio
 from dataclasses import asdict, dataclass
+import logging
 import re
 import secrets
 import time
@@ -63,19 +64,28 @@ class HostControlClient:
         request_id = secrets.token_hex(32) if request_id is None else request_id
         if not isinstance(request_id, str) or not re.fullmatch('[a-f0-9]{64}', request_id):
             raise ValueError('exact host control request id required')
+        phase = "credential"
+        status = None
         try:
             headers = credential_headers(self.header)
+            phase = "connect"
             async with self._client.stream('POST', '/v1/exo/host/' + action,
                     headers=headers, json={'request_id': request_id, **payload}) as response:
+                status = response.status_code
+                phase = "response_headers"
                 if (response.status_code != 200 or response.headers.get('content-type', '').split(';')[0]
                         != 'application/json' or response.headers.get('cache-control') != 'no-store'):
                     raise ValueError('host metadata unavailable')
+                phase = "response_body"
                 raw = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(raw) + len(chunk) > 32 * 1024 * 1024:
+                        phase = 'response_size'
                         raise ValueError('host metadata exceeds bound')
                     raw.extend(chunk)
+            phase = "json"
             value = decode_json(raw)
+            phase = "binding"
             if (set(value) != {'request_id', 'source_sha256', 'configuration_sha256', 'report'}
                     or value['request_id'] != request_id
                     or value['source_sha256'] != self.endpoint.source_sha256
@@ -84,6 +94,11 @@ class HostControlClient:
                 raise ValueError('host source/request/configuration differs')
             return value['report']
         except Exception:
+            if action == 'files':
+                # Never include exception text, headers, request payload or response body.
+                logging.getLogger(__name__).warning(
+                    "EXO staging host read failed rank=%s phase=%s status=%s",
+                    self.endpoint.rank, phase, status)
             raise HostControlUnavailable('exact host observation or control outcome unavailable') from None
 
     async def files(self, policy, _previous=None):

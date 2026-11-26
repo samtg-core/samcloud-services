@@ -94,6 +94,25 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item['model']['hashed_bytes'] == item['runtime']['hashed_bytes'] == 0
                             for item in self.reports))
 
+    async def test_rejected_runtime_report_identifies_rank_and_keeps_previous_proof(self):
+        await self.verifier.verify(self.plan, self.manifest)
+        previous = self.verifier.previous
+        reader = self.verifier.reader
+
+        async def incorrect_runtime(host, prior):
+            report = await reader(host, prior)
+            if host.rank == 'wafer':
+                report['runtime']['filesystem']['free_bytes'] = -1
+            return report
+
+        self.verifier.reader = incorrect_runtime
+        with self.assertLogs('ollama.exo_groups.staging', 'WARNING') as captured:
+            with self.assertRaises(BindingRefused):
+                await self.verifier.verify(self.plan, self.manifest)
+        self.assertEqual([record.getMessage() for record in captured.records],
+            ['EXO staging verification failed rank=wafer phase=runtime_files'])
+        self.assertIs(self.verifier.previous, previous)
+
     async def test_model_or_runtime_byte_change_withdraws_verified_staging(self):
         await self.verifier.verify(self.plan, self.manifest)
         path = self.root / 'wafer/runtime/main.py'

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from ipaddress import IPv4Address, IPv4Network
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -220,10 +221,17 @@ class HostDeployment:
         return observed
 
     async def observe(self, compiled):
-        observed = await self.observe_files(compiled)
-        if await self.verify_transport(compiled.spec, compiled.environment) is not True:
-            raise ValueError('live exact transport enforcement unconfirmed')
-        return observed
+        phase = 'file_observation'
+        try:
+            observed = await self.observe_files(compiled)
+            phase = 'transport'
+            if await self.verify_transport(compiled.spec, compiled.environment) is not True:
+                raise ValueError('live exact transport enforcement unconfirmed')
+            return observed
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "EXO host staging observation failed rank=%s phase=%s", self.files.rank, phase)
+            raise
 
     def host_reader(self, runtime):
         if (runtime.manager.initial_reservations.owner == self.plan.owner_id
