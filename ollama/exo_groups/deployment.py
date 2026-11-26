@@ -24,7 +24,7 @@ from .member import ExpectedMember, check_projection
 from .plan import GroupPlan, HOST_RESOURCES
 from .prepare import canonical, digest
 from .rank_lifecycle import RankLifecycle, RankSpec
-from .rank_process import Listener, RunBinding
+from .rank_process import Listener, RunBinding, ObservationUnknown, listener_closed
 from .rank_runtime import HostRankRuntime, RuntimeObservation, launch_sha256
 from .staging import HostFiles, StagingVerifier, model_file_policy
 from .staging_files import collect_host
@@ -259,6 +259,11 @@ class HostDeployment:
                     < datetime.fromisoformat(binding.expires_at)
                     <= datetime.fromisoformat(lease['expires_at'])):
                 raise ValueError('launch expiry is outside the observed lease envelope')
+            # Still in the replayable read-only prefix. The host checks again
+            # when recording the attempt, since a successful bind is transient.
+            for listener in compiled.spec.listeners:
+                if not listener_closed(listener):
+                    raise ObservationUnknown(f'EXO {listener.transport} port {listener.port} is occupied')
         finally:
             await reader.close()
 
