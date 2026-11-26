@@ -292,6 +292,33 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.end_entered.is_set())
         self.assertEqual(self.posts, 1)
 
+    async def test_first_data_arriving_during_permission_loss_stays_uncertain(self):
+        async def first_data(parts):
+            self.enabled = False
+            yield b'data: first'
+
+        with patch.object(Parts, '__aiter__', first_data):
+            call = self.enqueue()
+            row = await self.run_call(call)
+        self.assertEqual(row['state'], 'uncertain')
+        self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
+
+    async def test_permission_lost_after_keepalive_closes_only_with_exact_end(self):
+        async def keepalive_then_interrupted(parts):
+            yield b': keep-alive\n\n'
+            self.enabled = False
+            yield b': keep-alive\n\n'
+
+        with patch.object(Parts, '__aiter__', keepalive_then_interrupted):
+            for bad, expected in ((None, 'failed'), ({'instance_id': 'foreign'}, 'uncertain')):
+                self.enabled = True
+                self.bad_proof = bad
+                call = self.enqueue(key=expected)
+                row = await self.run_call(call)
+                self.assertEqual(row['state'], expected)
+                self.assertEqual(self.bindings.snapshot(call['id'])['end'] is None, bad is not None)
+        self.assertEqual(self.posts, 2)
+
 
 if __name__ == '__main__':
     unittest.main()
