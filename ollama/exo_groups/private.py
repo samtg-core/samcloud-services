@@ -48,7 +48,7 @@ class PrivateEXO:
         try:
             headers = {'Authorization': 'Bearer ' + private_key(self.key_file),
                        'Accept': 'application/json', 'Cache-Control': 'no-cache'}
-            return await bounded_json(self._client, 'GET', '/state', headers)
+            return await bounded_json(self._client, 'GET', '/leased/state', headers)
         except Exception:
             # No token, local file path, response body or prompt in diagnostics.
             raise PrivateEXOUnavailable('private EXO state unavailable') from None

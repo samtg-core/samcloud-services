@@ -59,7 +59,7 @@ class StartupControls(unittest.IsolatedAsyncioTestCase):
 
     async def transport(self, request):
         if request.method == 'GET':
-            self.assertEqual(request.url.path, '/state')
+            self.assertEqual(request.url.path, '/leased/state')
             if self.mode == 'cursor-loss':
                 self.actor.events_lost()
             return httpx.Response(200, json=copy.deepcopy(self.initial))
