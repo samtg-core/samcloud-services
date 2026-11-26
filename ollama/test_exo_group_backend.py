@@ -65,7 +65,8 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
             self.runtime, canonical(wire['request']).decode(),
             canonical(next(iter(self.state['instances'].values()))).decode())
         self.enabled = True
-        self.actor = SimpleNamespace(plan=self.plan, intents=self.intents,
+        self.actor = SimpleNamespace(plan=self.plan, intents=self.intents, authority=None,
+            report=SimpleNamespace(phase='unknown', reason='event_source_unconfirmed'),
             wake=lambda: None, wait=self.metadata_done, may_serve_requests=lambda: self.enabled)
         self.end_entered, self.end_release = asyncio.Event(), asyncio.Event()
         self.end_release.set()
@@ -284,9 +285,15 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
                 if index == 0:
                     owner.enabled = False
 
+        self.actor.authority = SimpleNamespace(current=SimpleNamespace(
+            expected=[SimpleNamespace(member=self.plan.members[0])],
+            decisions=[SimpleNamespace(state='stop_required', reason='group binding changed')]))
         with patch.object(Parts, '__aiter__', interrupted):
             call = self.enqueue()
-            row = await self.run_call(call)
+            with self.assertLogs('ollama.exo_groups.backend', level='WARNING') as captured:
+                row = await self.run_call(call)
+        self.assertIn(repr((self.plan.members[0].rank, 'stop_required', 'group binding changed')),
+                      captured.output[0])
         self.assertEqual(row['state'], 'uncertain')
         self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
         self.assertFalse(self.end_entered.is_set())
@@ -299,7 +306,10 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(Parts, '__aiter__', first_data):
             call = self.enqueue()
-            row = await self.run_call(call)
+            with self.assertLogs('ollama.exo_groups.backend', level='WARNING') as captured:
+                row = await self.run_call(call)
+        self.assertIn('execution=' + call['id'], captured.output[0])
+        self.assertIn('reason=event_source_unconfirmed saved_events=0 member_decisions=[]', captured.output[0])
         self.assertEqual(row['state'], 'uncertain')
         self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
 

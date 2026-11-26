@@ -5,6 +5,7 @@ until the private runtime proves every assigned rank drained this exact command.
 """
 
 import json
+import logging
 
 from ..inference_arbiter import CapacityDeferred
 from ..inference_gateway import StreamCapture
@@ -134,6 +135,18 @@ class EXOBackend:
                 capture = EXOCapture(self.bindings.journal, execution_id, command, self.actor.plan.model_id)
                 async for chunk in response.aiter_bytes():
                     if not self.actor.may_serve_requests():
+                        report = self.actor.report
+                        authority = self.actor.authority
+                        observation = authority.current if authority is not None else None
+                        logging.getLogger(__name__).warning(
+                            'EXO stream authority withdrawn execution=%s command=%s '
+                            'acquisition=%s reason=%s saved_events=%d member_decisions=%s',
+                            execution_id, command, report.phase, report.reason,
+                            capture.count,
+                            [(member.member.rank, decision.state, decision.reason)
+                             for member, decision in zip(observation.expected, observation.decisions)]
+                            if observation is not None else [],
+                        )
                         if (chunk != b': keep-alive\n\n' or capture.count or capture.pending
                                 or capture.decoder.getstate()[0] or capture.saw_terminal):
                             raise RuntimeError('private inference authority changed after partial output')
