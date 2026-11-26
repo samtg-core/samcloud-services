@@ -5,6 +5,7 @@ until the private runtime proves every assigned rank drained this exact command.
 """
 
 import json
+import logging
 
 from ..inference_arbiter import CapacityDeferred
 from ..inference_gateway import StreamCapture
@@ -120,6 +121,7 @@ class EXOBackend:
         self.contract.check_idle(self.actor.plan, self.launches, state, runtime_sha256=runtime)
         if not self.actor.may_serve_requests():
             raise CapacityDeferred('capacity_unavailable')
+        interrupted = False
         async with self.private.chat(self.bindings, execution_id, self.contract, body,
                                     state_event_idx=state.get('lastEventAppliedIdx')) as response:
             if response.status_code != 200:
@@ -133,10 +135,27 @@ class EXOBackend:
                 capture = EXOCapture(self.bindings.journal, execution_id, command, self.actor.plan.model_id)
                 async for chunk in response.aiter_bytes():
                     if not self.actor.may_serve_requests():
-                        raise RuntimeError('private inference authority changed')
+                        report = self.actor.report
+                        authority = self.actor.authority
+                        observation = authority.current if authority is not None else None
+                        logging.getLogger(__name__).warning(
+                            'EXO stream authority withdrawn execution=%s command=%s '
+                            'acquisition=%s reason=%s saved_events=%d member_decisions=%s',
+                            execution_id, command, report.phase, report.reason,
+                            capture.count,
+                            [(member.member.rank, decision.state, decision.reason)
+                             for member, decision in zip(observation.expected, observation.decisions)]
+                            if observation is not None else [],
+                        )
+                        if (chunk != b': keep-alive\n\n' or capture.count or capture.pending
+                                or capture.decoder.getstate()[0] or capture.saw_terminal):
+                            raise RuntimeError('private inference authority changed after partial output')
+                        interrupted = True
+                        break
                     for offset in range(0, len(chunk), 65536):
                         capture.feed(chunk[offset:offset + 65536])
-                capture.finish()
+                if not interrupted:
+                    capture.finish()
                 failed = capture.failed
                 result = {'kind': 'stream', 'event_count': capture.count, 'media_type': media}
             else:
@@ -163,6 +182,9 @@ class EXOBackend:
                 or final['lastEventAppliedIdx'] < proof['end_event_idx']):
             raise RuntimeError('private state precedes its end evidence')
         self.bindings.record_end(execution_id, proof)
+        if interrupted:
+            raise BackendEnded({'kind': 'error', 'status': 502, 'code': 'exo_authority_interrupted',
+                                'detail': 'Serving authority interrupted the original command before output'})
         # The exact command has ended on every rank, its terminal wire result
         # is valid, and the bound instance is idle. Admission for a *new* call
         # is independent: a later authority invalidation must not relabel this
