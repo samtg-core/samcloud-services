@@ -817,7 +817,12 @@ async def status():
         out['resource_queue'] = {'resource':state['resource'], 'handoff':state['phase'],
             'queued_behind':state['contender'] if state['phase'] != 'idle' else None,
             'allocations':state['allocations'],
-            'capacity':runtime.capacity_source.last.get(state['resource'],{})}
+            'capacity':runtime.capacity_source.last.get(state['resource'],{}),
+            'capacity_by_model': {
+                name: runtime.capacity_source.last_model.get((resource, name),
+                    {'state': 'unknown', 'reason': 'unobserved'})
+                for name, resource in runtime.settings.models.items() if resource == state['resource']
+            }}
     return out
 
 

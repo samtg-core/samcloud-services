@@ -163,3 +163,14 @@ throughput and host-health benchmarks are separate.
 Current queue/native deployments may run pinned source ahead of this repository
 main. Record their exact revisions in the deployment configuration; installing
 this harness does not upgrade a serving gateway or prove rail availability.
+
+
+### Checking whether a specific model fits
+
+On a shared resource, read `GET /status` and look up the exact configured model in
+`resource_queue.capacity_by_model`. Each entry gives the latest observed state
+and reason, with a revision once observed. For example, Inkling can report
+`unavailable / physical_capacity` while a smaller model on the same device
+reports `available / cold_fit`. The legacy `resource_queue.capacity` field
+contains the last published observation on the resource. A fit observation
+describes sampled capacity. The caller’s execution record gives its queue state.
