@@ -225,6 +225,38 @@ class StintJournal(unittest.TestCase):
         self.assertEqual(self.a.dispatch_next('gpu')['grant']['id'], sibling['id'])
         self.assertEqual(self.a.get(first['id'], 'creative')['handoff_reason'], 'fair_share')
 
+    def test_a_stint_holds_against_foreign_claims_only_within_idle_grace(self):
+        grant, _ = self.queued()
+        self.assertFalse(self.a.holds_stint('gpu'))
+        item = self.a.dispatch_next('gpu')
+        self.assertTrue(self.a.holds_stint('gpu'))   # executing
+        self.a.finish(item['execution']['id'], {'answer': 'done'})
+        self.now += 299
+        self.assertTrue(self.a.holds_stint('gpu'))   # between turns of one conversation
+        self.now += 1
+        self.assertFalse(self.a.holds_stint('gpu'))  # finished: others may queue
+        self.assertFalse(self.a.holds_stint('other-gpu'))
+
+    def test_a_stint_never_holds_past_fairness_or_after_release(self):
+        grant, _ = self.queued()
+        item = self.a.dispatch_next('gpu')
+        self.now += 1800
+        self.assertFalse(self.a.holds_stint('gpu'))
+        self.a.finish(item['execution']['id'], {})
+        self.now = 1000.0
+        self.a.request_release(grant['id'], 'creative')
+        self.assertFalse(self.a.holds_stint('gpu'))
+
+    def test_without_idle_grace_nothing_holds(self):
+        plain = Arbiter(Path(self.temp.name) / 'plain.sqlite')
+        try:
+            grant = plain.submit('creative', 'scope', 'gpu', 'qwen')
+            plain.enqueue(grant['id'], 'creative', 'one', {})
+            plain.dispatch_next('gpu')
+            self.assertFalse(plain.holds_stint('gpu'))
+        finally:
+            plain.close()
+
     def test_no_ready_competitor_means_no_forced_handoff(self):
         first, _ = self.queued()
         empty = self.a.submit('assistant', 'not-ready', 'gpu', 'qwen')

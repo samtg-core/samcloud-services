@@ -155,6 +155,21 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
         handoff.begin.assert_called_once_with()
         self.assertIs(self.source.permitted_model('gpu', 'qwen'), False)
 
+    async def test_a_held_stint_keeps_a_foreign_claim_waiting(self):
+        from unittest.mock import Mock
+        self.resident()
+        handoff = SimpleNamespace(initial=SimpleNamespace(service='service'),
+            _foreign=Mock(return_value={'id': 'foreign'}), begin=Mock())
+        self.runtime.shared_resource = handoff
+        journal = SimpleNamespace(holds_stint=Mock(return_value=True), pending_models=lambda r: [],
+                                  capacity_event=Mock())
+        self.runtime.queue = SimpleNamespace(supervisor=SimpleNamespace(journal=journal))
+        await self.source.refresh(self.physical)
+        handoff.begin.assert_not_called()
+        journal.holds_stint.return_value = False
+        await self.source.refresh(self.physical)
+        handoff.begin.assert_called_once_with()
+
     async def test_smaller_vision_can_fit_without_the_large_text_estimate_fitting(self):
         vision='mlx-community/Qwen2.5-VL-7B-Instruct-4bit'
         self.runtime.settings=QueueSettings(Path(self.tmp.name)/'queue.sqlite',{'qwen':'gpu',vision:'gpu'})

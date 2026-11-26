@@ -196,7 +196,10 @@ class ManagerCapacitySource:
                     foreign = handoff._foreign(registry)  # verifies hold policy and snapshot scope
                     own_debt = any(row.get('service_id') == handoff.initial.service for row in
                                    registry.get('unsettled', []) if isinstance(row, dict))
-                    if (foreign is not None and manager.models) or own_debt:
+                    queue = getattr(self.runtime, 'queue', None)
+                    held = (foreign is not None and not own_debt and queue is not None
+                            and queue.supervisor.journal.holds_stint(resource))
+                    if ((foreign is not None and manager.models) or own_debt) and not held:
                         handoff.begin()  # pause before any available publication
                         return
                     from .manager import VLM_MODELS
