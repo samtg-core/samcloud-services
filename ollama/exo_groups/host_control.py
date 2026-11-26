@@ -24,6 +24,7 @@ from ..inference_events import source_call
 
 from .deployment import HostDeployment
 from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
+from .reboot_cleanup import RebootExpectation, validate_reboot_cleanup
 from .http import decode_json
 from .member import ExpectedMember
 from .plan import LaunchBinding, MemberPlan
@@ -37,7 +38,7 @@ from .load_capacity import metal_policy
 
 
 _SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'load_capacity.py', 'staging_files.py',
-                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py')
+                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py', 'reboot_cleanup.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
 SOURCE_SHA256 = digest(_SOURCE)
@@ -66,7 +67,7 @@ def configuration_sha256(deployment):
     return digest(configuration)
 
 
-async def _verify_settlement(reader, expected, *, require_fence):
+async def _verify_settlement(reader, expected, *, require_fence, minimum_generation=None):
     binding = expected.binding
     projection = await reader.projection(expected)
     observed = projection.get('member', {})
@@ -77,6 +78,7 @@ async def _verify_settlement(reader, expected, *, require_fence):
             # This is historical settlement, never start authority.
             or type(projection.get('generation')) is not int
             or projection['generation'] < binding.generation + int(require_fence)
+            or minimum_generation is not None and projection['generation'] < minimum_generation
             or projection.get('phase') != 'released'
             or projection.get('release_requested') is not True
             or observed.get('resource_id') != binding.resource_id
@@ -307,7 +309,7 @@ class HostControl:
         A started attempt requires its independent child birth and launch
         receipt, plus cleanup validated against that exact child. A preparation
         that stopped before registration requires a later fence, exact
-        settlement and a matching prepare-only boundary. Old work is never resumed.
+        settlement and a matching prepare-only boundary. A reboot requires independent kernel evidence.
         """
         journal = self.runtime.queue.supervisor.journal
         reader = self.deployment.host_reader(self.runtime)
@@ -330,7 +332,6 @@ class HostControl:
                         prior['state'], prior['prefix'], asdict(compiled.spec.binding), self.deployment.boot_id)
                     continue
                 if (prior['state'] != 'returned' or row['phase'] not in ('launch_fenced', 'spawning')
-                        or row['boot_id'] != self.deployment.boot_id
                         or row['resource_id'] != self.deployment.files.resource_id
                         or not Path(row['state_path']).is_relative_to(self.deployment.state_base)):
                     raise ValueError('prior attempt is not a fixed completed session')
@@ -338,7 +339,9 @@ class HostControl:
                     'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
                 spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
                             journal_path=str(self.runtime.settings.journal))
-                report = await observe_local_attempt(spec)
+                report = await observe_local_attempt(spec, historical=True)
+                if report.get('observed_host_boot') != self.deployment.boot_id:
+                    raise ValueError('historical observation came from another current boot')
                 prepared = report['prepared']
                 data = prepared['binding']['expected']
                 launch = dict(data['binding'])
@@ -358,6 +361,7 @@ class HostControl:
                         or any(getattr(expected.binding, key) != row[key]
                                for key in ('resource_id', 'lease_id', 'group_id', 'generation'))):
                     raise ValueError('prior preparation identity changed')
+                prepared_pin = pin
                 started, launch = report['started'], report['launch_intent']
                 if started is None:
                     if report['phase'] != 'launch_fenced' or launch is not None:
@@ -385,8 +389,15 @@ class HostControl:
                 if (len(raw) != cleanup['bytes']
                         or hashlib.sha256(raw).hexdigest() != cleanup['sha256']):
                     raise ValueError('prior cleanup bytes changed')
-                validate_cleanup(raw, pin)
-                await _verify_settlement(reader, expected, require_fence=False)
+                reboot_fence = None
+                if decode_json(raw).get('kind') == 'observed_rank_rebooted':
+                    if started is None or self.deployment.boot_id == row['boot_id']:
+                        raise ValueError('reboot cleanup requires an old-boot started attempt')
+                    reboot_proof = validate_reboot_cleanup(raw, RebootExpectation(prepared_pin, pin))
+                    reboot_fence = reboot_proof['observation']['fenced_generation']
+                else:
+                    validate_cleanup(raw, pin)
+                await _verify_settlement(reader, expected, require_fence=False, minimum_generation=reboot_fence)
         except Exception:
             raise HTTPException(409, 'Prior host preparation needs exact cleanup and settlement') from None
         finally:
