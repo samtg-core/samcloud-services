@@ -1,0 +1,14 @@
+{
+  "base_commit": "4b0d369666ac87873de154fdee62862b252b8fb1",
+  "candidate_commit": "2a3d85a85e0093f45d976310a68560a99a9c0cae",
+  "patch_sha256": "20320f5dd0b8d8674fa8b4e5273f74b02f9b5ffd728bc2f9b00c003d9ed306b2",
+  "changed_files": [
+    "docs/api.md",
+    "src/exo/api/main.py",
+    "src/exo/api/tests/test_leased_memory.py",
+    "src/exo/worker/tests/unittests/test_runner/test_runner_supervisor.py"
+  ],
+  "source_repository": "Local qualified EXO lineage based on exo-explore/exo",
+  "runtime_selected": false,
+  "default_profile_changed": false
+}

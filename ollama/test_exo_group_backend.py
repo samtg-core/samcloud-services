@@ -107,7 +107,7 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
     async def transport(self, request):
         self.requests.append((request.method, request.url.path))
         self.assertEqual(request.headers['authorization'], 'Bearer ' + 'a' * 64)
-        if request.url.path == '/state':
+        if request.url.path == '/leased/state':
             state = copy.deepcopy(self.state)
             state['lastEventAppliedIdx'] = 100 + 10 * self.posts
             return httpx.Response(200, json=state)

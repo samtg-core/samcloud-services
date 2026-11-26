@@ -32,7 +32,7 @@ class PrivateEXOControls(unittest.IsolatedAsyncioTestCase):
         seen = []
         def handler(request):
             seen.append(request)
-            self.assertEqual(str(request.url), 'http://127.0.0.1:52515/state')
+            self.assertEqual(str(request.url), 'http://127.0.0.1:52515/leased/state')
             self.assertEqual(request.method, 'GET')
             self.assertEqual(request.headers['authorization'], 'Bearer ' + 'a' * 64)
             self.assertTrue(all(value is None for value in request.extensions['timeout'].values()))

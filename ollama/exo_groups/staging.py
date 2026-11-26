@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import logging
 import re
 from uuid import UUID
 from pathlib import PurePosixPath
@@ -195,22 +196,32 @@ class StagingVerifier:
         reports = await asyncio.gather(*(self.reader(host, self.previous.get(host.rank))
                                          for host in policies), return_exceptions=True)
         for host, report in zip(policies, reports, strict=True):
-            if (not isinstance(report, dict) or report.get('rank') != host.rank
-                    or report.get('resource_id') != host.resource_id
-                    or type(report.get('uid')) is not int or report['uid'] != host.uid):
-                raise BindingRefused('authenticated host staging observation unavailable')
+            phase = "host_report"
             try:
-                if str(UUID(report.get('boot_id'))) != report['boot_id']:
-                    raise ValueError('boot id')
-            except (ValueError, TypeError, AttributeError):
-                raise BindingRefused('host boot identity unavailable') from None
-            previous = self.previous.get(host.rank)
-            if previous is not None and report['boot_id'] != previous['boot_id']:
-                raise BindingRefused('host boot changed under the staging intent')
-            self._root(host.model, report.get('model'), host.scratch_bytes)
-            self._root(host.runtime, report.get('runtime'), host.scratch_bytes)
-            if report['model'].get('uid') != host.uid or report['runtime'].get('uid') != host.uid:
-                raise BindingRefused('host reader identity differs between file observations')
+                if (not isinstance(report, dict) or report.get('rank') != host.rank
+                        or report.get('resource_id') != host.resource_id
+                        or type(report.get('uid')) is not int or report['uid'] != host.uid):
+                    raise BindingRefused('authenticated host staging observation unavailable')
+                phase = "boot"
+                try:
+                    if str(UUID(report.get('boot_id'))) != report['boot_id']:
+                        raise ValueError('boot id')
+                except (ValueError, TypeError, AttributeError):
+                    raise BindingRefused('host boot identity unavailable') from None
+                previous = self.previous.get(host.rank)
+                if previous is not None and report['boot_id'] != previous['boot_id']:
+                    raise BindingRefused('host boot changed under the staging intent')
+                phase = "model_files"
+                self._root(host.model, report.get('model'), host.scratch_bytes)
+                phase = "runtime_files"
+                self._root(host.runtime, report.get('runtime'), host.scratch_bytes)
+                phase = "reader_identity"
+                if report['model'].get('uid') != host.uid or report['runtime'].get('uid') != host.uid:
+                    raise BindingRefused('host reader identity differs between file observations')
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "EXO staging verification failed rank=%s phase=%s", host.rank, phase)
+                raise
         proof = VerifiedStaging(digest(asdict(plan)), plan.rank_manifest_sha256,
             self.runtime_sha256, self.policy_sha256,
             tuple((host.rank, host.resource_id) for host in policies), digest(reports),

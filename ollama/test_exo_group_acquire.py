@@ -203,6 +203,22 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.actor.wait()).phase, 'admitted')
         self.assertEqual(sum(isinstance(c, tuple) and c[0] == 'create' for c in self.calls), 1)
 
+    async def test_foreign_waiter_does_not_interrupt_serving(self):
+        self.group['phase'] = 'serving'
+        await self.start()
+        member = self.actor.authority.expected[0].binding
+        waiter = 'lease_0123456789abcdef'
+        event = {'type': 'lease.queued', 'target': waiter,
+                 'data': {'lease_id': waiter, 'resource_id': member.resource_id}}
+        self.assertFalse(self.actor.on_event(event))
+        self.assertTrue(self.actor.may_serve_requests())
+        self.actor.refresh()
+        self.assertTrue(self.actor.may_serve_requests())
+        self.assertEqual((await self.actor.wait()).phase, 'lease_serving')
+        event['target'] = event['data']['lease_id'] = member.lease_id
+        self.assertTrue(self.actor.on_event(event))
+        self.assertFalse(self.actor.may_serve_requests())
+
     async def test_fence_event_withdraws_before_io_and_never_rebinds_generation(self):
         await self.start()
         self.group.update(generation=2, phase='releasing')

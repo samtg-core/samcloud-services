@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -142,6 +143,14 @@ class GroupAcquisition:
             # Utilisation telemetry is not an ownership/capacity mutation.
             # The feed coalesces it as liveness, like a keepalive.
             return False
+        if kind == 'lease.queued' and self.may_serve_requests():
+            # A different request joining the queue cannot revoke an admitted
+            # exclusive member. The feed still schedules a metadata refresh.
+            lease_id = data.get('lease_id')
+            if (isinstance(lease_id, str) and re.fullmatch(r'lease_[0-9a-f]{16}', lease_id)
+                    and event.get('target') == lease_id
+                    and all(member.binding.lease_id != lease_id for member in self.authority.expected)):
+                return False
         # Other holders on a required host can unblock our ordinary queued
         # member, so these hints are relevant before our lease id is known too.
         self.wake()

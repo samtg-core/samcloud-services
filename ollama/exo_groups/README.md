@@ -885,6 +885,12 @@ the existing full private-state check and attributed core acknowledgement.
 Only then can ordinary provider capacity checks dispatch the queued inference.
 Assembly itself does not generate an answer or request another physical lease.
 
+The private runtime must provide `GET /leased/state` for this coordinator version.
+It reads one event snapshot with all instances, runners, downloads and task
+identities and statuses. Retained task inputs stay on the runtime, so a large
+prompt does not consume the 128 KiB metadata budget on the next idle check.
+An unavailable or oversized observation still withholds permission.
+
 An owned host POST is reconciled through status and receipts. A lost native
 instance acceptance is reconciled against the same contract and private state;
 neither starts nor instance creation are re-POSTed. A failed pass withdraws

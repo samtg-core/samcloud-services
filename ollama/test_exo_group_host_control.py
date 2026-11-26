@@ -657,6 +657,25 @@ class HostControlControls(IsolatedAsyncioTestCase):
             finally:
                 await client.close()
 
+    async def test_staging_read_reports_rank_phase_and_status_without_payload(self):
+        endpoint = HostEndpoint('slice', self.config.files.resource_id, self.config.files.uid,
+            'https://host.test', host_control.SOURCE_SHA256, configuration_sha256(self.config))
+        for response, phase, status in (
+            (httpx.Response(503, text='private body'), 'response_headers', 503),
+            (httpx.Response(200, content=b'private body', headers={
+                'content-type': 'application/json', 'cache-control': 'no-store'}), 'json', 200),
+        ):
+            client = HostControlClient(endpoint, lambda: 'Bearer synthetic-coordinator',
+                transport=httpx.MockTransport(lambda _: response))
+            try:
+                with self.assertLogs('ollama.exo_groups.host_http', 'WARNING') as captured:
+                    with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+                        await client.files(self.config.files)
+                self.assertEqual([record.getMessage() for record in captured.records], [
+                    f'EXO staging host read failed rank=slice phase={phase} status={status}'])
+            finally:
+                await client.close()
+
     async def test_client_has_no_payload_route_or_credential_escape(self):
         endpoint = HostEndpoint('slice', self.config.files.resource_id, self.config.files.uid,
             'https://host.test', host_control.SOURCE_SHA256, configuration_sha256(self.config))

@@ -252,8 +252,11 @@ class DeploymentControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.file_observations[-1]['model']['hashed_bytes'], 0)
         self.assertEqual(self.file_observations[-1]['runtime']['hashed_bytes'], 0)
         self.network = False
-        with self.assertRaisesRegex(ValueError, 'transport'):
-            await self.config.observe(compiled)
+        with self.assertLogs('ollama.exo_groups.deployment', 'WARNING') as captured:
+            with self.assertRaisesRegex(ValueError, 'transport'):
+                await self.config.observe(compiled)
+        self.assertEqual([record.getMessage() for record in captured.records], [
+            f'EXO host staging observation failed rank={self.config.files.rank} phase=transport'])
         self.assertEqual(len(self.transport_observations), 3)
         self.assertFalse(list(self.state_base.iterdir()))
 
