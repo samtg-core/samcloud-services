@@ -101,6 +101,25 @@ class Diagnostics(unittest.IsolatedAsyncioTestCase):
                              for frame in payloads for choice in frame.get("choices",[])))
         return payloads, failures[0]
 
+    def test_mlx_prefill_oom_fingerprint_is_diagnostic_only(self):
+        # Public build path in the 0.40.17 runtime message. The persisted
+        # Wafer observation records 244 bytes and the first 12 hash digits.
+        detail = ("mlx runner failed: panic: mlx: [METAL] Command buffer execution failed: "
+                  "Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory). "
+                  "at /Users/runner/work/ollama/ollama/build/darwin-sources/"
+                  "_deps/mlx-c-src/mlx/c/transforms.cpp:73")
+        body = json.dumps({"error": detail}).encode()
+        error = client._backend_error(500, "status", 0, body)
+        self.assertEqual(error.diagnostics()["detail_sha256"], "92e884a3ec12")
+        self.assertEqual(error.diagnostics()["detail_len"], 244)
+        self.assertEqual(error.subtype, "mlx_metal_oom")
+        self.assertFalse(error.completed_generation)
+        self.assertNotIn("/Users/", json.dumps(error.diagnostics()))
+        for other in (client._backend_error(500, "status", 0, body, truncated=True),
+                      client._backend_error(200, "in_stream", 1, detail, parsed=True)):
+            self.assertEqual(other.subtype, "unclassified")
+            self.assertFalse(other.completed_generation)
+
     async def test_status_known_prefix_is_safe(self):
         response = Response(500,json.dumps({"error":"error parsing tool call: "+CANARY}).encode())
         with self.assertLogs(level="WARNING") as logs:

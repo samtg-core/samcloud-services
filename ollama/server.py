@@ -62,7 +62,8 @@ from .manager import TranscriberBusy
 from .exo_client import ExoUnavailable, ExoRequestFailed, ExoStalled
 from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaRefused, OllamaBackendError
 from .samcloud import SamcloudClient
-from .ollama_client import OllamaClient
+from .ollama_client import OllamaClient, OllamaLoadExited
+from .inference_supervisor import BackendEnded
 from .llama_client import LlamaServerClient
 from .whisper_client import WhisperUnavailable, WhisperFailed
 
@@ -1345,6 +1346,10 @@ async def _load_model_direct(req: LoadRequest, *, queue_owned=False):
             "memory_mb": mm.memory_mb,
             "lease_id": mm.lease_id,
         }
+    except OllamaLoadExited as error:
+        if queue_owned:
+            raise BackendEnded(error.result) from None
+        raise
     except capacity.DeviceInUse as e:
         raise _device_in_use_503(e)
     except capacity.InsufficientCapacity as e:
@@ -1628,6 +1633,10 @@ async def _resolve_model(model_name: str, *, queue_owned: bool = False):
                 # Not a missing model — a capacity answer. Surface it, with the
                 # list of what does fit, instead of collapsing to "not pulled".
                 raise _capacity_503(e)
+            except OllamaLoadExited as error:
+                if queue_owned:
+                    raise BackendEnded(error.result) from None
+                raise
             except Exception as e:
                 log.error(f"Auto-load failed for {ollama_name}: {e}")
                 return None

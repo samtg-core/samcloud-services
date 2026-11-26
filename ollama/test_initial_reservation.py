@@ -389,6 +389,24 @@ class InitialReservation(unittest.TestCase):
         self.client.request_lease.assert_called_once()
         self.assertEqual(manager.models, {})
 
+    def test_load_child_exit_retires_exact_claim_after_provider_absence(self):
+        from .ollama_client import OllamaLoadExited
+        manager = object.__new__(ModelManager)
+        manager.models, manager.durable_inference, manager.initial_reservations = {}, True, self.store
+        manager.ollama = SimpleNamespace(memory_estimate_mb=Mock(return_value=100),
+            list_models=Mock(return_value=[{'name':'qwen'}]), list_running=Mock(return_value=[]),
+            load_model=Mock(side_effect=OllamaLoadExited()))
+        with patch.object(manager_module, 'RESOURCE_ID', 'gpu'), \
+             patch.object(manager_module, 'SERVICE_ID', 'service'), \
+             patch.object(manager_module, 'LEASE_TTL', 3600), \
+             patch.object(manager, 'refuse_if_device_in_use'), \
+             patch.object(manager_module.capacity, 'collect', return_value={'memory_available_mb':10000}):
+            with self.assertRaises(OllamaLoadExited):
+                manager.load_ollama_model('qwen')
+        self.assertEqual(self.open().snapshot('qwen')['state'], 'retired')
+        self.client.release_lease.assert_called_once_with('exact')
+        manager.ollama.load_model.assert_called_once()
+
     def test_reconcile_exact_absent_provider_retires_before_new_allocation(self):
         self.reserve()
         absent = Mock(return_value=True)
@@ -461,6 +479,9 @@ class InitialReservation(unittest.TestCase):
                 manager.reconcile_initial_reservation('qwen')
             self.client.release_lease.assert_not_called()
         manager.ollama.list_running.return_value = []
+        with self.assertRaises(Conflict):
+            manager.reconcile_initial_reservation('qwen', expected_lease='another-load')
+        self.client.release_lease.assert_not_called()
         manager.models['qwen'] = object()
         with self.assertRaises(Conflict):
             manager.reconcile_initial_reservation('qwen')

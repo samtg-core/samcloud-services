@@ -305,6 +305,23 @@ class GatewayLifetime(unittest.IsolatedAsyncioTestCase):
                     observer.cancel()
                 await asyncio.gather(observer, return_exceptions=True)
 
+    async def test_reconciled_cold_runner_exit_fails_once_and_next_call_can_run(self):
+        from .ollama_client import OllamaLoadExited
+        self.manager.models.clear()
+        with patch.object(server, '_resolve_model', REAL_RESOLVE_MODEL), \
+             patch.object(server, 'match_vlm_model', return_value=None), \
+             patch.object(self.backend, 'list_models', return_value=[{'name': 'qwen'}], create=True), \
+             patch.object(self.manager, 'load_ollama_model', side_effect=OllamaLoadExited()) as load:
+            for _ in range(2):
+                with self.assertRaises(HTTPException) as caught:
+                    await self.call()
+                self.assertEqual(caught.exception.detail['state'], 'failed')
+            load.assert_called_once_with('qwen')
+        self.manager.models['qwen'] = self.model
+        self.assertEqual(self.backend.entered, [])
+        self.backend.gate.set()
+        await self.call('next')
+
     async def test_cold_fit_refusal_waits_and_fresh_capacity_runs_same_execution(self):
         await self.check_cold_capacity_wait(server.capacity.InsufficientCapacity('synthetic fit'),
                                             'capacity_unavailable')
