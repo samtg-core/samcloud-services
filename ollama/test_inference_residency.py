@@ -125,6 +125,26 @@ class ResidencyHandover(unittest.TestCase):
         self.assertEqual(next_operation.predecessor,'lease-new')
         self.assertNotEqual(next_operation.id,operation.id)
 
+    def test_successor_history_survives_reopen_without_guessing_old_links(self):
+        self.register()
+        first = self.prepare()
+        self.store.accept(first, self.response())
+        # Simulate the database written by a version that kept only the current pointer.
+        self.store.db.execute('DROP TABLE residency_successors')
+        self.reopen()
+        self.register(id='lease-new')
+        second = self.prepare()
+        response = self.response(replaces_lease_id='lease-new', lease_id='lease-third')
+        self.store.accept(second, response)
+        self.store.accept(second, response)
+        self.reopen()
+        links = self.store.db.execute(
+            'SELECT r.predecessor, s.successor FROM residency_rollovers r '
+            'LEFT JOIN residency_successors s ON s.operation=r.id ORDER BY r.rowid'
+        ).fetchall()
+        self.assertEqual([tuple(link) for link in links],
+                         [('lease-old', None), ('lease-new', 'lease-third')])
+
     def test_ended_replacement_is_uncovered_not_backend_termination(self):
         for state in ('expired','released'):
             with self.subTest(state=state):
