@@ -179,6 +179,39 @@ def check_projection(
     return decision("authorized", "exact admitted member observed", deadline)
 
 
+def settlement_confirmed(expected, projection, *, require_fence=False, minimum_generation=None):
+    """True only for the exact released group and settled member allocation."""
+    binding = expected.binding
+    if not isinstance(projection, Mapping):
+        return False
+    observed = projection.get('member')
+    if not isinstance(observed, Mapping) or not isinstance(observed.get('lease'), Mapping):
+        return False
+    lease = observed['lease']
+    generation = projection.get('generation')
+    # A successor can settle the original member after fencing its coordinator.
+    return (
+        projection.get('group_id') == binding.group_id
+        and projection.get('owner_id') == binding.owner_id
+        and type(generation) is int
+        and generation >= binding.generation + int(require_fence)
+        and (minimum_generation is None or generation >= minimum_generation)
+        and projection.get('phase') == 'released'
+        and projection.get('release_requested') is True
+        and observed.get('resource_id') == binding.resource_id
+        and observed.get('lease_id') == binding.lease_id
+        and observed.get('cleanup_attested') is True
+        and observed.get('settlement_recorded') is True
+        and lease.get('id') == binding.lease_id
+        and lease.get('resource_id') == binding.resource_id
+        and lease.get('agent_id') == binding.owner_id
+        and lease.get('exclusive') is True
+        and lease.get('memory_mb') == expected.member.memory_mb
+        and (lease.get('status') in ('released', 'cancelled')
+             or (lease.get('status') == 'expired' and bool(lease.get('settled_at'))))
+    )
+
+
 def event_requires_read(expected: ExpectedMember, event: Mapping[str, Any]) -> bool:
     """A scoped event is a hint to reconcile, never permission or proof of exit."""
     data = event.get("data")
