@@ -22,6 +22,10 @@ class ReceiptUnavailable(ValueError):
     pass
 
 
+# Explicit metadata budgets: the observed closed setup has 10,168 small
+# authority events. Read its complete history, including every possible start;
+# do not truncate or reset it. The independent 8 MiB content bound is unchanged.
+MAX_EVENT_FILES=20000
 MAX_EVENT_BYTES=8*1024*1024
 
 
@@ -97,10 +101,30 @@ def _read(directory,name,uid,*,private=True):
 
 
 def collect_attempt(spec,*,boot_reader=boot_id):
+    return _collect_attempt(spec, boot_reader=boot_reader, historical=False)
+
+
+def collect_historical_attempt(spec,*,boot_reader=boot_id):
+    """Read old immutable metadata across reboot; never itself cleanup proof.
+
+    Normal live receipts continue requiring their original boot. Historical
+    callers must separately validate a normal prior cleanup or reboot evidence
+    AND exact plane settlement before authorizing any new preparation.
+    """
+    return _collect_attempt(spec, boot_reader=boot_reader, historical=True)
+
+
+def _collect_attempt(spec,*,boot_reader,historical):
+    current_boot=boot_reader()
+    try:
+        if str(UUID(current_boot)) != current_boot or UUID(current_boot).int == 0:
+            raise ValueError('invalid boot')
+    except (ValueError,TypeError,AttributeError):
+        raise ReceiptUnavailable('current kernel boot unavailable') from None
     keys={'resource_id','group_id','generation','lease_id','runtime_sha256','launch_sha256',
           'boot_id','uid','state_path','journal_path'}
     if (not isinstance(spec,dict) or set(spec)!=keys or type(spec['uid']) is not int
-            or spec['uid']!=os.getuid() or boot_reader()!=spec['boot_id']
+            or spec['uid']!=os.getuid() or (not historical and current_boot!=spec['boot_id'])
             or type(spec['generation']) is not int or spec['generation']<1
             or any(not isinstance(spec[k],str) or not re.fullmatch(r'[a-f0-9]{64}',spec[k])
                    for k in ('runtime_sha256','launch_sha256'))):
@@ -142,7 +166,7 @@ def collect_attempt(spec,*,boot_reader=boot_id):
             # and arbitrary files are never returned to the coordinator.
             names=os.listdir(state)
             events=[name for name in names if re.fullmatch(r'event-[0-9]{6}\.json',name)]
-            if len(events)>10000:
+            if len(events)>MAX_EVENT_FILES:
                 raise ReceiptUnavailable('host event index requires explicit reconciliation')
             started=[]
             event_bytes=0
@@ -172,9 +196,10 @@ def collect_attempt(spec,*,boot_reader=boot_id):
         if ((actual.st_dev,actual.st_ino)!=(db_before.st_dev,db_before.st_ino)
                 or _identity(db_before)!=_identity(os.fstat(database))
                 or _identity(parent_before)!=_identity(os.fstat(parent))
-                or _identity(before)!=_identity(os.fstat(state)) or boot_reader()!=spec['boot_id']):
+                or _identity(before)!=_identity(os.fstat(state)) or boot_reader()!=current_boot):
             raise ReceiptUnavailable('host attempt changed during observation')
-        return {'uid':spec['uid'],'boot_id':spec['boot_id'],'binding':spec,'phase':row['phase'],
+        return {**({'observed_host_boot':current_boot} if historical else {}),
+                'uid':spec['uid'],'boot_id':spec['boot_id'],'binding':spec,'phase':row['phase'],
                 'prepared':prepared,'started':started[0] if started else None,
                 'launch_intent':launch,'cleanup':cleanup}
     finally:
@@ -182,3 +207,42 @@ def collect_attempt(spec,*,boot_reader=boot_id):
             os.close(database)
         os.close(parent)
         os.close(state)
+
+
+def verify_prepare_only(session, uid, state, prefix, binding, boot):
+    """Check both known pre-registration exits after the exact lease was fenced."""
+    parent, name = session.rsplit('/', 1)
+    base = _directory(parent)
+    try:
+        if state == 'owned' and prefix == 'prepare':
+            try:
+                os.stat(name, dir_fd=base, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise ReceiptUnavailable('read-only preparation has local state')
+        if state != 'unconfirmed' or prefix is not None:
+            raise ReceiptUnavailable('unknown preparation boundary')
+        directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
+        try:
+            info = os.fstat(directory)
+            if info.st_uid != uid or info.st_mode & 0o077 or set(os.listdir(directory)) != {'deployment.json', 'attempt'}:
+                raise ReceiptUnavailable('unexpected files in incomplete preparation')
+            deployment = decode(_read(directory, 'deployment.json', uid))
+            attempt = os.open('attempt', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                info = os.fstat(attempt)
+                if info.st_uid != uid or info.st_mode & 0o077 or set(os.listdir(attempt)) != {'prepared.json'}:
+                    raise ReceiptUnavailable('attempt advanced beyond preparation')
+                prepared = decode(_read(attempt, 'prepared.json', uid))
+            finally:
+                os.close(attempt)
+            if (deployment.get('kind') != 'prepared_host_configuration' or deployment.get('host_boot') != boot
+                    or canonical(deployment.get('binding')) != canonical(binding['expected'])
+                    or deployment.get('runtime_sha256') != binding['runtime_sha256']
+                    or prepared.get('state') != 'prepared_not_launched'
+                    or canonical(prepared.get('binding')) != canonical(binding)):
+                raise ReceiptUnavailable('historical preparation binding differs')
+        finally:
+            os.close(directory)
+    finally:
+        os.close(base)

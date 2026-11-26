@@ -124,6 +124,11 @@ class Arbiter:
                 updated REAL NOT NULL,
                 UNIQUE(grant_id,client_key)
             );
+            -- State follows the potentially very large saved request. Without
+            -- a covering index, metadata-only scheduling/health reads traverse
+            -- historical request overflow pages on the asyncio event loop.
+            CREATE INDEX IF NOT EXISTS executions_state_grant_created
+                ON executions(state,grant_id,created);
             CREATE TABLE IF NOT EXISTS execution_events (
                 execution_id TEXT NOT NULL REFERENCES executions(id),
                 seq INTEGER NOT NULL,
@@ -435,6 +440,7 @@ class Arbiter:
                 (execution_id, after, call['state'] == 'complete', limit + 1)).fetchall()
             page = [dict(row) for row in rows[:limit]]
             return {'execution_id': execution_id, 'state': call['state'], 'events': page,
+                    'wait_reason': call['wait_reason'],
                     'next_cursor': page[-1]['seq'] if page else after, 'has_more': len(rows) > limit}
 
     def existing_execution(self, grant_id, owner, client_key, request, *, yield_grant_keys=()):
@@ -779,6 +785,58 @@ class Arbiter:
             self.db.execute("UPDATE grants SET state='queued',active_execution=NULL,updated=?,"
                 'queue_order=?,stint_started=NULL,idle_since=NULL WHERE id=?',
                 (now,link['parent_queue_order'] if link else self._next_order(),grant['id']))
+
+    MEMORY_WAIT = 'waiting for memory'
+    MAX_NAMED = 3
+
+    def memory_wait(self, resource, model, required_mb, holders=None, ahead=None):
+        """Tell a model's queued callers why they wait; required_mb=None clears it.
+
+        Trusted capacity source only. It holds no reservation and blocks
+        nothing: it names the wait on calls already queued, the same field a
+        caller reads on GET /v1/inference/executions/{id}. A deferral's own
+        reason is never overwritten or cleared here.
+
+        holders=None: the host cannot free the memory. A list: the registry is
+        short, and the model's lease waits in the resource queue. holders are
+        labels for the active leases (such as 'svc (32768 MB)'); ahead labels
+        the queued requests in front of it (such as 'svc (exclusive)'). Each is
+        named up to MAX_NAMED, then counted.
+        """
+        required(resource), required(model)
+        if required_mb is not None and (type(required_mb) is not int or required_mb <= 0):
+            raise ValueError('positive memory requirement required')
+        for labels in (holders, ahead):
+            if labels is not None and (not isinstance(labels, list)
+                                       or not all(isinstance(h, str) and h for h in labels)):
+                raise ValueError('holder labels required')
+        if ahead is not None and holders is None:
+            raise ValueError('queue position needs the holders')
+
+        def named(labels):
+            more = len(labels) - self.MAX_NAMED
+            return ', '.join(labels[:self.MAX_NAMED]) + (f' and {more} more' if more > 0 else '')
+
+        if required_mb is None:
+            reason = None
+        elif holders is None:
+            reason = (f'{self.MEMORY_WAIT}: needs {required_mb} MB this host cannot free yet; '
+                      'no reservation is held while it waits')
+        else:
+            why = []
+            if holders:
+                why.append(f'held now by {named(holders)}')
+            if ahead:
+                why.append(f'behind {len(ahead)} queued request{"s" if len(ahead) != 1 else ""} '
+                           f'({named(ahead)})')
+            reason = (f'{self.MEMORY_WAIT}: needs {required_mb} MB of {resource}, '
+                      f'{"; ".join(why) or "behind earlier requests"}; '
+                      'the model is in the resource queue and holds no memory while it waits')
+        with self.transaction():
+            self.db.execute("UPDATE executions SET wait_reason=?,updated=? WHERE state='queued' "
+                "AND wait_reason IS NOT ? AND (wait_reason IS NULL OR wait_reason LIKE ?) "
+                'AND grant_id IN (SELECT id FROM grants WHERE resource=? AND model=?)',
+                (reason, time.time(), reason, self.MEMORY_WAIT + '%', resource, model))
 
     def capacity_available(self, resource):
         """Trusted fresh permission only; never exposed as an owner API write."""

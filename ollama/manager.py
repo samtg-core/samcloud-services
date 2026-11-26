@@ -3223,7 +3223,7 @@ class ModelManager:
         )
 
     async def stats_loop(self):
-        """Push unified-memory stats to this box's SAMcloud resource every 15s.
+        """Sample local capacity every 15s and optionally publish device stats.
 
         Without it a resource shows `last_stats: never` and the dashboard reads
         NaN. The reading is the full `capacity.collect()`; `registry_payload()`
@@ -3239,11 +3239,11 @@ class ModelManager:
                     source.invalidate()
                     stats = await source_call(self._collect_stats)
                     await source.refresh(stats)
-                    if stats:
+                    if stats and config.PUBLISH_RESOURCE_STATS:
                         await source_call(self.sc.push_stats,RESOURCE_ID,capacity.registry_payload(stats))
                 else:
                     stats = self._collect_stats()
-                    if stats:
+                    if stats and config.PUBLISH_RESOURCE_STATS:
                         self.sc.push_stats(RESOURCE_ID, capacity.registry_payload(stats))
             except Exception as e:
                 log.warning(f"Stats push error: {e}")

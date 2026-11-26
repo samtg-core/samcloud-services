@@ -14,6 +14,30 @@ from .inference_events import source_call
 from .inference_bootstrap import cold_capacity
 
 
+def _label(row):
+    who = str(row.get('service_id') or row.get('agent_id') or 'another holder')
+    mb = row.get('memory_mb')
+    # An exclusive blocks the whole pool, whatever its size.
+    return (f'{who} (exclusive)' if row.get('exclusive') else
+            f'{who} ({mb} MB)' if type(mb) is int else who)
+
+
+def _holders(registry,own_service):
+    """Labels for what a queued lease of ours waits on: the active leases that
+    are not ours, and the queued requests ahead of our first place in line."""
+    active = [_label(row) for row in registry.get('leases') or []
+              if isinstance(row,dict) and row.get('status') == 'active'
+              and row.get('service_id') != own_service]
+    ahead = []
+    for row in registry.get('queue') or []:
+        if not isinstance(row,dict):
+            continue
+        if row.get('service_id') == own_service:
+            break
+        ahead.append(_label(row))
+    return active, ahead
+
+
 class ManagerCapacitySource:
     def __init__(self,runtime,binding,*,work_permitted=None):
         if work_permitted is not None and type(work_permitted) is not bool:
@@ -247,7 +271,13 @@ class ManagerCapacitySource:
                     # Run 3 keeps the existing demand-driven model estimate.
                     # A deployment may explicitly override it, but starting a
                     # queue does not require a fixed whole-machine reservation.
+                    from .manager import match_whisper_model
                     required = settings.reservation_mb.get(model)
+                    whisper = match_whisper_model(model)
+                    if whisper is not None:
+                        # The loader uses this same catalogue size. An explicit
+                        # reservation can raise it on both sides of the handoff.
+                        required = max(whisper[2], required or 0)
                     if required is None:
                         from .manager import VLM_MODELS
                         vlm=next((info for info in VLM_MODELS.values() if info['default']==model),None)
@@ -265,17 +295,36 @@ class ManagerCapacitySource:
                         required = initial.required_memory(model, required)
                         pending = self.runtime.queue.supervisor.journal.pending_models(resource)
                         saved = initial.snapshot(model)
+                        journal = self.runtime.queue.supervisor.journal
                         if model in pending:
                             if saved is not None and saved['state'] in ('unknown','handed_off','retiring'):
                                 handoff.begin()
                                 return
                             from .inference_arbiter import CapacityDeferred
                             from .manager import LEASE_TTL
+                            if saved is None or saved['state'] not in ('queued','reserved'):
+                                # No reservation for bytes this host cannot hold.
+                                # When the registry has room but the host does
+                                # not, a grant would be active bytes nobody uses
+                                # until its TTL. The call waits here instead and
+                                # says so. A registry that is short queues the
+                                # request below: a place in line holds no bytes.
+                                early = cold_capacity(resource,required,
+                                    physical=physical,registry=registry,work_permitted=True)
+                                if early['reason'] == 'physical_capacity':
+                                    journal.memory_wait(resource,model,required)
+                                    publish('unavailable','physical_capacity')
+                                    continue
                             try:
                                 owned = await source_call(lambda:initial.stage(model,
                                     resource=resource, service_id=initial.service,
                                     memory_mb=required, ttl_seconds=LEASE_TTL))
                             except CapacityDeferred:
+                                # The lease waits in the resource queue. Say
+                                # whose leases hold the memory, from the same
+                                # registry read; ours are not a reason.
+                                active,ahead = _holders(registry,initial.service)
+                                journal.memory_wait(resource,model,required,active,ahead)
                                 publish('unavailable','registry_queued')
                                 continue
                             if self.paused or epoch != self.epoch:
@@ -307,6 +356,20 @@ class ManagerCapacitySource:
                             return
                     verdict = cold_capacity(resource,required,
                         physical=physical,registry=registry,work_permitted=True)
+                    if handoff is not None:
+                        if (verdict['reason'] == 'physical_capacity' and model in pending
+                                and initial.snapshot(model)['state'] == 'reserved'):
+                            # Promoted, never handed to a provider, and the
+                            # host cannot hold it: give the exact lease back
+                            # now. The check above keeps it from re-staging
+                            # until the memory is there.
+                            await source_call(lambda:initial.release_unused(model))
+                            if self.paused or epoch != self.epoch:
+                                return
+                        if verdict['reason'] == 'physical_capacity':
+                            journal.memory_wait(resource,model,required)
+                        elif verdict['state'] == 'available':
+                            journal.memory_wait(resource,model,None)
                     if verdict['state'] == 'available':
                         self.observed_residency[resource,model] = (model,None,None)
                     publish(verdict['state'],verdict['reason'])

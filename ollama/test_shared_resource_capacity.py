@@ -67,6 +67,9 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         return {'id':'gpu','allocation_mode':'shared','expiry_policy':'hold',
             'available_memory_mb':max(0,100-sum(r['memory_mb'] for r in occupying)),
             'leases':[dict(r) for r in self.rows if r['status'] in ('active','queued')],
+            'queue':[{'lease_id':r['id'],'service_id':r.get('service_id'),'agent_id':r.get('agent_id'),
+                      'memory_mb':r.get('memory_mb'),'exclusive':bool(r.get('exclusive'))}
+                     for r in self.rows if r['status']=='queued'],
             'unsettled':[dict(r) for r in occupying if r['status']=='expired']}
 
     def request(self, **body):
@@ -225,6 +228,108 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         await self.source.refresh(self.physical)
         self.assertFalse(self.runtime.capacity.permitted('gpu'))
         self.assertEqual(self.initial.snapshot('qwen')['state'],'reserved')
+
+    def queued_call(self):
+        journal=self.runtime.queue.supervisor.journal
+        grant=journal.submit('requester','turn','gpu','qwen')
+        return journal.enqueue(grant['id'],'requester','call',{'messages':[]})
+
+    def wait_reason(self, execution):
+        return self.runtime.queue.supervisor.journal.execution(execution['id'],'requester')['wait_reason']
+
+    async def test_host_misfit_takes_no_lease_and_names_the_wait(self):
+        call=self.queued_call()
+        self.physical['memory_available_mb']=50  # registry has room, host does not
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.requests,[])
+        self.assertIsNone(self.initial.snapshot('qwen'))
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'],'physical_capacity')
+        self.assertTrue(self.wait_reason(call).startswith('waiting for memory: needs 100 MB'))
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.requests,[])  # waiting re-asks nothing
+        self.physical['memory_available_mb']=20000
+        await self.source.refresh(self.physical)
+        self.assertEqual(len(self.requests),1)
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'reserved')
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertIsNone(self.wait_reason(call))
+
+    async def test_promoted_reservation_the_host_cannot_hold_is_given_back(self):
+        unity=self.unity()
+        call=self.queued_call()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.rows[-1]['status'],'queued')  # a place in line, no bytes
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'],'registry_queued')
+        unity['status']='released'
+        self.rows[-1]['status']='active'
+        self.physical['memory_available_mb']=50
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.rows[-1]['status'],'released')
+        self.assertEqual(self.initial.snapshot('qwen')['state'],'retired')
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
+        self.assertTrue(self.wait_reason(call).startswith('waiting for memory'))
+        await self.source.refresh(self.physical)
+        self.assertEqual(len(self.requests),1)  # no re-stage while the host is short
+        self.physical['memory_available_mb']=20000
+        await self.source.refresh(self.physical)
+        self.assertEqual(len(self.requests),2)
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertIsNone(self.wait_reason(call))
+
+    async def test_a_registry_wait_names_who_holds_the_memory(self):
+        unity=self.unity()
+        call=self.queued_call()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.rows[-1]['status'],'queued')
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'],'registry_queued')
+        self.assertEqual(self.wait_reason(call),
+            'waiting for memory: needs 100 MB of gpu, held now by unity-service (100 MB); '
+            'the model is in the resource queue and holds no memory while it waits')
+        await self.source.refresh(self.physical)  # still queued: same words, no second lease
+        self.assertEqual(len(self.requests),1)
+        self.assertIn('held now by unity-service (100 MB)',self.wait_reason(call))
+        unity['status']='released'
+        self.rows[-1]['status']='active'
+        await self.source.refresh(self.physical)
+        self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.assertIsNone(self.wait_reason(call))
+
+    async def test_a_registry_wait_names_the_queue_ahead_and_exclusive_wins(self):
+        self.unity()
+        self.rows.append({'id':'excl','status':'queued','service_id':None,'agent_id':'user:36',
+            'resource_id':'gpu','exclusive':1,'memory_mb':50,'expires_at':'2099-01-01T00:00:00Z'})
+        call=self.queued_call()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.wait_reason(call),
+            'waiting for memory: needs 100 MB of gpu, held now by unity-service (100 MB); '
+            'behind 1 queued request (user:36 (exclusive)); '
+            'the model is in the resource queue and holds no memory while it waits')
+        await self.source.refresh(self.physical)  # our own place in line is not "ahead"
+        self.assertIn('behind 1 queued request (user:36 (exclusive))',self.wait_reason(call))
+
+    async def test_holder_labels_are_checked_capped_and_empty_means_earlier_requests(self):
+        call=self.queued_call()
+        journal=self.runtime.queue.supervisor.journal
+        journal.memory_wait('gpu','qwen',100,[],[])
+        self.assertIn('of gpu, behind earlier requests;',self.wait_reason(call))
+        journal.memory_wait('gpu','qwen',100,[f's{i} (1 MB)' for i in range(5)],['q (exclusive)','r'])
+        self.assertIn('held now by s0 (1 MB), s1 (1 MB), s2 (1 MB) and 2 more; '
+                      'behind 2 queued requests (q (exclusive), r);',self.wait_reason(call))
+        for bad in ('unity',[''],[None]):
+            with self.assertRaises(ValueError):
+                journal.memory_wait('gpu','qwen',100,bad)
+        with self.assertRaises(ValueError):
+            journal.memory_wait('gpu','qwen',100,None,['q'])
+
+    async def test_a_deferral_reason_is_not_overwritten_by_the_memory_note(self):
+        call=self.queued_call()
+        journal=self.runtime.queue.supervisor.journal
+        journal.db.execute("UPDATE executions SET wait_reason='capacity_unavailable' WHERE id=?",(call['id'],))
+        journal.memory_wait('gpu','qwen',100)
+        self.assertEqual(self.wait_reason(call),'capacity_unavailable')
+        journal.memory_wait('gpu','qwen',None)
+        self.assertEqual(self.wait_reason(call),'capacity_unavailable')
 
     async def test_resident_yields_then_actual_demand_requeues_behind_unity(self):
         lease=self.initial.reserve('qwen',resource='gpu',service_id='model-service',

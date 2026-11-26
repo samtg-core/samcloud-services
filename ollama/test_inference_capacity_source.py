@@ -106,6 +106,28 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
                 await self.source.refresh(self.physical)
                 self.assertFalse(self.runtime.capacity.permitted('gpu'))
 
+    async def test_cold_whisper_fit_matches_loader_and_respects_larger_budget(self):
+        from unittest.mock import Mock
+        from .manager import match_whisper_model
+
+        self.manager.ollama = SimpleNamespace(memory_estimate_mb=Mock(return_value=4000))
+        for model in ('whisper-small', 'whisper-large-v3-turbo'):
+            catalogue_mb = match_whisper_model(model)[2]
+            for override in (None, catalogue_mb - 100, catalogue_mb + 100):
+                with self.subTest(model=model, override=override):
+                    budgets = {} if override is None else {model: override}
+                    self.binding.models = {model: 'gpu'}
+                    self.runtime.settings = QueueSettings(
+                        Path(self.tmp.name) / 'queue.sqlite', {model: 'gpu'}, reservation_mb=budgets)
+                    required = max(catalogue_mb, override or 0)
+                    self.resource['available_memory_mb'] = required - 1
+                    await self.source.refresh(self.physical)
+                    self.assertEqual(self.source.last['gpu']['reason'], 'registry_capacity')
+                    self.resource['available_memory_mb'] = required
+                    await self.source.refresh(self.physical)
+                    self.assertTrue(self.runtime.capacity.permitted('gpu'))
+        self.manager.ollama.memory_estimate_mb.assert_not_called()
+
     async def test_existing_sizing_reads_model_estimate_without_allocating_or_loading(self):
         from unittest.mock import Mock
         self.runtime.settings = QueueSettings(Path(self.tmp.name)/'queue.sqlite',{'qwen':'gpu'})
@@ -341,6 +363,29 @@ class CapacitySource(unittest.IsolatedAsyncioTestCase):
             release.set()
         await self.source.drain()
         self.assertFalse(self.runtime.capacity.permitted('gpu'))
+
+
+class DeviceStatsPublication(unittest.IsolatedAsyncioTestCase):
+    async def test_local_measurement_continues_with_device_owned_telemetry(self):
+        from unittest.mock import AsyncMock, Mock, patch
+        from .manager import ModelManager
+
+        for queued in (True, False):
+            for publish in (True, False):
+                with self.subTest(queued=queued, publish=publish):
+                    reading = {'memory_available_mb': 20480, 'memory_used_mb': 9000}
+                    source = Mock(refresh=AsyncMock()) if queued else None
+                    manager = Mock(inference_capacity_source=source)
+                    manager._collect_stats.return_value = reading
+                    with patch('ollama.manager.config.PUBLISH_RESOURCE_STATS', publish), \
+                         patch('ollama.manager.asyncio.sleep', side_effect=asyncio.CancelledError):
+                        with self.assertRaises(asyncio.CancelledError):
+                            await ModelManager.stats_loop(manager)
+                    manager._collect_stats.assert_called_once_with()
+                    if queued:
+                        source.invalidate.assert_called_once_with()
+                        source.refresh.assert_awaited_once_with(reading)
+                    self.assertEqual(manager.sc.push_stats.call_count, int(publish))
 
 
 if __name__ == '__main__':

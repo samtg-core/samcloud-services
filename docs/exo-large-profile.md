@@ -57,3 +57,23 @@ returns the wrong context, and actual pinned EXO wire types showing every card
 uses the explicit window without modifying the parent. The live three-host
 numerical gate still uses its previous source/runtime until a new candidate is
 selected and qualified.
+
+## Cleanup after a host reboot
+
+A reboot is a distinct physical end, not a normal child exit. The live receipt
+collector still refuses a different boot. The read-only historical collector can
+recover the exact original prepared row, launch intent and child birth across a
+reboot; that metadata grants neither cleanup nor new-start authority.
+
+An explicit operator may record immutable `observed_rank_rebooted` evidence
+against independently pinned preparation and child identity. It requires a
+changed kernel boot after that child, a later group fence, complete process and
+reserved-socket observations, positive listener closure, and a rechecked boot.
+There is no invented exit code or comparison against a previous boot's device
+memory baseline. Recording the artifact does not release a lease.
+
+Before a later session, historical preparation validation separately requires
+that reboot evidence and the exact terminal member settlement from the plane.
+A reboot, a timer, or a cleanup file alone cannot admit a new session. All prior
+journal rows and once-only start decisions remain unchanged. Normal same-boot
+cleanup and never-started proof retain their existing validation paths.

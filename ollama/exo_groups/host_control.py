@@ -24,10 +24,12 @@ from ..inference_events import source_call
 
 from .deployment import HostDeployment
 from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
+from .reboot_cleanup import RebootExpectation, validate_reboot_cleanup
 from .http import decode_json
 from .member import ExpectedMember
 from .plan import LaunchBinding, MemberPlan
 from .prepare import canonical, digest
+from . import receipt_files
 from .host_receipts import observe_local_attempt
 from .token_receipts import collect_tokens
 from .rank_process import Listener, ProcessIdentity, RunBinding
@@ -36,7 +38,7 @@ from .load_capacity import metal_policy
 
 
 _SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'load_capacity.py', 'staging_files.py',
-                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py')
+                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py', 'reboot_cleanup.py')
 _SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
            for name in _SOURCE_NAMES}
 SOURCE_SHA256 = digest(_SOURCE)
@@ -63,6 +65,33 @@ def configuration_sha256(deployment):
     if deployment.served_context_length is not None:
         configuration['served_context_length'] = deployment.served_context_length
     return digest(configuration)
+
+
+async def _verify_settlement(reader, expected, *, require_fence, minimum_generation=None):
+    binding = expected.binding
+    projection = await reader.projection(expected)
+    observed = projection.get('member', {})
+    lease = observed.get('lease', {})
+    if (projection.get('group_id') != binding.group_id
+            or projection.get('owner_id') != binding.owner_id
+            # A later coordinator fence is expected after cleanup.
+            # This is historical settlement, never start authority.
+            or type(projection.get('generation')) is not int
+            or projection['generation'] < binding.generation + int(require_fence)
+            or minimum_generation is not None and projection['generation'] < minimum_generation
+            or projection.get('phase') != 'released'
+            or projection.get('release_requested') is not True
+            or observed.get('resource_id') != binding.resource_id
+            or observed.get('lease_id') != binding.lease_id
+            or observed.get('cleanup_attested') is not True
+            or observed.get('settlement_recorded') is not True
+            or lease.get('id') != binding.lease_id or lease.get('resource_id') != binding.resource_id
+            or lease.get('agent_id') != binding.owner_id
+            or lease.get('exclusive') is not True
+            or lease.get('memory_mb') != expected.member.memory_mb
+            or lease.get('status') not in ('released', 'cancelled', 'expired')
+            or lease.get('status') == 'expired' and not lease.get('settled_at')):
+        raise ValueError('prior exact member settlement is unconfirmed')
 
 
 class HostControl:
@@ -278,8 +307,9 @@ class HostControl:
         Read the old host-owned journal/immutable receipts and a fresh projection
         with this service's own credential. No history is removed or reset.
         A started attempt requires its independent child birth and launch
-        receipt, plus cleanup validated against that exact child. Incomplete,
-        rebooted or unknown attempts stay refused. Old work is never resumed.
+        receipt, plus cleanup validated against that exact child. A preparation
+        that stopped before registration requires a later fence, exact
+        settlement and a matching prepare-only boundary. A reboot requires independent kernel evidence.
         """
         journal = self.runtime.queue.supervisor.journal
         reader = self.deployment.host_reader(self.runtime)
@@ -288,8 +318,20 @@ class HostControl:
                 row = journal.db.execute('SELECT * FROM exo_host_rank_attempts '
                     'WHERE resource_id=? AND lease_id=?',
                     (prior['resource_id'], prior['lease_id'])).fetchone()
-                if (prior['state'] != 'returned' or row is None or row['phase'] not in ('launch_fenced', 'spawning')
-                        or row['boot_id'] != self.deployment.boot_id
+                if row is None:
+                    # A prepare control is persisted before local checks. A start
+                    # requires both a registered attempt and a distinct start control.
+                    binding = self._launch(decode_json(prior['identity_json']))
+                    compiled = self.deployment.compile(binding)
+                    if ((binding.resource_id, binding.lease_id) != (prior['resource_id'], prior['lease_id'])
+                            or journal.db.execute("SELECT 1 FROM exo_host_controls WHERE lease_id=? AND action<>'prepare'",
+                                                  (binding.lease_id,)).fetchone()):
+                        raise ValueError('prior command cannot be proven prepare-only')
+                    await _verify_settlement(reader, compiled.expected, require_fence=True)
+                    receipt_files.verify_prepare_only(str(compiled.session), self.deployment.files.uid,
+                        prior['state'], prior['prefix'], asdict(compiled.spec.binding), self.deployment.boot_id)
+                    continue
+                if (prior['state'] != 'returned' or row['phase'] not in ('launch_fenced', 'spawning')
                         or row['resource_id'] != self.deployment.files.resource_id
                         or not Path(row['state_path']).is_relative_to(self.deployment.state_base)):
                     raise ValueError('prior attempt is not a fixed completed session')
@@ -297,7 +339,9 @@ class HostControl:
                     'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
                 spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
                             journal_path=str(self.runtime.settings.journal))
-                report = await observe_local_attempt(spec)
+                report = await observe_local_attempt(spec, historical=True)
+                if report.get('observed_host_boot') != self.deployment.boot_id:
+                    raise ValueError('historical observation came from another current boot')
                 prepared = report['prepared']
                 data = prepared['binding']['expected']
                 launch = dict(data['binding'])
@@ -317,6 +361,7 @@ class HostControl:
                         or any(getattr(expected.binding, key) != row[key]
                                for key in ('resource_id', 'lease_id', 'group_id', 'generation'))):
                     raise ValueError('prior preparation identity changed')
+                prepared_pin = pin
                 started, launch = report['started'], report['launch_intent']
                 if started is None:
                     if report['phase'] != 'launch_fenced' or launch is not None:
@@ -344,29 +389,15 @@ class HostControl:
                 if (len(raw) != cleanup['bytes']
                         or hashlib.sha256(raw).hexdigest() != cleanup['sha256']):
                     raise ValueError('prior cleanup bytes changed')
-                validate_cleanup(raw, pin)
-                projection = await reader.projection(expected)
-                observed = projection.get('member', {})
-                lease = observed.get('lease', {})
-                if (projection.get('group_id') != run.group_id
-                        or projection.get('owner_id') != expected.binding.owner_id
-                        # A later coordinator fence is expected after cleanup.
-                        # This is historical settlement, never start authority.
-                        or type(projection.get('generation')) is not int
-                        or projection['generation'] < run.generation
-                        or projection.get('phase') != 'released'
-                        or projection.get('release_requested') is not True
-                        or observed.get('resource_id') != run.resource_id
-                        or observed.get('lease_id') != run.lease_id
-                        or observed.get('cleanup_attested') is not True
-                        or observed.get('settlement_recorded') is not True
-                        or lease.get('id') != run.lease_id or lease.get('resource_id') != run.resource_id
-                        or lease.get('agent_id') != expected.binding.owner_id
-                        or lease.get('exclusive') is not True
-                        or lease.get('memory_mb') != expected.member.memory_mb
-                        or lease.get('status') not in ('released', 'cancelled', 'expired')
-                        or lease.get('status') == 'expired' and not lease.get('settled_at')):
-                    raise ValueError('prior exact member settlement is unconfirmed')
+                reboot_fence = None
+                if decode_json(raw).get('kind') == 'observed_rank_rebooted':
+                    if started is None or self.deployment.boot_id == row['boot_id']:
+                        raise ValueError('reboot cleanup requires an old-boot started attempt')
+                    reboot_proof = validate_reboot_cleanup(raw, RebootExpectation(prepared_pin, pin))
+                    reboot_fence = reboot_proof['observation']['fenced_generation']
+                else:
+                    validate_cleanup(raw, pin)
+                await _verify_settlement(reader, expected, require_fence=False, minimum_generation=reboot_fence)
         except Exception:
             raise HTTPException(409, 'Prior host preparation needs exact cleanup and settlement') from None
         finally:
