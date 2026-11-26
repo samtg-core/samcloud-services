@@ -17,7 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from .alarm import ContinuousAuthorityAlarm
-from .member import check_projection, event_requires_read
+from .member import check_projection, event_requires_read, settlement_confirmed
 from .rank_lifecycle import RankLifecycle
 from .rank_process import ObservationUnknown
 from .http import bounded_json
@@ -130,6 +130,8 @@ class HostAuthorityAdapter:
         self.cursor = None
         self._stream_running = False
         self._closed = False
+        self.settlement_observed = False
+        self.before_settlement = lambda: None
         self.alarm = alarm_factory(
             asyncio.get_running_loop(), self._expired, self._alarm_failed
         )
@@ -174,6 +176,11 @@ class HostAuthorityAdapter:
             received = self.actor.monotonic()
             if epoch != self._epoch:
                 return None  # A later event/read must be reconciled first.
+            if (not self.settlement_observed and self.actor.receipt is not None
+                    and self.actor.phase == 'awaiting_settlement'
+                    and settlement_confirmed(self.actor.expected, projection)):
+                self.before_settlement()
+                self.settlement_observed = True
             candidate = check_projection(
                 self.actor.expected,
                 projection,
