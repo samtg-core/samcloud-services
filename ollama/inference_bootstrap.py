@@ -488,6 +488,7 @@ class QueueRuntime:
             raise RuntimeError('cold exact host runtime and own service identity required')
         record_host_attempt(owner, self.queue.supervisor.journal)
         self.host_rank, owner._queue_runtime = owner, self
+        owner.adapter.before_settlement = lambda: self.capacity_source.invalidate('exo_host_member_settled')
         self.capacity_source.invalidate('exo_host_rank_bound')
         return owner
 

@@ -26,7 +26,7 @@ from .deployment import HostDeployment
 from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
 from .reboot_cleanup import RebootExpectation, validate_reboot_cleanup
 from .http import decode_json
-from .member import ExpectedMember
+from .member import ExpectedMember, settlement_confirmed
 from .plan import LaunchBinding, MemberPlan
 from .prepare import canonical, digest
 from . import receipt_files
@@ -68,29 +68,9 @@ def configuration_sha256(deployment):
 
 
 async def _verify_settlement(reader, expected, *, require_fence, minimum_generation=None):
-    binding = expected.binding
     projection = await reader.projection(expected)
-    observed = projection.get('member', {})
-    lease = observed.get('lease', {})
-    if (projection.get('group_id') != binding.group_id
-            or projection.get('owner_id') != binding.owner_id
-            # A later coordinator fence is expected after cleanup.
-            # This is historical settlement, never start authority.
-            or type(projection.get('generation')) is not int
-            or projection['generation'] < binding.generation + int(require_fence)
-            or minimum_generation is not None and projection['generation'] < minimum_generation
-            or projection.get('phase') != 'released'
-            or projection.get('release_requested') is not True
-            or observed.get('resource_id') != binding.resource_id
-            or observed.get('lease_id') != binding.lease_id
-            or observed.get('cleanup_attested') is not True
-            or observed.get('settlement_recorded') is not True
-            or lease.get('id') != binding.lease_id or lease.get('resource_id') != binding.resource_id
-            or lease.get('agent_id') != binding.owner_id
-            or lease.get('exclusive') is not True
-            or lease.get('memory_mb') != expected.member.memory_mb
-            or lease.get('status') not in ('released', 'cancelled', 'expired')
-            or lease.get('status') == 'expired' and not lease.get('settled_at')):
+    if not settlement_confirmed(expected, projection, require_fence=require_fence,
+                                minimum_generation=minimum_generation):
         raise ValueError('prior exact member settlement is unconfirmed')
 
 

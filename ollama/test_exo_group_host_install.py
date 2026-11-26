@@ -82,6 +82,33 @@ class HostInstallControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.source.last_model[self.resource,'group-model']['state'],'available')
         self.manager.sc.request_lease.assert_not_called()
 
+    async def test_attested_release_returns_capacity_without_gateway_restart(self):
+        self.runtime.bind_exo_rank(self.owner)
+        await self.owner.start()
+        projection = self.parts.context.projection
+        projection.update(phase='released', release_requested=True, generation=2)
+        member = projection['member']
+        member.update(cleanup_attested=True, settlement_recorded=True)
+        member['lease']['status'] = 'released'
+        await self.owner.on_heartbeat()
+        self.assertTrue(self.owner.owns_local_capacity)  # Child still present.
+        self.parts.fixture.child.code = 0
+        self.parts.watches[0].notify()
+        self.assertIsNotNone(self.owner.actor.receipt)
+        member['settlement_recorded'] = False
+        await self.owner.on_heartbeat()
+        self.assertTrue(self.owner.owns_local_capacity)
+        member['settlement_recorded'] = True
+        await self.owner.on_heartbeat()
+        self.assertFalse(self.owner.owns_local_capacity)
+        self.assertFalse(self.owner.closed)  # Exact receipt remains observable.
+        self.assertEqual(self.source.last_model[self.resource, 'local']['reason'], 'exo_host_member_settled')
+        self.assertIsNone(self.source.permitted_model(self.resource, 'local'))
+        self.source.publish(self.resource, 'available', 'cold_fit', model='local')
+        self.assertEqual(self.source.last_model[self.resource, 'local']['reason'], 'cold_fit')
+        self.assertTrue(self.source.permitted_model(self.resource, 'local'))
+        self.assertFalse(await self.owner.may_admit())
+
     async def test_observed_cleanup_closes_host_role_but_requires_fresh_capacity(self):
         self.runtime.bind_exo_rank(self.owner)
         await self.owner.start()
