@@ -28,6 +28,7 @@ from .exo_groups.service import EXOService
 
 class HostControlControls(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.port_check = self.enterContext(patch.object(deployment, 'listener_closed', return_value=True))
         self.fixture = deployed.DeploymentControls()
         self.fixture.addAsyncCleanup = self.addAsyncCleanup
         await self.fixture.asyncSetUp()
@@ -132,6 +133,23 @@ class HostControlControls(IsolatedAsyncioTestCase):
         launch = json.loads(json.dumps(asdict(self.fixture.binding)))
         launch.update(changes)
         return await self.post('prepare', launch=launch, plan_sha256=digest(asdict(self.config.plan)))
+
+    async def test_occupied_discovery_port_retains_original_prepare_before_private_setup(self):
+        self.isolated_member_plane()
+        self.port_check.side_effect = lambda listener: listener.transport != 'udp'
+        report = (await self.prepare()).json()['report']
+        operation, = report['operations']
+        self.assertEqual((operation['state'], operation['prefix']), ('owned', 'prepare'))
+        self.assertEqual(list(self.fixture.state_base.iterdir()), [])
+        self.assertIsNone(getattr(self.runtime, 'host_rank', None))
+
+        self.port_check.side_effect = None
+        identity = run_identity(self.config.compile(self.fixture.binding).spec.binding)
+        report = (await self.post('status', identity=identity)).json()['report']
+        resumed, = report['operations']
+        self.assertEqual(resumed['request_id'], operation['request_id'])
+        self.assertEqual((report['phase'], resumed['state']), ('prepared', 'returned'))
+        self.assertFalse(report['launch_attempted'])
 
     async def test_prepare_reads_own_admitted_member_and_attaches_existing_feed_without_start(self):
         self.isolated_member_plane()
