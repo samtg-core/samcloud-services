@@ -795,7 +795,9 @@ class Arbiter:
         Trusted capacity source only. It holds no reservation and blocks
         nothing: it names the wait on calls already queued, the same field a
         caller reads on GET /v1/inference/executions/{id}. A deferral's own
-        reason is never overwritten or cleared here.
+        reason is never overwritten or cleared here. During an observation gap
+        the note reports the last confirmed wait until a fresh observation
+        for the model updates it or dispatch clears it.
 
         holders=None: the host cannot free the memory. A list: the registry is
         short, and the model's lease waits in the resource queue. holders are
@@ -843,7 +845,10 @@ class Arbiter:
         required(resource)
         with self.transaction():
             self.db.execute('DELETE FROM resource_waits WHERE resource=?',(resource,))
-            self.db.execute('UPDATE executions SET wait_reason=NULL WHERE state=\'queued\' '
+            # A resource wake releases a backend deferral. The capacity source
+            # clears each model's memory note when that particular model fits.
+            self.db.execute("UPDATE executions SET wait_reason=NULL WHERE state='queued' "
+                "AND wait_reason IN ('capacity_unavailable','work_mode') "
                 'AND grant_id IN (SELECT id FROM grants WHERE resource=?)',(resource,))
 
     def uncertain(self, execution_id):
