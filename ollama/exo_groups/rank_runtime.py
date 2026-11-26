@@ -229,6 +229,10 @@ class HostRankRuntime:
     def closed(self):
         return self._closed
 
+    @property
+    def owns_local_capacity(self):
+        return not self.closed and not self.adapter.settlement_observed
+
     async def start(self):
         async with self._lock:
             if self._closed or self.actor.launch_attempted:

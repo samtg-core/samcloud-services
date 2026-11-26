@@ -236,9 +236,18 @@ def verify_prepare_only(session, uid, state, prefix, binding, boot):
                 prepared = decode(_read(attempt, 'prepared.json', uid))
             finally:
                 os.close(attempt)
+            # This lease was fenced before registration. The host wrote these
+            # two records at preparation time. A successor may run a new build.
+            runtime = deployment.get('runtime_sha256')
+            if runtime != binding['runtime_sha256']:
+                argv = deployment.get('argv')
+                if (not isinstance(runtime, str) or not re.fullmatch('[a-f0-9]{64}', runtime)
+                        or not isinstance(argv, list) or not argv or not all(isinstance(v, str) for v in argv)
+                        or hashlib.sha256(json.dumps(argv).encode()).hexdigest() != prepared.get('argv_sha256')):
+                    raise ReceiptUnavailable('historical runtime or launch arguments differ')
+                binding = dict(binding, runtime_sha256=runtime)
             if (deployment.get('kind') != 'prepared_host_configuration' or deployment.get('host_boot') != boot
                     or canonical(deployment.get('binding')) != canonical(binding['expected'])
-                    or deployment.get('runtime_sha256') != binding['runtime_sha256']
                     or prepared.get('state') != 'prepared_not_launched'
                     or canonical(prepared.get('binding')) != canonical(binding)):
                 raise ReceiptUnavailable('historical preparation binding differs')

@@ -105,3 +105,42 @@ finally:c.close()
                 await observe_local_attempt(self.fixture.spec)
             self.assertNotIn('private diagnostic', str(caught.exception))
             self.assertEqual(runner.await_count, 1)
+
+
+class HistoricalPreparationControls(IsolatedAsyncioTestCase):
+    def test_fenced_prepare_uses_original_runtime_and_binds_both_records(self):
+        import hashlib
+        from pathlib import Path
+        import tempfile
+        from .exo_groups.receipt_files import verify_prepare_only
+
+        launch = dict(group_id='group-old', generation=1, lease_id='lease-old',
+                      resource_id='slice/gpu', rank_manifest_sha256='1' * 64)
+        expected = dict(binding=launch, member={'rank': 'slice'})
+        runtime = 'a' * 64
+        argv = ['/old/runtime/python', '/old/runtime/runner']
+        deployment = dict(kind='prepared_host_configuration', binding=expected,
+                          host_boot='boot', runtime_sha256=runtime, argv=argv)
+        prepared = dict(state='prepared_not_launched',
+                        binding=dict(launch, expected=expected, runtime_sha256=runtime),
+                        argv_sha256=hashlib.sha256(json.dumps(argv).encode()).hexdigest())
+        with tempfile.TemporaryDirectory() as temp:
+            session = Path(temp).resolve() / 'old'
+            attempt = session / 'attempt'
+            session.mkdir(mode=0o700)
+            attempt.mkdir(mode=0o700)
+            def save(path, value):
+                path.write_text(json.dumps(value))
+                path.chmod(0o600)
+            def check():
+                verify_prepare_only(str(session), os.getuid(), 'unconfirmed', None,
+                                    dict(launch, expected=expected, runtime_sha256='c' * 64), 'boot')
+            save(session / 'deployment.json', deployment)
+            save(attempt / 'prepared.json', prepared)
+            check()
+            for change in (dict(runtime_sha256='b' * 64), dict(argv=['another']),
+                           dict(host_boot='another'), dict(binding={})):
+                with self.subTest(change=change):
+                    save(session / 'deployment.json', deployment | change)
+                    with self.assertRaises(ReceiptUnavailable):
+                        check()

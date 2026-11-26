@@ -77,7 +77,7 @@ class ManagerCapacitySource:
         if provider is not None:
             return provider.permitted(resource)
         host_rank = getattr(self.runtime, 'host_rank', None)
-        if host_rank is not None and not host_rank.closed:
+        if host_rank is not None and host_rank.owns_local_capacity:
             return False  # Group-owned host cannot run an ordinary local load.
         boundaries = [provider.local_permission() for provider in self.external.values()]
         if any(value is False for value in boundaries):
@@ -108,7 +108,7 @@ class ManagerCapacitySource:
         value={'state':state,'reason':reason,'revision':self.revision}
         for name in names:
             selected_state, selected_reason = state, reason
-            if (state == 'available' and host_rank is not None and not host_rank.closed
+            if (state == 'available' and host_rank is not None and host_rank.owns_local_capacity
                     and name not in self.external):
                 selected_state, selected_reason = 'unavailable', 'exo_host_rank_owned'
             value={'state':selected_state,'reason':selected_reason,'revision':self.revision}
