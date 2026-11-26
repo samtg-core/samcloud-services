@@ -1,0 +1,26 @@
+{
+  "execution_path": "native-service",
+  "model": {"name": "inkling-2-mini:26b-a5b", "digest": "INSTALLED_DIGEST", "context_length": 65536},
+  "compute": {"device_id": "WAFER", "hardware": "MEASURED_HARDWARE"},
+  "client": {"kind": "hermes", "revision": "EXACT_NATIVE_REVISION", "queue_client_revision": "EXACT_CLIENT_REVISION"},
+  "identity": {"owner_id": "user:83", "username": "hermes-eval"},
+  "service_id": "WAFER/model-service",
+  "resource_id": "WAFER/MEMORY_POOL",
+  "gateway_revision": "EXACT_DEPLOYED_RELEASE",
+  "backend_revision": "EXACT_BACKEND_REVISION",
+  "tool_permissions": ["terminal", "file"],
+  "registry_url": "https://cloud.samtg.xyz/api/v1",
+  "model_inventory_url": "https://models-wafer.samtg.xyz/v1/models",
+  "token_file": "/PRIVATE/worker.token",
+  "profile_template": "/PRIVATE/verified-profile",
+  "command": ["/NATIVE/venv/bin/hermes", "chat", "-t", "terminal,file", "--query-file", "{request}"],
+  "environment": {
+    "HERMES_HOME": "{profile}",
+    "PYTHONPATH": "/PINNED/shared-queue-client",
+    "OPENAI_BASE_URL": "https://models-wafer.samtg.xyz/v1",
+     "SAMCLOUD_QUEUE_BASE_URL": "https://models-wafer.samtg.xyz/v1",
+    "HERMES_MODEL": "inkling-2-mini:26b-a5b"
+    },
+  "token_environment": ["OPENAI_API_KEY", "SAMCLOUD_QUEUE_API_KEY"],
+  "tasks": ["csv-rollup", "repair-windows", "evidence-audit"]
+}
