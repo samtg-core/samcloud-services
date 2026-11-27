@@ -74,6 +74,12 @@ def build_router(supervisor, resolve_model, validate_call):
         except ValueError:
             raise HTTPException(422, 'Invalid inference request') from None
 
+    def checked_owner(request, **selector):
+        identity = owner(request)
+        policy = getattr(request.state, 'inference_binding', None)
+        invoke(lambda: supervisor.journal.check_binding(identity, policy, **selector))
+        return identity
+
     @router.get('/capabilities')
     async def capabilities(request: Request):
         owner(request)
@@ -100,27 +106,26 @@ def build_router(supervisor, resolve_model, validate_call):
 
     @router.post('/yield')
     async def lifecycle_yield(body: LifecycleYield, request: Request):
-        return invoke(supervisor.yield_by_key, owner(request), body.grant_key, body.expected_call_key)
+        return invoke(supervisor.yield_by_key, checked_owner(request, client_key=body.grant_key), body.grant_key, body.expected_call_key)
 
     @router.get('/grants/{grant_id}')
     async def grant(grant_id: str, request: Request):
-        return invoke(supervisor.journal.get, grant_id, owner(request))
+        return invoke(supervisor.journal.get, grant_id, checked_owner(request, grant_id=grant_id))
 
     @router.post('/grants/{grant_id}/release')
     async def release(grant_id: str, request: Request):
-        return invoke(supervisor.release, grant_id, owner(request))
+        return invoke(supervisor.release, grant_id, checked_owner(request, grant_id=grant_id))
 
     @router.post('/grants/{grant_id}/yield')
     async def yield_grant(grant_id: str, request: Request):
-        return invoke(supervisor.yield_grant, grant_id, owner(request))
+        return invoke(supervisor.yield_grant, grant_id, checked_owner(request, grant_id=grant_id))
 
     @router.post('/grants/{grant_id}/executions', status_code=202)
     async def enqueue(grant_id: str, body: CallRequest, request: Request):
-        identity = owner(request)
+        identity = checked_owner(request, grant_id=grant_id)
+        for key in body.yield_grant_keys:
+            checked_owner(request, client_key=key)
         grant = invoke(supervisor.journal.get, grant_id, identity)
-        binding = getattr(request.state, 'inference_binding', None)
-        if binding and grant['model'] not in binding['models']:
-            raise HTTPException(403, 'Model outside inference binding')
         canonical = invoke(validate_call, grant['model'], body.request)
         call = invoke(lambda: supervisor.journal.enqueue(grant_id, identity, body.key, canonical,
                                                         yield_grant_keys=body.yield_grant_keys))
@@ -129,12 +134,13 @@ def build_router(supervisor, resolve_model, validate_call):
 
     @router.get('/executions/{execution_id}')
     async def execution(execution_id: str, request: Request):
-        return public_call(invoke(supervisor.journal.execution, execution_id, owner(request)))
+        identity = checked_owner(request, execution_id=execution_id)
+        return public_call(invoke(supervisor.journal.execution, execution_id, identity))
 
     @router.get('/executions/{execution_id}/events')
     async def events(execution_id: str, request: Request,
                      after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=1000)):
-        identity = owner(request)
+        identity = checked_owner(request, execution_id=execution_id)
         return invoke(lambda: supervisor.journal.events(execution_id, identity, after=after, limit=limit))
 
     return router

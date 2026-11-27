@@ -402,6 +402,25 @@ class Arbiter:
                                  runtime_binding['binding']))
             return dict(self._owned(grant_id, owner))
 
+    def check_binding(self, owner, policy, *, grant_id=None, client_key=None, execution_id=None):
+        """Check immutable journal attribution before serving a caller-facing operation."""
+        selectors = [('g.id', grant_id), ('g.client_key', client_key), ('e.id', execution_id)]
+        supplied = [(field, value) for field, value in selectors if value is not None]
+        if len(supplied) != 1:
+            raise ValueError('Expected exactly one grant selector')
+        field, value = supplied[0]
+        join = 'JOIN executions e ON e.grant_id=g.id' if execution_id is not None else ''
+        row = self.db.execute(f"""SELECT g.model, b.issuer, b.subject_id, b.binding FROM grants g
+            {join} LEFT JOIN inference_grant_bindings b ON b.grant_id=g.id
+            WHERE g.owner=? AND {field}=?""", (owner, value)).fetchone()
+        if row is None and client_key is not None:
+            return  # An unsubmitted parent is valid for the existing dependency protocol.
+        if row is None or any(row[k] != (policy[k] if policy else None)
+                              for k in ('issuer', 'subject_id', 'binding')):
+            raise NotFound()
+        if policy and row['model'] not in policy['models']:
+            raise NotFound()
+
     def get(self, grant_id, owner):
         return dict(self._owned(grant_id, owner))
 

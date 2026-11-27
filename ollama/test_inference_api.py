@@ -111,6 +111,13 @@ class DurableAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tuple(saved), ('user:100', 'user:200', 'attempt-one'))
             again = await self.client.post(path, json=payload, headers=headers)
             self.assertEqual(again.json()['id'], row['id'])
+            other_file = Path(self.temp.name) / 'attempt-two.json'
+            other_file.write_text(json.dumps(policy))
+            other_headers = {'X-Samcloud-Inference-Binding': 'attempt-two'}
+            grant_path = path + '/' + row['id']
+            self.assertEqual((await self.client.get(grant_path, headers=headers)).status_code, 200)
+            self.assertEqual((await self.client.get(grant_path, headers=other_headers)).status_code, 404)
+            self.assertEqual((await self.client.post(grant_path + '/release', headers=other_headers)).status_code, 404)
             ordinary = await self.client.get(path + '/' + row['id'])
             self.assertEqual(ordinary.status_code, 404)
             unknown = await self.client.get('/v1/inference/future-api', headers=headers)
