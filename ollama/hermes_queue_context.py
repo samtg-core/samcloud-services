@@ -29,6 +29,8 @@ def configured_options():
     options.update(model=model.get('default', ''), provider=model.get('provider', ''),
         base_url=model.get('base_url', ''), config_context_length=model.get('context_length'),
         custom_providers=deepcopy(cfg.get('custom_providers')))
+    if model.get('max_tokens') is not None:
+        options['max_tokens'] = model['max_tokens']
     return options
 
 

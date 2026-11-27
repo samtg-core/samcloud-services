@@ -30,6 +30,14 @@ def _json(raw):
     return result
 
 
+# Exact diagnostic emitted by the pinned native served-context guard before prefill.
+_NATIVE_CONTEXT_ERROR = 'request token budget exceeds the configured served context'
+
+
+def _context_rejected(error):
+    return isinstance(error, dict) and error.get('message') == _NATIVE_CONTEXT_ERROR
+
+
 def _choice(value, command, model, *, streamed):
     if value.get('id') != command or value.get('model') != model:
         raise ValueError('private response changed command or model')
@@ -52,7 +60,7 @@ class EXOCapture(StreamCapture):
     def __init__(self, journal, execution_id, command, model):
         super().__init__(journal, execution_id, 'text/event-stream')
         self.command, self.model = command, model
-        self.done = self.failed = False
+        self.done = self.failed = self.context_rejected = False
 
     def feed(self, chunk):
         super().feed(chunk)
@@ -74,12 +82,13 @@ class EXOCapture(StreamCapture):
             self.done = True
         else:
             value = _json(payload)
+            if self.saw_terminal:
+                raise ValueError('private output follows terminal result')
             if isinstance(value.get('error'), dict):
+                self.context_rejected = _context_rejected(value['error'])
                 # Never expose/cache arbitrary backend diagnostics as output.
                 self.failed = self.saw_terminal = self.provisional = True
                 return
-            if self.saw_terminal:
-                raise ValueError('private output follows terminal result')
             finish = _choice(value, self.command, self.model, streamed=True)
             if finish == 'error':
                 self.failed = self.saw_terminal = self.provisional = True
@@ -157,6 +166,7 @@ class EXOBackend:
                 if not interrupted:
                     capture.finish()
                 failed = capture.failed
+                context_rejected = capture.context_rejected
                 result = {'kind': 'stream', 'event_count': capture.count, 'media_type': media}
             else:
                 if media != 'application/json':
@@ -167,6 +177,7 @@ class EXOBackend:
                         raise ValueError('private response exceeds bound')
                     raw.extend(chunk)
                 value = _json(raw)
+                context_rejected = _context_rejected(value.get('error'))
                 failed = isinstance(value.get('error'), dict)
                 if not failed:
                     failed = _choice(value, command, self.actor.plan.model_id, streamed=False) == 'error'
@@ -190,6 +201,9 @@ class EXOBackend:
         # is independent: a later authority invalidation must not relabel this
         # completed result as a backend failure. Provider permission still
         # blocks new dispatch; physical ownership still needs exact cleanup.
+        if context_rejected:
+            raise BackendEnded({'kind': 'error', 'status': 400, 'code': 'context_length_exceeded',
+                                'detail': 'Requested prompt and output exceed the served context length'})
         if failed:
             raise BackendEnded({'kind': 'error', 'status': 502, 'code': 'exo_backend_failed',
                                 'detail': 'EXO generation ended without a usable result'})
