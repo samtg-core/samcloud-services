@@ -137,6 +137,10 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
         if mode == 'error':
             self.mode = 'success'
             parts = [b'data: {"error":{"message":"private diagnostic"}}\n\n', b'data: [DONE]\n\n']
+        elif mode == 'context':
+            error = {'error': {'type': 'InternalServerError', 'code': 500,
+                               'message': 'request token budget exceeds the configured served context'}}
+            parts = [('data: ' + json.dumps(error) + '\n\n').encode(), b'data: [DONE]\n\n']
         elif mode == 'empty':
             parts = []
         elif mode == 'done_only':
@@ -204,6 +208,16 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.journal.execution(second['id'], 'caller')['state'], 'complete')
         self.assertEqual(self.posts, 2)
         self.assertNotIn('private diagnostic', json.dumps(self.journal.events(first['id'], 'caller')))
+
+    async def test_context_rejection_reaches_caller_after_exact_end(self):
+        self.mode = 'context'
+        call = self.enqueue()
+        row = await self.run_call(call)
+        self.assertEqual(row['state'], 'failed')
+        self.assertIsNotNone(self.bindings.snapshot(call['id'])['end'])
+        result = json.loads(row['result'])
+        self.assertEqual((result['status'], result['code']), (400, 'context_length_exceeded'))
+        self.assertEqual(self.posts, 1)
 
     async def test_ambiguous_streams_keep_claim_and_never_repost(self):
         for mode in ('empty', 'reset', 'done_only', 'no_done', 'wrong_model', 'wrong_command'):

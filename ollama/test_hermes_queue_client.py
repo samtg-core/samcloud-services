@@ -1283,6 +1283,21 @@ def test_discovered_context_engine_preserves_current_qwen_policy(
         db.close()
 
 
+def test_queue_context_reserves_the_profile_output_budget(tmp_path, monkeypatch, queued_profile):
+    from ollama.hermes_queue_context import QueuedContextCompressor
+    from hermes_cli import config
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: {
+        'model': {'default': 'qwen', 'context_length': 65536, 'max_tokens': 16384},
+        'compression': {'threshold': 0.75},
+    })
+    engine = QueuedContextCompressor()
+    for selected in (engine, engine.clone_for_agent()):
+        selected.update_model(model='qwen', context_length=65536)
+        assert selected.max_tokens == 16384
+        assert selected.threshold_tokens < 65536 - 16384
+        assert selected.should_compress(48890)
+
+
 @pytest.mark.parametrize('native_plugins', [False, True])
 @pytest.mark.parametrize('interrupt', [False, True])
 def test_stock_compaction_waits_and_persists_without_losing_later_input(
