@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ..inference_supervisor import exception_shape
 from ..inference_arbiter import NotFound
 from .intents import GroupIntents
 from .plan import GroupPlan, bind_admitted_group, check_rank_manifest
@@ -223,7 +225,16 @@ class GroupAcquisition:
                 self._invalidate()
                 self._disarm_renewal()
                 reason = 'staging_unconfirmed' if isinstance(error, StagingUnavailable) else 'reconciliation_required'
+                previous = self.report
                 self._publish(AcquisitionReport('unknown', reason, self._known_group()))
+                if (previous.phase, previous.reason) != ('unknown', reason):
+                    try:
+                        logging.getLogger(__name__).warning(
+                            'EXO reconciliation failed group=%s previous=%s reason=%s '
+                            'epoch_changed=%s shape=%s', self.report.group_id, previous.phase,
+                            reason, self._epoch != epoch, exception_shape(error))
+                    except Exception:
+                        pass  # Diagnostics must preserve the acquisition outcome.
                 if isinstance(error, asyncio.CancelledError):
                     raise
             # Only a new demand/event requests another read. An error or elapsed
