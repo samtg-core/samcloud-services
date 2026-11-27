@@ -22,7 +22,7 @@ from .http import credential_headers, decode_json
 from .member import ExpectedMember
 from .prepare import canonical, digest
 from .rank_process import RunBinding
-from .staging import HostFiles
+from .staging import HostFiles, HostFileGatewayUnavailable
 
 
 class HostControlUnavailable(RuntimeError):
@@ -99,6 +99,8 @@ class HostControlClient:
                 logging.getLogger(__name__).warning(
                     "EXO staging host read failed rank=%s phase=%s status=%s",
                     self.endpoint.rank, phase, status)
+                if phase == 'response_headers' and status in (502, 504):
+                    raise HostFileGatewayUnavailable('host file report unavailable at gateway') from None
             raise HostControlUnavailable('exact host observation or control outcome unavailable') from None
 
     async def files(self, policy, _previous=None):

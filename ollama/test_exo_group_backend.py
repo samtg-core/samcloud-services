@@ -22,6 +22,7 @@ from .exo_groups.intents import GroupIntents
 from .exo_groups.plan import GroupPlan, HOST_RESOURCES
 from .exo_groups.prepare import canonical, digest
 from .exo_groups.private import PrivateEXO
+from .exo_groups.staging import HostFileGatewayUnavailable
 from .inference_supervisor import Supervisor
 
 
@@ -244,6 +245,20 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.journal.events(call['id'], 'caller')['events']), 1)
                 self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
                 self.journal.finish(call['id'], {'kind': 'error', 'status': 502}, failed=True)
+
+    async def test_host_file_gateway_failure_before_dispatch_preserves_original_call(self):
+        async def unavailable():
+            raise HostFileGatewayUnavailable()
+        self.backend.verify_runtime = unavailable
+        call = self.enqueue()
+        row = await self.run_call(call)
+        self.assertEqual(row['state'], 'queued')
+        self.assertFalse(self.requests)
+        self.assertIsNone(self.supervisor.pump(HOST_RESOURCES['slice']))
+        self.backend.verify_runtime = self.verify_runtime
+        self.journal.capacity_available(HOST_RESOURCES['slice'])
+        self.assertEqual((await self.run_call(call))['state'], 'complete')
+        self.assertEqual(self.posts, 1)
 
     async def test_event_cursor_loss_before_post_defers_without_a_new_submission(self):
         self.enabled = False

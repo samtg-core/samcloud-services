@@ -9,7 +9,10 @@ import unittest
 from uuid import UUID
 
 from . import test_exo_group_plan as fixtures
-from .exo_groups.staging import StagingVerifier
+import httpx
+
+from .exo_groups.host_http import HostControlClient, HostEndpoint
+from .exo_groups.staging import StagingVerifier, HostFileGatewayUnavailable
 from .exo_groups.staging_files import collect_host
 from .exo_groups.plan import BindingRefused, GroupPlan
 from .exo_groups.prepare import canonical, digest
@@ -93,6 +96,32 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         await self.verifier.verify(self.plan, self.manifest)
         self.assertTrue(all(item['model']['hashed_bytes'] == item['runtime']['hashed_bytes'] == 0
                             for item in self.reports))
+
+    async def test_files_gateway_errors_defer_only_when_other_reports_validate(self):
+        original = self.verifier.reader
+        missing = self.verifier.policies[0]
+        endpoint = HostEndpoint(missing.rank, missing.resource_id, missing.uid,
+                                'https://host.example', 'a' * 64, 'b' * 64)
+        status = 502
+        client = HostControlClient(endpoint, lambda: 'Bearer fixture',
+            transport=httpx.MockTransport(lambda req: httpx.Response(status)))
+        self.addAsyncCleanup(client.close)
+        async def reader(host, previous):
+            if host == missing:
+                return await client.files(host, previous)
+            return await original(host, previous)
+        self.verifier.reader = reader
+        for status in (502, 504, 403, 200):
+            with self.subTest(status=status), self.assertRaises(BindingRefused) as failure:
+                await self.verifier.verify(self.plan, self.manifest)
+            self.assertEqual(isinstance(failure.exception, HostFileGatewayUnavailable),
+                             status in (502, 504))
+        status = 502
+        self.local = False
+        with self.assertRaises(BindingRefused) as failure:
+            await self.verifier.verify(self.plan, self.manifest)
+        self.assertNotIsInstance(failure.exception, HostFileGatewayUnavailable)
+        self.assertFalse(self.verifier.previous)
 
     async def test_saved_proof_and_hash_cache_detach_from_reader_owned_reports(self):
         proof = await self.verifier.verify(self.plan, self.manifest)
