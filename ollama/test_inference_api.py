@@ -92,6 +92,47 @@ class DurableAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(self.entered, [])
 
+    async def test_scoped_runtime_attribution_and_retirement(self):
+        policy = dict(issuer='user:100', subject_id='user:200', subject='eval-one', models=['qwen'])
+        file = Path(self.temp.name) / 'attempt-one.json'
+        file.write_text(json.dumps(policy))
+        headers = {'X-Samcloud-Inference-Binding': 'attempt-one'}
+        identity = {'username': 'runtime', 'owner_id': policy['issuer'], 'valid': True}
+        payload = dict(model='qwen', key='first')
+        with patch.dict('os.environ', SC_INFERENCE_BINDINGS_DIRECTORY=self.temp.name), patch.object(
+                server.SamcloudAuthMiddleware, '_get_cached', return_value=identity):
+            path = '/v1/inference/grants'
+            created = await self.client.post(path, json=payload, headers=headers)
+            self.assertEqual(created.status_code, 202)
+            row = created.json()
+            self.assertEqual((row['owner'], row['runtime_binding']['subject_id']), ('eval-one', 'user:200'))
+            saved = self.s.journal.db.execute('SELECT issuer, subject_id, binding FROM inference_grant_bindings '
+                                              'WHERE grant_id=?', (row['id'],)).fetchone()
+            self.assertEqual(tuple(saved), ('user:100', 'user:200', 'attempt-one'))
+            again = await self.client.post(path, json=payload, headers=headers)
+            self.assertEqual(again.json()['id'], row['id'])
+            other_file = Path(self.temp.name) / 'attempt-two.json'
+            other_file.write_text(json.dumps(policy))
+            other_headers = {'X-Samcloud-Inference-Binding': 'attempt-two'}
+            grant_path = path + '/' + row['id']
+            self.assertEqual((await self.client.get(grant_path, headers=headers)).status_code, 200)
+            self.assertEqual((await self.client.get(grant_path, headers=other_headers)).status_code, 404)
+            self.assertEqual((await self.client.post(grant_path + '/release', headers=other_headers)).status_code, 404)
+            ordinary = await self.client.get(path + '/' + row['id'])
+            self.assertEqual(ordinary.status_code, 404)
+            unknown = await self.client.get('/v1/inference/future-api', headers=headers)
+            self.assertEqual(unknown.status_code, 403)
+            file.write_text(json.dumps(dict(policy, issuer='user:101')))
+            denied = await self.client.post(path, json=payload, headers=headers)
+            self.assertEqual(denied.status_code, 403)
+            file.write_text(json.dumps(dict(policy, models=['different'])))
+            denied = await self.client.post(path, json=payload, headers=headers)
+            self.assertEqual(denied.status_code, 403)
+            file.unlink()
+            retired = await self.client.get(path + '/' + row['id'], headers=headers)
+            self.assertEqual(retired.status_code, 403)
+            self.assertEqual(self.entered, [])
+
     async def test_http_submit_poll_reconnect_and_exclusive_handoff(self):
         first = await self.grant()
         a = await self.call(first)

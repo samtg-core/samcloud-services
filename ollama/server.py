@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 
+from . import inference_bindings
 from . import capacity
 from . import config
 from . import prompt_size
@@ -291,8 +292,19 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
         key = self._cache_key(token)
         self._cache[key] = (time.time() + AUTH_CACHE_TTL, identity)
 
+    async def _authorized(self, request, identity, call_next):
+        request.state.caller = identity
+        try:
+            request.state.inference_binding = inference_bindings.resolve(
+                request, os.environ.get('SC_INFERENCE_BINDINGS_DIRECTORY'))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        return await call_next(request)
+
     async def dispatch(self, request: Request, call_next):
         if not AUTH_ENABLED or request.url.path in AUTH_EXEMPT_PATHS:
+            if inference_bindings.HEADER in request.headers:
+                return JSONResponse(status_code=403, content={'detail': 'Verified runtime required'})
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
@@ -305,17 +317,20 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
         token = auth_header  # Forward full "Bearer xxx" header
 
         # Check cache
-        cached = self._get_cached(token)
+        bound = inference_bindings.HEADER in request.headers
+        if bound and httpx.URL(self.verify_url).scheme != "https":
+            return JSONResponse(status_code=503, content={"detail": "Secure runtime verification unavailable"})
+        cache_key = "bound " + token if bound else token
+        cached = self._get_cached(cache_key)
         if cached:
-            request.state.caller = cached
-            return await call_next(request)
+            return await self._authorized(request, cached, call_next)
 
         # Verify with SAMcloud
         try:
             url = self.verify_url
             if self.required_scope:
                 url += f"?scope={self.required_scope}"
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            async with httpx.AsyncClient(verify=bound, timeout=10) as client:
                 resp = await client.get(url, headers={"Authorization": token})
         except Exception as e:
             log.warning(f"SAMcloud verify failed: {e}")
@@ -335,11 +350,10 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
             )
 
         identity = resp.json()
-        self._set_cached(token, identity)
-        request.state.caller = identity
+        self._set_cached(cache_key, identity)
         log.info(f"Verified caller: {identity.get('username')} ({identity.get('role')})")
 
-        return await call_next(request)
+        return await self._authorized(request, identity, call_next)
 
 mgr: Optional[ModelManager] = None
 
