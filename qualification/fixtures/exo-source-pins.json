@@ -1,0 +1,28 @@
+{
+  "base": "21a54c5",
+  "candidate_installed": false,
+  "files": {
+    "src/exo/api/types/api.py": "a3155fb6b97510790b323af2412889efc545b03b554a8e196951e986d95988ab",
+    "src/exo/shared/models/model_cards.py": "a76b368dba20ba716d34a337d387db23572281db6be83bf649e5941deea867d1",
+    "src/exo/shared/types/common.py": "8136fdf96eb2c701981a0b7aed307dca171706522d295521012aad83b3f5448f",
+    "src/exo/shared/types/memory.py": "45c43d93e33ac9e3a9a2ee4240cbc718c7a657da53f4f56a418d08188a601825",
+    "src/exo/shared/types/worker/instances.py": "6ae662868208a699b72d09e9c2adc532a1aefc3a1f62bf644202f79113bb1106",
+    "src/exo/shared/types/worker/runners.py": "e81007a952ff17a8ac17bd36001e49b260349f90da4f0d00ef45a96b7a5669f2",
+    "src/exo/shared/types/worker/shards.py": "0a61e63845613850363ae505795b0fc541169bd062f40e0f0e5cbfc4a147b01b",
+    "src/exo/utils/pydantic_ext.py": "7bb79afe468b865a1b0c6b449b95af6d248028582ef6bcbf1bc1214ddb81ed27",
+    "src/exo/utils/leased_runtime.py": "7f40c173a3b34ed7dc86cd0f5945f48bef97bb3c354f8f6623a8341c38cc1b7b",
+    "src/exo/utils/leased_paths.py": "3e06cf6e58189dcbc39160e43a64631c2cac1c946bfd7348a35d11db6748ee36",
+    "src/exo/shared/types/state.py": "99e0be503c2e34bcef7516635898e34ffc3106d1a1a019cf49aae7ec6fcc6c09",
+    "src/exo/shared/types/tasks.py": "0fdc313b648d17cc8ea52813db62a2cb1d84918f578f727c1b0d46c262a2d3ff",
+    "src/exo/shared/types/worker/downloads.py": "7953c94edc4898ec42cad1aae3f5d9a04718bb36b971737f32437a4359a070ea",
+    "src/exo/shared/constants.py": "b18e90d8fd63c7a50803f281074a2025d49163493ede8f829212cd54ac269ce5",
+    "src/exo/shared/apply.py": "0fc6233a187cd9be8186603154b10fea7dbd01d155cb5058377eee3be73284b2",
+    "src/exo/api/main.py": "168a162629d3adc1eaf833b11c41eb278a985f872b1cd54f4597366d48b0592d",
+    "src/exo/api/adapters/chat_completions.py": "8ab7d27d8cb241eced033d81b503bff4f88c4ba22b887cd89037936409f4d30e",
+    "src/exo/utils/leased_commands.py": "96f64895e671ee2cc41a158186158ad1f0302f28a16f73149187e04ab73cdbb8",
+    "src/exo/shared/types/events.py": "688025a400fd6e629ef8cc6cd0db403576727ef1c0ab2c950479f6ef254d1e4b",
+    "src/exo/worker/runner/runner.py": "c99bc3cf88eccbac90b6709ff3278e4016c6d2284e1032af7abe577b6117858d",
+    "src/exo/utils/leased_instance.py": "c065b5bab1f3944239a7e53e1785d995cacceb2c73434e07960f14d5f4461678"
+  },
+  "full_runtime_gates": "not passed; this is API/guard configuration qualification only"
+}

@@ -1,5 +1,53 @@
 # Changelog & Working Notes
 
+## Unreleased — a call waiting behind another service's lease says whose
+
+When the registry is short and the model's lease waits in the resource queue,
+queued callers now read the same `wait_reason` a host misfit gives, naming the
+active leases that hold the memory: `waiting for memory: needs 17333 MB of
+claude-services-slice/gpu-0, held now by claude-services-slice/unity-service
+(32768 MB); the model is in the resource queue and holds no memory while it
+waits`. Before, the field was empty (slice, 25 Nov 07:21-07:33: four calls
+behind unity's quickval). The labels come from the registry read the refresh
+already made; this service's own leases are not listed. Queued requests ahead
+of ours are named too ("behind 1 queued request (user:36 (exclusive))"), an
+exclusive lease reads "(exclusive)" whatever its size, and each list names three
+then counts the rest. It clears when the
+model is available, and on dispatch, as before. Test:
+`test_a_registry_wait_names_who_holds_the_memory` fails without the change.
+
+## Unreleased — no reservation for memory the host cannot hold
+
+Pending demand no longer takes an active registry lease when the registry has
+room and the host does not. Before, `stage()` was granted the bytes, the fresh
+physical check refused the load, and the unused lease stood for its full TTL.
+Then a new one was taken (wafer, 24-25 Nov: 19,253 MB for Inkling, hourly). A
+host misfit now waits locally and takes no lease. A promoted reservation that
+was never handed to a provider and that the host still cannot hold is released
+by its exact ID (`InitialReservations.release_unused`). A short registry still
+queues on the plane: a place in line holds no bytes. Queued callers see the
+wait on `GET /v1/inference/executions/{id}` as `wait_reason`, "waiting for
+memory: needs N MB…". Streaming callers see it in the queued heartbeat. A
+deferral's own reason is left alone. An unknown physical reading keeps the
+existing hold.
+
+## Unreleased — bounded EXO receipt history above ten thousand events
+
+Permit up to 20,000 immutable event files when reading a historical host attempt,
+with the existing 8 MiB total and 128 KiB per-file limits unchanged. The captured
+closed setup had 10,168 small authority events. Scan the complete set and retain
+unique-launch, exact child/cleanup, journal, nonce, boot and inode checks. No
+history is removed or rewritten and oversized histories still refuse explicitly.
+
+## Unreleased — completed EXO history survives a later coordinator fence
+
+A new fixed session can validate exact old cleanup and terminal settlement after
+the old coordinator generation has advanced. Historical settlement accepts an
+integer generation at least as new as the frozen launch; it never changes that
+launch, resumes old work or provides new start authority. Uncertain, active,
+unsettled, mismatched or lower-generation history still refuses. This permits
+cleanup-backed group continuation without resetting host journals.
+
 ## Unreleased — safe Ollama error diagnostics
 
 Capture bounded HTTP error details and detect error-only records inside accepted streams. Log fixed cause tags, captured lengths and hashes without raw backend text. Chat streaming callers receive a failure frame and `[DONE]`; the NDJSON completions stream gets a final safe error line. Synchronous generation uses the same typed error. Non-streaming routes now raise HTTP 500 for in-band errors rather than returning truncated successful chat content or a raw error dictionary with HTTP 200. Existing generation deadlines, retry, admission and cleanup policies are unchanged; a backend error remains uncertainty, not evidence of returned capacity. See `ollama/BACKEND_ERRORS.md` for timeout and truncation limits.

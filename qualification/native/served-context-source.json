@@ -1,0 +1,16 @@
+{
+  "base_commit": "4a53f3a78b8083aaa56d0bb9e734ad91ec1d8af4",
+  "candidate_commit": "246a48dd2e4c7b1bfdd30b09364960b3521c5856",
+  "patch_sha256": "1cbbb538323ffd3445ecd777f2e3be521667c293519b0f06b2d5c741943e1c2d",
+  "changed_files": [
+    "src/exo/utils/served_context.py",
+    "src/exo/utils/tests/test_served_context.py",
+    "src/exo/worker/engines/mlx/generator/generate.py",
+    "src/exo/worker/runner/llm_inference/batch_generator.py",
+    "src/exo/worker/tests/unittests/test_mlx/test_served_context_boundary.py",
+    "src/exo/worker/tests/unittests/test_mlx/test_served_context_runner.py"
+  ],
+  "source_repository": "local qualified EXO lineage, based on exo-explore/exo; no upstream push or PR",
+  "runtime_selected": false,
+  "default_profile_changed": false
+}

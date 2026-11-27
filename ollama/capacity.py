@@ -441,6 +441,11 @@ def _vm_stat() -> tuple[dict, int]:
         m = re.match(r"Pages (\w[\w ]*\w):\s+(\d+)\.", line)
         if m:
             pages[m.group(1)] = int(m.group(2))
+            continue
+        # "File-backed pages" and "Anonymous pages" put the noun last.
+        m = re.match(r"(File-backed|Anonymous) pages:\s+(\d+)\.", line)
+        if m:
+            pages[m.group(1).lower()] = int(m.group(2))
     return pages, page_size
 
 
@@ -565,6 +570,17 @@ def _collect_metal() -> dict:
         + pages.get("speculative", 0)
     )
     compute_pct, device_inuse = _accel_stats()
+    # Clean file cache is reclaimable too, and much of it sits in ACTIVE, which
+    # the sum above never counts. On Obelisk on 8 Nov 2026 that sum read
+    # 110,777 MiB while 117,297 MiB (free + file-backed) was reclaimable, and
+    # q6_k's 108,544 MiB cold load was refused for a day (task 978).
+    # File-backed pages can include a resident model's weights if a backend
+    # maps them, and Apple silicon counts those in the accelerator's in-use
+    # memory, so that is subtracted. The credit can only raise the old sum, and
+    # needs both counters: without them the old sum stands.
+    if "file-backed" in pages and device_inuse is not None:
+        reclaimable = mb(pages.get("free", 0) + pages["file-backed"]) - device_inuse
+        available = max(available, reclaimable)
     return {
         "memory_total_mb": _total_mb(),
         "memory_used_mb": used,

@@ -82,9 +82,10 @@ class Diagnostics(unittest.IsolatedAsyncioTestCase):
         namespace = dict(json=json, asyncio=asyncio, time=time, log=logging.getLogger("offline-server"),
                          mgr=types.SimpleNamespace(ollama=types.SimpleNamespace(chat_stream=chat_stream)),
                          mm=types.SimpleNamespace(name="fixture"),ollama_messages=[],n_prompt=1,
-                         ollama_kwargs={},queue_owned=True,req=types.SimpleNamespace(stream_options=None),
+                         ollama_kwargs={},queue_owned=False,req=types.SimpleNamespace(stream_options=None),
                          _log_ollama_timings=lambda *args:None,
                          OllamaBackendError=client.OllamaBackendError,
+                         OllamaRefused=client.OllamaRefused,
                          OllamaStalled=client.OllamaStalled,OllamaRequestTimeout=client.OllamaRequestTimeout)
         exec(compile(ast.Module(body=helpers+[stream],type_ignores=[]),"exact-server-stream","exec"),namespace)
         fake, session = fake_aiohttp(response)
@@ -178,10 +179,14 @@ class SyncDiagnostics(unittest.TestCase):
 
 class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
     async def frames(self, status, body):
-        """Run the exact completions route and its real sync client iterator."""
+        """Run the exact direct provider body and its real sync client iterator.
+
+        The public route now belongs to the durable dispatcher; its ownership
+        behavior is covered by the gateway tests, not this legacy-frame check.
+        """
         tree = ast.parse((Path(__file__).parent/"server.py").read_text())
         route = next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
-                     and n.name=="completions")
+                     and n.name=="_completions_direct")
         route.decorator_list = []
         value = bare_client()
         async def resolve(model):
@@ -195,7 +200,7 @@ class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
         with httpx.Client(base_url="http://offline",transport=httpx.MockTransport(
                 lambda request:httpx.Response(status,content=body))) as http:
             value._http=http
-            response = await namespace["completions"](
+            response = await namespace["_completions_direct"](
                 types.SimpleNamespace(model="fixture",prompt="fixture",stream=True))
             return [json.loads(line) for line in response]
 

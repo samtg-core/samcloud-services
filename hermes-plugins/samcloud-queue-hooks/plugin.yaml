@@ -1,0 +1,10 @@
+name: samcloud-queue-hooks
+version: 0.1.0
+description: Persisted main-call boundaries for the opt-in queue provider
+provides_hooks:
+  - pre_llm_call
+  - pre_api_request
+  - post_api_request
+  - api_request_error
+  - post_llm_call
+  - pre_tool_call
