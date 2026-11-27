@@ -112,6 +112,10 @@ class Arbiter:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS one_resource_owner
                 ON grants(resource) WHERE state IN ('granted','uncertain');
+            CREATE TABLE IF NOT EXISTS inference_grant_bindings (
+                grant_id TEXT PRIMARY KEY REFERENCES grants(id),
+                issuer TEXT NOT NULL, subject_id TEXT NOT NULL, binding TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS executions (
                 id TEXT PRIMARY KEY,
                 grant_id TEXT NOT NULL REFERENCES grants(id),
@@ -368,7 +372,7 @@ class Arbiter:
             if stamp is not None and interval is not None]
         return min(bounds) if bounds else None
 
-    def submit(self, owner, client_key, resource, model, lifetime='work_session'):
+    def submit(self, owner, client_key, resource, model, lifetime='work_session', *, runtime_binding=None):
         """Retrying the same key finds the same grant; changing its ask conflicts."""
         for value in (owner, client_key, resource, model):
             required(value)
@@ -380,6 +384,11 @@ class Arbiter:
             if old:
                 if (old['resource'], old['model'], old['lifetime']) != (resource, model, lifetime):
                     raise Conflict("idempotency key already names another request")
+                attribution = self.db.execute(
+                    'SELECT issuer, subject_id, binding FROM inference_grant_bindings WHERE grant_id=?',
+                    (old['id'],)).fetchone()
+                if (dict(attribution) if attribution else None) != runtime_binding:
+                    raise Conflict('Grant runtime attribution changed')
                 return dict(old)
             now = time.time()
             grant_id = uuid.uuid4().hex
@@ -387,6 +396,10 @@ class Arbiter:
                 (id,owner,client_key,resource,model,state,created,updated,lifetime,queue_order)
                 VALUES (?,?,?,?,?,'queued',?,?,?,?)""",
                 (grant_id, owner, client_key, resource, model, now, now, lifetime, self._next_order()))
+            if runtime_binding is not None:
+                self.db.execute('INSERT INTO inference_grant_bindings VALUES (?, ?, ?, ?)',
+                                (grant_id, runtime_binding['issuer'], runtime_binding['subject_id'],
+                                 runtime_binding['binding']))
             return dict(self._owned(grant_id, owner))
 
     def get(self, grant_id, owner):

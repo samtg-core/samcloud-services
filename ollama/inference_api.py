@@ -34,6 +34,9 @@ class LifecycleYield(BaseModel):
 
 
 def owner(request):
+    binding = getattr(request.state, 'inference_binding', None)
+    if binding is not None:
+        return binding['subject']
     caller = getattr(getattr(request, 'state', None), 'caller', None)
     name = caller.get('username') if isinstance(caller, dict) else None
     if not isinstance(name, str) or not name.strip():
@@ -75,7 +78,9 @@ def build_router(supervisor, resolve_model, validate_call):
     async def capabilities(request: Request):
         owner(request)
         policy = supervisor.journal.stint_policy
-        return {'stints': {'version': 1, 'enabled': policy is not None,
+        binding = getattr(request.state, 'inference_binding', None)
+        attribution = {'runtime_binding': binding} if binding else {}
+        return {**attribution, 'stints': {'version': 1, 'enabled': policy is not None,
                           'dependency_yield': True,
                           'lifecycle_yield': True,
                           'idle_grace_seconds': policy.idle_grace_seconds if policy else None,
@@ -85,7 +90,13 @@ def build_router(supervisor, resolve_model, validate_call):
     async def submit(body: GrantRequest, request: Request):
         identity = owner(request)
         resource, model = invoke(resolve_model, body.model)
-        return invoke(supervisor.journal.submit, identity, body.key, resource, model, body.lifetime)
+        binding = getattr(request.state, 'inference_binding', None)
+        if binding and model not in binding['models']:
+            raise HTTPException(403, 'Model outside inference binding')
+        attribution = {k: binding[k] for k in ('issuer', 'subject_id', 'binding')} if binding else None
+        grant = invoke(lambda: supervisor.journal.submit(identity, body.key, resource, model,
+                                                         body.lifetime, runtime_binding=attribution))
+        return {**grant, 'runtime_binding': binding} if binding else grant
 
     @router.post('/yield')
     async def lifecycle_yield(body: LifecycleYield, request: Request):
@@ -107,6 +118,9 @@ def build_router(supervisor, resolve_model, validate_call):
     async def enqueue(grant_id: str, body: CallRequest, request: Request):
         identity = owner(request)
         grant = invoke(supervisor.journal.get, grant_id, identity)
+        binding = getattr(request.state, 'inference_binding', None)
+        if binding and grant['model'] not in binding['models']:
+            raise HTTPException(403, 'Model outside inference binding')
         canonical = invoke(validate_call, grant['model'], body.request)
         call = invoke(lambda: supervisor.journal.enqueue(grant_id, identity, body.key, canonical,
                                                         yield_grant_keys=body.yield_grant_keys))
