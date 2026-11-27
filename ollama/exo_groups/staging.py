@@ -22,6 +22,10 @@ class StagingUnavailable(BindingRefused):
     pass
 
 
+class HostFileGatewayUnavailable(StagingUnavailable):
+    """A gateway failed to deliver the read-only host file report."""
+
+
 @dataclass(frozen=True)
 class HostFiles:
     rank: str
@@ -195,7 +199,11 @@ class StagingVerifier:
         policies = self.policies
         reports = await asyncio.gather(*(self.reader(host, self.previous.get(host.rank))
                                          for host in policies), return_exceptions=True)
+        unavailable = None
         for host, report in zip(policies, reports, strict=True):
+            if isinstance(report, HostFileGatewayUnavailable):
+                unavailable = report
+                continue  # Still reject mismatched evidence from another rank.
             phase = "host_report"
             try:
                 if (not isinstance(report, dict) or report.get('rank') != host.rank
@@ -222,6 +230,8 @@ class StagingVerifier:
                 logging.getLogger(__name__).warning(
                     "EXO staging verification failed rank=%s phase=%s", host.rank, phase)
                 raise
+        if unavailable is not None:
+            raise unavailable
         observations = canonical(reports)
         proof = VerifiedStaging(digest(asdict(plan)), plan.rank_manifest_sha256,
             self.runtime_sha256, self.policy_sha256,

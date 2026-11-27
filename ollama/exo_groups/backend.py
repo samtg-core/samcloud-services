@@ -7,6 +7,7 @@ until the private runtime proves every assigned rank drained this exact command.
 import json
 import logging
 
+from .staging import HostFileGatewayUnavailable
 from ..inference_arbiter import CapacityDeferred
 from ..inference_gateway import StreamCapture
 from ..inference_supervisor import BackendEnded
@@ -125,7 +126,12 @@ class EXOBackend:
         await self.actor.wait()
         if not self.actor.may_serve_requests():
             raise CapacityDeferred('capacity_unavailable')
-        runtime = await self.verify_runtime()
+        try:
+            runtime = await self.verify_runtime()
+        except HostFileGatewayUnavailable:
+            # No binding or private request exists yet. The supervisor can
+            # retain this execution until a fresh capacity event arrives.
+            raise CapacityDeferred('capacity_unavailable') from None
         state = await self.private.state()
         self.contract.check_idle(self.actor.plan, self.launches, state, runtime_sha256=runtime)
         if not self.actor.may_serve_requests():
