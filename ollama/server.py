@@ -318,6 +318,8 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
 
         # Check cache
         bound = inference_bindings.HEADER in request.headers
+        if bound and httpx.URL(self.verify_url).scheme != "https":
+            return JSONResponse(status_code=503, content={"detail": "Secure runtime verification unavailable"})
         cache_key = "bound " + token if bound else token
         cached = self._get_cached(cache_key)
         if cached:
