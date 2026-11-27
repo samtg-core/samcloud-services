@@ -234,6 +234,34 @@ class PrivateBackendControls(unittest.IsolatedAsyncioTestCase):
                 # injection before retiring the uncertain fixture for next case.
                 self.journal.finish(call['id'], {'kind': 'error', 'status': 502}, failed=True)
 
+    async def test_one_missing_postflight_observation_preserves_original_result(self):
+        observations = 0
+
+        async def observe():
+            nonlocal observations
+            observations += 1
+            if observations == 2:
+                raise HostFileGatewayUnavailable()
+            return self.runtime
+
+        self.backend.verify_runtime = observe
+        call = self.enqueue()
+        row = await self.run_call(call)
+        self.assertEqual((row['state'], self.posts, observations), ('complete', 1, 3))
+        self.assertIsNotNone(self.bindings.snapshot(call['id'])['end'])
+
+    async def test_persistently_missing_postflight_observation_keeps_hold(self):
+        async def observe():
+            if self.posts:
+                raise HostFileGatewayUnavailable()
+            return self.runtime
+
+        self.backend.verify_runtime = observe
+        call = self.enqueue()
+        row = await self.run_call(call)
+        self.assertEqual((row['state'], self.posts), ('uncertain', 1))
+        self.assertIsNone(self.bindings.snapshot(call['id'])['end'])
+
     async def test_bad_or_stale_end_receipt_keeps_terminal_frames_hidden(self):
         for bad in ({'generation': True}, {'generation': 2}, {'runner_ids': []},
                     {'instance_id': 'foreign'}, {'end_event_idx': 0}):

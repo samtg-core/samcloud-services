@@ -191,7 +191,11 @@ class EXOBackend:
         # The runtime endpoint waits on its existing indexed events. HTTP EOF,
         # TaskDeleted and a single rank's Complete event cannot replace it.
         proof = await self.private.command_end(command)
-        runtime = await self.verify_runtime()
+        try:
+            runtime = await self.verify_runtime()
+        except HostFileGatewayUnavailable:
+            # The original command ended. Repeat only the read-only fleet check.
+            runtime = await self.verify_runtime()
         final = await self.private.state()
         self.contract.check_idle(self.actor.plan, self.launches, final, runtime_sha256=runtime)
         if (type(final.get('lastEventAppliedIdx')) is not int

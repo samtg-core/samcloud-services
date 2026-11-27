@@ -93,13 +93,14 @@ class HostControlClient:
                     or not isinstance(value['report'], dict)):
                 raise ValueError('host source/request/configuration differs')
             return value['report']
-        except Exception:
+        except Exception as exc:
             if action == 'files':
                 # Never include exception text, headers, request payload or response body.
                 logging.getLogger(__name__).warning(
                     "EXO staging host read failed rank=%s phase=%s status=%s",
                     self.endpoint.rank, phase, status)
-                if phase == 'response_headers' and status in (502, 504):
+                if ((phase == 'connect' and isinstance(exc, httpx.TransportError))
+                        or (phase == 'response_headers' and status in (502, 504))):
                     raise HostFileGatewayUnavailable('host file report unavailable at gateway') from None
             raise HostControlUnavailable('exact host observation or control outcome unavailable') from None
 

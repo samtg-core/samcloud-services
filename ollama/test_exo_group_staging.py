@@ -103,19 +103,24 @@ class StagingControls(unittest.IsolatedAsyncioTestCase):
         endpoint = HostEndpoint(missing.rank, missing.resource_id, missing.uid,
                                 'https://host.example', 'a' * 64, 'b' * 64)
         status = 502
+        def report(request):
+            if status is None:
+                raise httpx.ConnectError('connection unavailable', request=request)
+            return httpx.Response(status)
+
         client = HostControlClient(endpoint, lambda: 'Bearer fixture',
-            transport=httpx.MockTransport(lambda req: httpx.Response(status)))
+            transport=httpx.MockTransport(report))
         self.addAsyncCleanup(client.close)
         async def reader(host, previous):
             if host == missing:
                 return await client.files(host, previous)
             return await original(host, previous)
         self.verifier.reader = reader
-        for status in (502, 504, 403, 200):
+        for status in (None, 502, 504, 403, 200):
             with self.subTest(status=status), self.assertRaises(BindingRefused) as failure:
                 await self.verifier.verify(self.plan, self.manifest)
             self.assertEqual(isinstance(failure.exception, HostFileGatewayUnavailable),
-                             status in (502, 504))
+                             status in (None, 502, 504))
         status = 502
         self.local = False
         with self.assertRaises(BindingRefused) as failure:
