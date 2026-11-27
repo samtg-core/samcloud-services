@@ -168,7 +168,13 @@ class AcquisitionControls(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_create_reply_is_not_retried_until_an_explicit_wakeup(self):
         self.lose_reply = True
-        self.assertEqual((await self.start()).phase, 'unknown')
+        with self.assertLogs(GroupAcquisition.__module__, level='WARNING') as captured:
+            self.assertEqual((await self.start()).phase, 'unknown')
+        log = '\n'.join(captured.output)
+        self.assertIn('ReadError', log)
+        self.assertIn('create', log)
+        self.assertIn('epoch_changed=False', log)
+        self.assertNotIn('private token and response detail', log)
         self.assertTrue(self.server_created)
         self.assertIsNone(self.saved()['group_id'])
         await asyncio.sleep(0)
