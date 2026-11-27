@@ -22,6 +22,10 @@ class ReceiptUnavailable(ValueError):
     pass
 
 
+class _JournalChanged(ReceiptUnavailable):
+    """The queue database or its parent changed during an otherwise stable read."""
+
+
 # Explicit metadata budgets: the observed closed setup has 10,168 small
 # authority events. Read its complete history, including every possible start;
 # do not truncate or reset it. The independent 8 MiB content bound is unchanged.
@@ -111,7 +115,12 @@ def collect_historical_attempt(spec,*,boot_reader=boot_id):
     callers must separately validate a normal prior cleanup or reboot evidence
     AND exact plane settlement before authorizing any new preparation.
     """
-    return _collect_attempt(spec, boot_reader=boot_reader, historical=True)
+    try:
+        return _collect_attempt(spec, boot_reader=boot_reader, historical=True)
+    except _JournalChanged:
+        # Other queue work can change the journal during a historical read.
+        # Discard that snapshot and verify this one attempt again from scratch.
+        return _collect_attempt(spec, boot_reader=boot_reader, historical=True)
 
 
 def _collect_attempt(spec,*,boot_reader,historical):
@@ -194,10 +203,15 @@ def _collect_attempt(spec,*,boot_reader,historical):
         # between the snapshot and immutable artifact reads.
         actual=os.stat(journal.name,dir_fd=parent,follow_symlinks=False)
         if ((actual.st_dev,actual.st_ino)!=(db_before.st_dev,db_before.st_ino)
-                or _identity(db_before)!=_identity(os.fstat(database))
-                or _identity(parent_before)!=_identity(os.fstat(parent))
                 or _identity(before)!=_identity(os.fstat(state)) or boot_reader()!=current_boot):
             raise ReceiptUnavailable('host attempt changed during observation')
+        current = ((db_before, os.fstat(database)), (parent_before, os.fstat(parent)))
+        for original, final in current:
+            if (final.st_mode, final.st_uid, final.st_gid, final.st_nlink) != (
+                    original.st_mode, original.st_uid, original.st_gid, original.st_nlink):
+                raise ReceiptUnavailable('host journal ownership or links changed')
+        if any(_identity(original) != _identity(final) for original, final in current):
+            raise _JournalChanged('host journal changed during observation')
         return {**({'observed_host_boot':current_boot} if historical else {}),
                 'uid':spec['uid'],'boot_id':spec['boot_id'],'binding':spec,'phase':row['phase'],
                 'prepared':prepared,'started':started[0] if started else None,

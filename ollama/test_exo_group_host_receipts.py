@@ -25,6 +25,7 @@ from .exo_groups.plan import BindingRefused
 from .exo_groups.rank_lifecycle import RankLifecycle,RankSpec,darwin_boot_id
 from .exo_groups.rank_process import Listener,RunBinding
 from .exo_groups.rank_runtime import HostRankRuntime,RuntimeObservation,launch_sha256,record_host_attempt
+from .exo_groups import receipt_files
 from .exo_groups.receipt_files import collect_attempt,ReceiptUnavailable
 from .inference_arbiter import Arbiter
 
@@ -93,6 +94,38 @@ class ReceiptControls(unittest.IsolatedAsyncioTestCase):
         args={k:self.spec[k] for k in ('journal_path','state_path','boot_id','launch_sha256','runtime_sha256')}
         args.update(changes)
         return await (reader or self.reader).read(self.plan,binding=self.expected.binding,**args)
+
+    def test_historical_journal_directory_churn_reobserves_only_this_attempt(self):
+        original_read = receipt_files._read
+        marker = self.root / 'unrelated-queue-write'
+        reads = 0
+        def change_journal_parent(directory, name, *args, **kwargs):
+            nonlocal reads
+            if name == 'host-prepared.json':
+                reads += 1
+                if reads == 1 or persistent:
+                    marker.touch()
+                    marker.unlink()
+            return original_read(directory, name, *args, **kwargs)
+
+        expected = collect_attempt(self.spec)
+        for persistent in (False, True):
+            reads = 0
+            with self.subTest(persistent=persistent), mock.patch.object(
+                    receipt_files, '_read', side_effect=change_journal_parent):
+                if persistent:
+                    with self.assertRaises(ReceiptUnavailable):
+                        receipt_files.collect_historical_attempt(self.spec)
+                else:
+                    report = receipt_files.collect_historical_attempt(self.spec)
+                    self.assertEqual(report, {**expected, 'observed_host_boot': self.boot})
+                self.assertEqual(reads, 2)
+
+        reads = 0
+        with mock.patch.object(receipt_files, '_read', side_effect=change_journal_parent):
+            with self.assertRaises(ReceiptUnavailable):
+                collect_attempt(self.spec)
+        self.assertEqual(reads, 1)
 
     def metadata_events(self, count):
         # Actual immutable private files, not a mocked directory enumeration.
