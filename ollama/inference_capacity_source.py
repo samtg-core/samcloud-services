@@ -305,6 +305,8 @@ class ManagerCapacitySource:
                     if model in manager.models:
                         publish('unknown','residency_changed')
                         continue
+                    exclusive = model in settings.exclusive_models
+                    owned = None
                     if handoff is not None:
                         initial = manager.initial_reservations
                         required = initial.required_memory(model, required)
@@ -316,7 +318,7 @@ class ManagerCapacitySource:
                                 handoff.begin()
                                 return
                             from .inference_arbiter import CapacityDeferred
-                            from .inference_reservation import ReservationExceedsCapacity
+                            from .inference_reservation import ReservationExceedsCapacity, matches_claim
                             from .manager import LEASE_TTL
                             if saved is None or saved['state'] not in ('queued','reserved'):
                                 # No reservation for bytes this host cannot hold.
@@ -326,7 +328,7 @@ class ManagerCapacitySource:
                                 # says so. A registry that is short queues the
                                 # request below: a place in line holds no bytes.
                                 early = cold_capacity(resource,required,
-                                    physical=physical,registry=registry,work_permitted=True)
+                                    physical=physical,registry=registry,work_permitted=True, exclusive=exclusive)
                                 if early['reason'] == 'physical_capacity':
                                     journal.memory_wait(resource,model,required)
                                     publish('unavailable','physical_capacity')
@@ -360,13 +362,14 @@ class ManagerCapacitySource:
                             expiry = datetime.fromisoformat(row['expires_at'].replace('Z','+00:00'))
                             if (row.get('agent_id') != initial.owner or row.get('service_id') != initial.service
                                     or row.get('resource_id') != resource or row.get('status') != 'active'
-                                    or row.get('exclusive') != 0 or type(row.get('memory_mb')) is not int
-                                    or row['memory_mb'] != required or expiry.tzinfo is None
+                                    or not matches_claim({'exclusive': exclusive, 'memory_mb': required}, row)
+                                    or expiry.tzinfo is None
                                     or expiry.timestamp() <= time.time()
                                     or type(registry.get('available_memory_mb')) is not int
                                     or registry['available_memory_mb'] < 0):
                                 raise ValueError('staged grant is not current exact ownership')
-                            registry = dict(registry,available_memory_mb=registry['available_memory_mb']+required)
+                            if not exclusive:
+                                registry = dict(registry,available_memory_mb=registry['available_memory_mb']+required)
                             physical = await source_call(manager._collect_stats)
                             if self.paused or epoch != self.epoch:
                                 return
@@ -374,7 +377,7 @@ class ManagerCapacitySource:
                             handoff.begin()  # unused metadata reservation; no idle default lease
                             return
                     verdict = cold_capacity(resource,required,
-                        physical=physical,registry=registry,work_permitted=True)
+                        physical=physical,registry=registry,work_permitted=True, exclusive=exclusive, owned_lease=owned)
                     if handoff is not None:
                         if (verdict['reason'] == 'physical_capacity' and model in pending
                                 and initial.snapshot(model)['state'] == 'reserved'):
@@ -410,7 +413,12 @@ class ManagerCapacitySource:
                        row.get('exclusive') not in (0,1) for row in leases):
                     publish('unknown','registry_leases_unknown')
                     continue
-                if any(row['status']=='active' and row['exclusive']==1 for row in leases):
+                active = [row for row in leases if row['status'] == 'active']
+                if model in settings.exclusive_models:
+                    if len(active) != 1 or active[0].get('id') != lease or active[0]['exclusive'] != 1:
+                        publish('unknown', 'exclusive_ownership_unconfirmed')
+                        continue
+                elif any(row['exclusive'] == 1 for row in active):
                     publish('unavailable','exclusive_holder')
                     continue
                 if not isinstance(rows,list):
@@ -419,7 +427,7 @@ class ManagerCapacitySource:
                 if len(matches) != 1:
                     raise ValueError('exact lease unknown')
                 receipt = matches[0]
-                self.binding.actor.store.register(model,resource=resource,model=mm.name,receipt=receipt)
+                coverage = self.binding.actor.store.register(model,resource=resource,model=mm.name,receipt=receipt)
                 if not self.binding.ready(model):
                     publish('unknown','residency_unconfirmed')
                     continue
@@ -433,11 +441,11 @@ class ManagerCapacitySource:
                 free,device = physical.get('memory_available_mb'),physical.get('memory_device_inuse_mb')
                 if type(free) is not int or free < 0 or type(device) is not int or device < 0:
                     publish('unknown','physical_capacity_unknown')
-                elif receipt['memory_mb'] < settings.reservation_mb.get(model,0):
+                elif coverage['memory_mb'] < settings.reservation_mb.get(model,0):
                     publish('unknown','reservation_under_budget')
                 elif capacity.usable_mb(free) <= 0:
                     publish('unavailable','host_headroom')
-                elif device > receipt['memory_mb']:
+                elif device > coverage['memory_mb']:
                     # Aggregate includes foreign/OS device use: withdraw, but
                     # do not attribute the excess to a model or cancel its work.
                     publish('unavailable','device_usage_exceeds_reservation')
