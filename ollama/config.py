@@ -494,6 +494,9 @@ FOREIGN_MARGIN_MB = max(0, _env_int("FOREIGN_MARGIN_MB", 1024))
 LEASE_CONTENTION_TTL_S = max(0, _env_int("LEASE_CONTENTION_TTL_S", OFFER_WINDOW_S))
 
 # --- backends ---
+# Exact model names mapped to Ollama origins on this provider's host, e.g.
+# {"inkling-2-mini:26b-a5b":"http://127.0.0.1:11435"}. Unlisted models use OLLAMA_BASE.
+OLLAMA_MODEL_BACKENDS = _env("OLLAMA_MODEL_BACKENDS", "{}")
 OLLAMA_BASE = _env("OLLAMA_BASE", "http://localhost:11434")
 MODELS_DIR = Path(_env("MODELS_DIR", str(Path.home() / "models")))
 LLAMA_SERVER_BIN = _env(

@@ -8,6 +8,7 @@ import logging
 import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Iterator
+from urllib.parse import urlsplit
 
 from . import config
 
@@ -361,7 +362,37 @@ class OllamaClient:
     # so a typo is reported once rather than on every request.
     _clamped: set = field(default_factory=set, repr=False)
 
+    model_backends: dict[str, str] = field(
+        default_factory=lambda: json.loads(config.OLLAMA_MODEL_BACKENDS))
+
+    def _model_key(self, model):
+        return model if ':' in model.rsplit('/', 1)[-1] else model + ':latest'
+
+    def _backend(self, model):
+        return self.model_backends.get(self._model_key(model), self.base_url)
+
+    def _path(self, model, path):
+        # Preserve relative URLs for the default httpx client.
+        base = self._backend(model)
+        return path if base == self.base_url else base + path
+
     def __post_init__(self):
+        if not isinstance(self.model_backends, dict):
+            raise ValueError('OLLAMA_MODEL_BACKENDS must be a JSON object')
+        self.base_url = self.base_url.rstrip('/')
+        backends = {}
+        for name, base in self.model_backends.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(base, str):
+                raise ValueError('Invalid Ollama backend assignment')
+            url = urlsplit(base)
+            if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
+                    or url.password is not None or url.query or url.fragment or url.path.strip('/')):
+                raise ValueError('Expected an Ollama backend origin')
+            key = self._model_key(name)
+            if key in backends:
+                raise ValueError('Duplicate Ollama model assignment: ' + key)
+            backends[key] = base.rstrip('/')
+        self.model_backends = backends
         # Used for non-streaming requests only (health, list, show, etc.)
         self._http = httpx.Client(base_url=self.base_url, timeout=600)
 
@@ -508,23 +539,34 @@ class OllamaClient:
             pass
         return None
 
+    def _inventory(self, path, running):
+        rows = []
+        for base in dict.fromkeys([self.base_url, *self.model_backends.values()]):
+            response = self._http.get(path if base == self.base_url else base + path)
+            response.raise_for_status()
+            body = response.json()
+            if not running and not self.model_backends:
+                return body.get('models', [])
+            if not isinstance(body, dict) or not isinstance(body.get('models'), list):
+                raise ValueError('Ollama inventory is unknown')
+            for row in body['models']:
+                if not self.model_backends or self._backend(row['name']) == base:
+                    rows.append(row)
+                elif running:
+                    # Never unload or adopt a resident via the other daemon.
+                    raise ValueError('Ollama model resident outside its configured backend')
+        return rows
+
     def list_models(self) -> list[dict]:
-        r = self._http.get("/api/tags")
-        r.raise_for_status()
-        return r.json().get("models", [])
+        return self._inventory('/api/tags', running=False)
 
     def list_running(self) -> list[dict]:
-        r = self._http.get("/api/ps")
-        r.raise_for_status()
-        body = r.json()
-        if not isinstance(body,dict) or not isinstance(body.get('models'),list):
-            raise ValueError('Ollama inventory is unknown')
-        return body['models']
+        return self._inventory('/api/ps', running=True)
 
     def pull_model(self, model: str, stream: bool = True) -> Iterator[dict]:
         """Pull a model. Yields progress dicts if stream=True."""
         with self._http.stream(
-            "POST", "/api/pull", json={"model": model, "stream": stream}, timeout=None
+            "POST", self._path(model, "/api/pull"), json={"model": model, "stream": stream}, timeout=None
         ) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -549,7 +591,7 @@ class OllamaClient:
             payload = self._with_num_ctx(model, payload)
         if service_owned:
             payload['stream'] = False
-        r = self._http.post("/api/generate", json=payload,
+        r = self._http.post(self._path(model, "/api/generate"), json=payload,
             timeout=self._owned_stream_timeout if service_owned else 300)
         r.raise_for_status()
         return r.json()
@@ -560,7 +602,7 @@ class OllamaClient:
         if service_owned:
             payload['stream'] = False
         r = self._http.post(
-            "/api/generate",
+            self._path(model, "/api/generate"),
             json=payload,
             timeout=self._owned_stream_timeout if service_owned else 60,
         )
@@ -588,7 +630,7 @@ class OllamaClient:
         payload = self._with_num_ctx(
             model, {"model": model, "prompt": prompt, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/generate", json=payload,
+            "POST", self._path(model, "/api/generate"), json=payload,
             timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
             if resp.status_code in (400, 404):
@@ -607,7 +649,7 @@ class OllamaClient:
         payload = self._with_num_ctx(
             model, {"model": model, "messages": messages, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/chat", json=payload,
+            "POST", self._path(model, "/api/chat"), json=payload,
             timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
             if resp.status_code in (400, 404):
@@ -666,7 +708,7 @@ class OllamaClient:
         session = aiohttp.ClientSession()
         try:
             async with session.post(
-                f"{self.base_url}{path}",
+                f"{self._backend(payload.get('model', ''))}{path}",
                 json=payload,
                 # `total=None` is NOT "no ceiling". OLLAMA_GENERATE_TIMEOUT
                 # is a real ceiling, enforced in the loop below — because
@@ -860,11 +902,11 @@ class OllamaClient:
 
     def show_model(self, model: str) -> dict:
         """Get model metadata."""
-        r = self._http.post("/api/show", json={"model": model})
+        r = self._http.post(self._path(model, "/api/show"), json={"model": model})
         r.raise_for_status()
         return r.json()
 
     def delete_model(self, model: str) -> dict:
-        r = self._http.request("DELETE", "/api/delete", json={"model": model})
+        r = self._http.request("DELETE", self._path(model, "/api/delete"), json={"model": model})
         r.raise_for_status()
         return r.json()

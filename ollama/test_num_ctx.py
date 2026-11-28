@@ -118,6 +118,7 @@ class FakeHTTP:
 def client(mod, http):
     c = mod.OllamaClient.__new__(mod.OllamaClient)
     c.base_url = "http://fake"
+    c.model_backends = {}
     c._http = http
     c._clamped = set()
     c._native_ctx = {}

@@ -166,6 +166,7 @@ def main():
 
     c = ollama_client.OllamaClient.__new__(ollama_client.OllamaClient)
     c.base_url = "http://fake"
+    c.model_backends = {}
     c._http = None
     c._clamped = set()
     c._native_ctx = {}
