@@ -15,6 +15,7 @@ import time
 import uuid
 
 from .inference_arbiter import Conflict, required
+from .inference_reservation import matches_claim, needs_settlement
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,11 @@ def _expiry(value):
 
 
 class ResidencyStore:
-    def __init__(self, path, *, registry_owner, service_id, clock=time.time):
+    def __init__(self, path, *, registry_owner, service_id, clock=time.time, exclusive_budgets=None):
         self.owner, self.service = required(registry_owner), required(service_id)
+        self.exclusive_budgets = dict(exclusive_budgets or {})
+        if any(type(mb) is not int or mb <= 0 for mb in self.exclusive_budgets.values()):
+            raise ValueError('exclusive physical budget must be positive MiB')
         self.clock, self.fresh = clock, {}
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -76,12 +80,17 @@ class ResidencyStore:
             self.db.close()
             raise PermissionError('residency store belongs to a different service identity')
 
+        for table in ('allocations', 'residency_ends'):
+            columns = {row['name'] for row in self.db.execute(f'PRAGMA table_info({table})')}
+            if 'exclusive' not in columns:
+                self.db.execute(f'ALTER TABLE {table} ADD COLUMN exclusive INTEGER NOT NULL DEFAULT 0')
+
     def close(self):
         self.db.close()
 
     @staticmethod
     def _marker(row):
-        return tuple(row[key] for key in ('resource','model','lease_id','memory_mb','expires_at','max_total_s'))
+        return tuple(row[key] for key in ('resource','model','lease_id','memory_mb','expires_at','max_total_s','exclusive'))
 
     def snapshot(self, allocation):
         row = self.db.execute('SELECT * FROM allocations WHERE id=?', (allocation,)).fetchone()
@@ -107,12 +116,15 @@ class ResidencyStore:
         for value in (allocation, resource, model):
             required(value)
         self.fresh.pop(allocation,None)
+        exclusive = model in self.exclusive_budgets
+        memory = self.exclusive_budgets[model] if exclusive else receipt.get('memory_mb')
         if (receipt.get('agent_id') != self.owner or receipt.get('service_id') != self.service or
-                receipt.get('resource_id') != resource or receipt.get('exclusive') != 0 or
+                receipt.get('resource_id') != resource or
+                not matches_claim({'exclusive': exclusive, 'memory_mb': memory}, receipt) or
                 receipt.get('status') != 'active'):
-            raise Conflict('receipt does not prove the configured owned shared allocation')
+            raise Conflict('receipt does not prove the configured owned allocation')
         lease_id = required(receipt.get('id'))
-        memory, maximum = receipt.get('memory_mb'), receipt.get('max_total_s')
+        maximum = receipt.get('max_total_s')
         if type(memory) is not int or memory <= 0 or type(maximum) is not int or maximum <= 0:
             raise ValueError('positive allocation size and exposure bound required')
         if _expiry(receipt.get('expires_at')) <= self.clock():
@@ -127,10 +139,10 @@ class ResidencyStore:
                     if (old['resource'],old['model'])!=(resource,model):
                         raise Conflict('retired allocation belongs to another model/resource')
                     self.db.execute('''UPDATE allocations SET lease_id=?,memory_mb=?,expires_at=?,
-                        max_total_s=?,state='covered',pending_id=NULL WHERE id=?''',
-                        (lease_id,memory,receipt['expires_at'],maximum,allocation))
-                elif (old['resource'],old['model'],old['lease_id'],old['memory_mb']) != (
-                        resource,model,lease_id,memory):
+                        max_total_s=?,exclusive=?,state='covered',pending_id=NULL WHERE id=?''',
+                        (lease_id,memory,receipt['expires_at'],maximum,exclusive,allocation))
+                elif (old['resource'],old['model'],old['lease_id'],old['memory_mb'],old['exclusive']) != (
+                        resource,model,lease_id,memory,exclusive):
                     raise Conflict('allocation identity changed; reconcile before adoption')
                 elif not old['pending_id']:
                     self.db.execute("UPDATE allocations SET expires_at=?,max_total_s=?,state='covered' WHERE id=?",
@@ -139,8 +151,8 @@ class ResidencyStore:
                 if self.db.execute('SELECT 1 FROM residency_rollovers WHERE predecessor=?',
                                    (lease_id,)).fetchone():
                     raise Conflict('predecessor has already entered a handover')
-                self.db.execute("INSERT INTO allocations VALUES(?,?,?,?,?,?,?,'covered',NULL)",
-                    (allocation,resource,model,lease_id,memory,receipt['expires_at'],maximum))
+                self.db.execute("INSERT INTO allocations VALUES(?,?,?,?,?,?,?,'covered',NULL,?)",
+                    (allocation,resource,model,lease_id,memory,receipt['expires_at'],maximum,exclusive))
             self.db.execute('COMMIT')
         except sqlite3.IntegrityError:
             self.db.execute('ROLLBACK')
@@ -149,7 +161,7 @@ class ResidencyStore:
             self.db.execute('ROLLBACK')
             raise
         if not old or not old['pending_id']:
-            self.fresh[allocation] = (resource,model,lease_id,memory,receipt['expires_at'],maximum)
+            self.fresh[allocation] = (resource,model,lease_id,memory,receipt['expires_at'],maximum,exclusive)
         return self.snapshot(allocation)
 
     def retire(self,allocation,receipt):
@@ -162,16 +174,14 @@ class ResidencyStore:
         self.db.execute('BEGIN IMMEDIATE')
         try:
             row=self.snapshot(allocation)
-            from .inference_reservation import needs_settlement
             if (needs_settlement(receipt) or row['pending_id'] is not None or receipt.get('id')!=row['lease_id']
                     or receipt.get('agent_id')!=self.owner or receipt.get('service_id')!=self.service
-                    or receipt.get('resource_id')!=row['resource'] or receipt.get('exclusive')!=0
-                    or type(receipt.get('memory_mb')) is not int or receipt['memory_mb']!=row['memory_mb']
+                    or receipt.get('resource_id')!=row['resource'] or not matches_claim(row, receipt)
                     or receipt.get('status') not in ('released','expired')):
                 raise Conflict('exact ended allocation required for residency retirement')
-            self.db.execute('INSERT OR IGNORE INTO residency_ends VALUES(?,?,?,?,?,?,?)',
+            self.db.execute('INSERT OR IGNORE INTO residency_ends VALUES(?,?,?,?,?,?,?,?)',
                 (allocation,row['lease_id'],row['resource'],row['model'],row['memory_mb'],
-                 receipt['status'],self.clock()))
+                 receipt['status'],self.clock(),row['exclusive']))
             self.db.execute("UPDATE allocations SET state='retired' WHERE id=?",(allocation,))
             self.db.execute('COMMIT')
         except BaseException:
@@ -185,6 +195,8 @@ class ResidencyStore:
         self.db.execute('BEGIN IMMEDIATE')
         try:
             row = self.snapshot(allocation)
+            if row['exclusive']:
+                raise Conflict('exclusive residency requires in-place lease renewal')
             if row['pending_id']:
                 intent = self.db.execute('SELECT * FROM residency_rollovers WHERE id=?',
                                          (row['pending_id'],)).fetchone()

@@ -28,6 +28,15 @@ def needs_settlement(receipt):
             receipt.get('expiry_reason') == 'ttl_expired' and not receipt.get('settled_at'))
 
 
+def matches_claim(saved, receipt):
+    flag = receipt.get('exclusive')
+    if type(flag) not in (bool, int) or flag != saved['exclusive'] or 'memory_mb' not in receipt:
+        return False
+    memory = receipt['memory_mb']
+    if saved['exclusive']:
+        return memory is None
+    return type(memory) is int and memory == saved['memory_mb']
+
 class ReservationExceedsCapacity(CapacityDeferred):
     """The registry rejected the size before creating a lease row."""
 
@@ -88,16 +97,6 @@ class InitialReservations:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(initial_reservations)')}
             if 'exclusive' not in columns:
                 db.execute('ALTER TABLE initial_reservations ADD COLUMN exclusive INTEGER NOT NULL DEFAULT 0')
-
-    @staticmethod
-    def _matches_claim(saved, receipt):
-        flag = receipt.get('exclusive')
-        if type(flag) not in (bool, int) or flag != saved['exclusive'] or 'memory_mb' not in receipt:
-            return False
-        memory = receipt['memory_mb']
-        if saved['exclusive']:
-            return memory is None
-        return type(memory) is int and memory == saved['memory_mb']
 
     @contextmanager
     def _owned(self):
@@ -217,7 +216,7 @@ class InitialReservations:
             raise Conflict('exact saved reservation is unconfirmed')
         receipt = matches[0]
         if (receipt.get('agent_id') != self.owner or receipt.get('service_id') != self.service
-                or receipt.get('resource_id') != row['resource'] or not self._matches_claim(row, receipt)):
+                or receipt.get('resource_id') != row['resource'] or not matches_claim(row, receipt)):
             raise Conflict('saved reservation ownership or dimensions differ')
         if receipt.get('status') == 'queued':
             if row['state'] != 'queued':
@@ -428,7 +427,7 @@ class InitialReservations:
                 raise Conflict('registry does not prove the exact saved lease')
             lease = matches[0]
             if (lease.get('agent_id') != self.owner or lease.get('service_id') != self.service or
-                    lease.get('resource_id') != row['resource'] or not self._matches_claim(row, lease)):
+                    lease.get('resource_id') != row['resource'] or not matches_claim(row, lease)):
                 raise Conflict('exact lease ownership or dimensions differ')
             if lease.get('status') not in ('active', 'queued', 'released', 'expired', 'cancelled'):
                 raise Conflict('exact lease state is unknown')

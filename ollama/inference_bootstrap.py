@@ -379,7 +379,7 @@ class QueueRuntime:
         left as it was, and ordinary reconciliation still fails closed on it.
         """
         from .inference_arbiter import Conflict
-        from .inference_reservation import needs_settlement
+        from .inference_reservation import matches_claim, needs_settlement
         manager,store = self.manager,self.residency_actor.store
         log = logging.getLogger(__name__)
         async def exact(resource,row):
@@ -391,8 +391,7 @@ class QueueRuntime:
                 raise Conflict('exact allocation unknown')
             receipt = matches[0]
             if (receipt.get('agent_id') != store.owner or receipt.get('service_id') != store.service
-                    or receipt.get('resource_id') != resource or receipt.get('exclusive') != 0
-                    or receipt.get('memory_mb') != row['memory_mb']):
+                    or receipt.get('resource_id') != resource or not matches_claim(row, receipt)):
                 raise Conflict('allocation ownership differs')
             return receipt
         released = []

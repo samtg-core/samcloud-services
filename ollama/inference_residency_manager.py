@@ -139,6 +139,20 @@ class ManagerResidency:
         task.add_done_callback(finished)
         return task
 
+    async def _read_owned(self, model, mm, allocation, predecessor):
+        store = self.actor.store
+        # Claim keeps unload out; confirm object/link again after I/O.
+        read = self._own(model,asyncio.create_task(asyncio.to_thread(
+            self.manager.sc.list_leases,resource_id=self.models[model],
+            service_id=store.service,status='active')))
+        rows = await asyncio.shield(read)
+        if self.manager.models.get(model) is not mm or mm.lease_id != predecessor:
+            raise Conflict('manager model/lease changed during ownership read')
+        matches = [row for row in rows if row.get('id') == predecessor]
+        if len(matches) != 1:
+            raise Conflict('current registry read does not prove exact lease')
+        return store.register(allocation,resource=self.models[model],model=mm.name,receipt=matches[0])
+
     async def _renew(self, model, mm):
         store = self.actor.store
         allocation = self.allocation(model)
@@ -149,17 +163,22 @@ class ManagerResidency:
         try:
             if snapshot is None or snapshot['pending_id'] is None:
                 predecessor = mm.lease_id
-                # Claim keeps unload out; confirm object/link again after I/O.
-                read = self._own(model,asyncio.create_task(asyncio.to_thread(
-                    self.manager.sc.list_leases,resource_id=self.models[model],
-                    service_id=store.service,status='active')))
-                rows = await asyncio.shield(read)
-                if self.manager.models.get(model) is not mm or mm.lease_id != predecessor:
-                    raise Conflict('manager model/lease changed during ownership read')
-                matches = [row for row in rows if row.get('id') == predecessor]
-                if len(matches) != 1:
-                    raise Conflict('current registry read does not prove exact lease')
-                store.register(allocation,resource=self.models[model],model=mm.name,receipt=matches[0])
+                registered = await self._read_owned(model, mm, allocation, predecessor)
+                if registered['exclusive']:
+                    # Core rolls over shared byte grants only. Renew this exact
+                    # exclusive ID and keep its finite ceiling visible.
+                    store.forget_confirmation(allocation)
+                    renew = self._own(model, asyncio.create_task(asyncio.to_thread(
+                        self.manager.sc.renew_lease, predecessor, self.ttl)))
+                    response = await asyncio.shield(renew)
+                    if (not isinstance(response, dict) or response.get('lease_id') != predecessor
+                            or response.get('status') != 'active'):
+                        raise Conflict('exclusive renewal unconfirmed')
+                    current = await self._read_owned(model, mm, allocation, predecessor)
+                    if current['expires_at'] != response.get('expires_at'):
+                        raise Conflict('exclusive renewal expiry differs from registry')
+                    self._notify(model)
+                    return dict(current, outcome='covered', renewal_reason=response.get('reason'))
             else:
                 # A lost reply/restart must retry the persisted predecessor/key,
                 # not register an old pointer over it or make another allocation.
