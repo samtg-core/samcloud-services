@@ -43,11 +43,14 @@ class InitialReservations:
     replacement for the gateway's resource admission or working-set fit gate.
     """
     def __init__(self, path, client, *, registry_owner, service_id, models, budgets=None,
-                 wait_s=None, wait=False, clock=time.time):
+                 wait_s=None, wait=False, clock=time.time, exclusive_models=()):
         self.path, self.client = Path(path), client
         self.owner, self.service = required(registry_owner), required(service_id)
         self.models = {required(model):required(resource) for model, resource in models.items()}
         self.budgets = dict(budgets or {})
+        self.exclusive_models = frozenset(exclusive_models)
+        if self.exclusive_models - self.budgets.keys():
+            raise ValueError('exclusive residency requires an explicit physical budget')
         if wait_s is not None and (type(wait_s) is not int or wait_s < 0):
             raise ValueError('explicit non-negative registry queue wait required')
         if type(wait) is not bool:
@@ -81,6 +84,20 @@ class InitialReservations:
             if tuple(db.execute('SELECT owner,service FROM reservation_owner').fetchone()) != (
                     self.owner, self.service):
                 raise PermissionError('reservation journal belongs to another service identity')
+
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(initial_reservations)')}
+            if 'exclusive' not in columns:
+                db.execute('ALTER TABLE initial_reservations ADD COLUMN exclusive INTEGER NOT NULL DEFAULT 0')
+
+    @staticmethod
+    def _matches_claim(saved, receipt):
+        flag = receipt.get('exclusive')
+        if type(flag) not in (bool, int) or flag != saved['exclusive'] or 'memory_mb' not in receipt:
+            return False
+        memory = receipt['memory_mb']
+        if saved['exclusive']:
+            return memory is None
+        return type(memory) is int and memory == saved['memory_mb']
 
     @contextmanager
     def _owned(self):
@@ -200,9 +217,7 @@ class InitialReservations:
             raise Conflict('exact saved reservation is unconfirmed')
         receipt = matches[0]
         if (receipt.get('agent_id') != self.owner or receipt.get('service_id') != self.service
-                or receipt.get('resource_id') != row['resource'] or receipt.get('exclusive') != 0
-                or type(receipt.get('memory_mb')) is not int
-                or receipt['memory_mb'] != row['memory_mb']):
+                or receipt.get('resource_id') != row['resource'] or not self._matches_claim(row, receipt)):
             raise Conflict('saved reservation ownership or dimensions differ')
         if receipt.get('status') == 'queued':
             if row['state'] != 'queued':
@@ -252,6 +267,7 @@ class InitialReservations:
                              memory_mb=memory_mb, ttl_seconds=ttl_seconds, consume=True)
 
     def _reserve(self, model, *, resource, service_id, memory_mb, ttl_seconds, consume):
+        exclusive = model in self.exclusive_models
         memory_mb = self.required_memory(model, memory_mb)
         if (self.models.get(model) != resource or service_id != self.service or
                 type(memory_mb) is not int or memory_mb <= 0 or
@@ -263,8 +279,8 @@ class InitialReservations:
                 # A refused or retired row holds no live allocation, so a new
                 # demand may carry new configured dimensions (e.g. a raised
                 # budget). A live or unknown row keeps its exact dimensions.
-                if (row['resource'], row['memory_mb'], row['ttl_seconds']) != (
-                        resource, memory_mb, ttl_seconds):
+                if (row['resource'], row['memory_mb'], row['ttl_seconds'], row['exclusive']) != (
+                        resource, memory_mb, ttl_seconds, exclusive):
                     raise Conflict('reservation dimensions changed; reconcile saved allocation')
                 if row['state'] in ('queued', 'reserved'):
                     lease = self._observe_waiting(db, row)
@@ -276,13 +292,14 @@ class InitialReservations:
                     # Never guess which identity-wide lease belonged to this call.
                     raise Conflict('initial reservation requires exact lease reconciliation')
             intent = uuid.uuid4().hex
-            db.execute('INSERT OR REPLACE INTO initial_reservations VALUES(?,?,?,?,?,?,NULL,NULL)',
-                       (model, resource, memory_mb, ttl_seconds, intent, 'unknown'))
+            db.execute('INSERT OR REPLACE INTO initial_reservations VALUES(?,?,?,?,?,?,NULL,NULL,?)',
+                       (model, resource, memory_mb, ttl_seconds, intent, 'unknown', exclusive))
             try:
                 queue_options = ({'wait_s':self.wait_s} if self.wait_s is not None
                                  else {'wait':True} if self.wait else {})
+                dimensions = {'exclusive': True} if exclusive else {'memory_mb': memory_mb}
                 receipt = self.client.request_lease(resource_id=resource,
-                    service_id=service_id, memory_mb=memory_mb, ttl_seconds=ttl_seconds,
+                    service_id=service_id, ttl_seconds=ttl_seconds, **dimensions,
                     **queue_options)
             except Exception:
                 raise Conflict('initial reservation reply unknown; do not repeat allocation') from None
@@ -314,6 +331,9 @@ class InitialReservations:
                 valid = False
             if not valid:
                 raise Conflict('initial reservation has no current finite expiry')
+            if exclusive:
+                saved = db.execute('SELECT * FROM initial_reservations WHERE model=?', (model,)).fetchone()
+                self._observe_waiting(db, saved)
             # Commit before returning to ANY provider mutation. Reusing this
             # receipt after a failed load would assume that load never started.
             db.execute("UPDATE initial_reservations SET state=?,expires_at=? WHERE model=?",
@@ -408,8 +428,7 @@ class InitialReservations:
                 raise Conflict('registry does not prove the exact saved lease')
             lease = matches[0]
             if (lease.get('agent_id') != self.owner or lease.get('service_id') != self.service or
-                    lease.get('resource_id') != row['resource'] or lease.get('exclusive') != 0 or
-                    type(lease.get('memory_mb')) is not int or lease['memory_mb'] != row['memory_mb']):
+                    lease.get('resource_id') != row['resource'] or not self._matches_claim(row, lease)):
                 raise Conflict('exact lease ownership or dimensions differ')
             if lease.get('status') not in ('active', 'queued', 'released', 'expired', 'cancelled'):
                 raise Conflict('exact lease state is unknown')

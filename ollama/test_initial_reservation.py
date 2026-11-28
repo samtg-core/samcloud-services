@@ -51,6 +51,48 @@ class InitialReservation(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertTrue(saved['intent'])
 
+    def test_exclusive_wait_survives_restart_and_releases_the_promoted_row(self):
+        opts = dict(budgets={'qwen': 61440}, exclusive_models=['qwen'], wait=True)
+        self.client.request_lease.return_value = dict(self.receipt, status='queued')
+        with self.assertRaises(CapacityDeferred):
+            self.reserve(self.open(**opts))
+        self.client.request_lease.assert_called_once_with(resource_id='gpu', service_id='service',
+            ttl_seconds=3600, exclusive=True, wait=True)
+        saved = self.store.snapshot('qwen')
+        self.assertEqual((saved['memory_mb'], saved['exclusive']), (61440, 1))
+        with self.assertRaises(Conflict):
+            self.reserve(self.open(budgets={'qwen': 61440}))
+        self.client.list_leases.return_value = [self.lease(memory_mb=None, exclusive=1,
+                                                         expires_at=self.receipt['expires_at'])]
+        self.assertEqual(self.reserve(self.open(**opts)), 'exact')
+        self.open(**opts).reconcile_absent('qwen', confirm_absent=lambda _: True)
+        self.client.release_lease.assert_called_once_with('exact')
+        self.client.request_lease.assert_called_once()
+
+    def test_old_shared_journal_preserves_an_existing_waiter_after_upgrade(self):
+        # Construct a journal with the schema that predates exclusive grants.
+        self.path = self.path.with_name('legacy.sqlite')
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("""CREATE TABLE initial_reservations (
+                model TEXT PRIMARY KEY, resource TEXT NOT NULL, memory_mb INTEGER NOT NULL,
+                ttl_seconds INTEGER NOT NULL, intent TEXT NOT NULL, state TEXT NOT NULL,
+                lease_id TEXT, expires_at TEXT)""")
+            db.execute("INSERT INTO initial_reservations VALUES('qwen','gpu',100,3600,'key','queued','exact',NULL)")
+        self.path.chmod(0o600)
+        store = self.open()
+        self.client.list_leases.return_value = [self.lease(expires_at=self.receipt['expires_at'])]
+        self.assertEqual(self.reserve(store), 'exact')
+        self.assertEqual(store.snapshot('qwen')['exclusive'], 0)
+        self.client.request_lease.assert_not_called()
+
+    def test_direct_exclusive_grant_requires_exact_exclusive_readback(self):
+        store = self.open(budgets={'qwen': 61440}, exclusive_models=['qwen'], wait=True)
+        with self.assertRaises(Conflict):
+            self.reserve(store)
+        self.assertEqual(store.snapshot('qwen')['state'], 'unknown')
+        self.assertEqual(store.snapshot('qwen')['lease_id'], 'exact')
+        self.client.release_lease.assert_not_called()
+
     def test_handed_off_receipt_is_not_reused_after_reopen_or_failed_load(self):
         self.reserve()
         with self.assertRaises(Conflict):
@@ -336,7 +378,7 @@ class InitialReservation(unittest.TestCase):
                 store = self.open(models={state:'gpu'})
                 self.client.request_lease.reset_mock()
                 with closing(sqlite3.connect(self.path)) as db, db:
-                    db.execute('INSERT INTO initial_reservations VALUES(?,?,?,?,?,?,?,?)',
+                    db.execute('INSERT INTO initial_reservations VALUES(?,?,?,?,?,?,?,?,0)',
                                (state,'gpu',100,3600,'intent',state,'exact','2099-01-01T00:00:00Z'))
                 with self.assertRaises(Conflict):
                     store.reserve(state, resource='gpu', service_id='service', memory_mb=200, ttl_seconds=3600)
