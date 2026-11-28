@@ -109,7 +109,8 @@ class Reservation(unittest.TestCase):
                 self.manager.models = {}
                 self.manager.ollama = SimpleNamespace(memory_estimate_mb=Mock(return_value=100),
                     list_models=Mock(return_value=[{'name':'qwen'}]), load_model=Mock(),
-                    list_running=Mock(return_value=running), num_ctx_for=Mock(return_value=None))
+                    list_running=Mock(return_value=running), num_ctx_for=Mock(return_value=None),
+                    port_for=Mock(return_value=11434))
                 self.manager.sc.request_lease.return_value = self.response()
                 with patch.object(self.manager,'refuse_if_device_in_use'), \
                      patch('ollama.manager.capacity.collect',return_value={'memory_available_mb':10000}), \

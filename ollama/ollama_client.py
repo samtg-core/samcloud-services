@@ -371,6 +371,12 @@ class OllamaClient:
     def _backend(self, model):
         return self.model_backends.get(self._model_key(model), self.base_url)
 
+    def port_for(self, model: str) -> int:
+        origin = urlsplit(self._backend(model))
+        if origin.port is not None:
+            return origin.port
+        return 443 if origin.scheme == "https" else 80
+
     def _path(self, model, path):
         # Preserve relative URLs for the default httpx client.
         base = self._backend(model)

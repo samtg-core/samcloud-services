@@ -35,12 +35,34 @@ class BackendSelectionTests(unittest.TestCase):
         self.assertEqual(self.calls[-4:], [(22434, '/api/generate'), (22434, '/api/show'),
                                           (22434, '/api/generate'), (11434, '/api/show')])
 
+    def test_port_uses_the_same_route_as_model_requests(self):
+        self.assertEqual(self.client.port_for("inkling:latest"), 22434)
+        self.assertEqual(self.client.port_for("qwen"), 11434)
+        for scheme, port in (("https", 443), ("http", 80)):
+            client = OllamaClient(base_url=scheme + "://example.test", model_backends={})
+            self.addCleanup(client._http.close)
+            self.assertEqual(client.port_for("qwen"), port)
+
     def test_default_origin_with_trailing_slash_is_polled_once(self):
         client = OllamaClient(base_url=self.default + '/', model_backends={'inkling': self.default})
         client._http.close()
         client._http = self.client._http
         self.assertEqual(client.list_running(), [])
         self.assertEqual(self.calls, [(11434, '/api/ps')])
+
+    def test_discovery_reports_port_of_resident_daemon(self):
+        from unittest.mock import Mock
+        from .manager import ModelManager
+
+        manager = Mock(spec=ModelManager)
+        manager.durable_inference = False
+        manager.models = {}
+        manager.ollama = self.client
+        manager.llama = Mock()
+        manager.llama.discover_running.return_value = []
+        self.residents[22434] = [{"name": "inkling:latest", "size": 1 << 30, "context_length": 65536}]
+        resident, = ModelManager.discover(manager)
+        self.assertEqual((resident.name, resident.port), ("inkling:latest", 22434))
 
     def test_missing_secondary_inventory_is_an_error(self):
         def inventory(request):
