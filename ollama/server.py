@@ -1993,6 +1993,19 @@ def _log_ollama_timings(model: str, chunk: dict, counted: Optional[int] = None):
         log.info(f"Ollama timings for {model}: " + "; ".join(bits))
 
 
+def _ollama_finish_reason(chunk: dict, has_tool_calls: bool) -> str:
+    """Preserve output-limit termination, including a partial tool call.
+
+    A length stop is not a complete answer. In particular, Hermes refuses to
+    checkpoint a truncated compaction summary only when this signal survives
+    the native-Ollama -> OpenAI translation. Keep the older missing-reason
+    fallback, but never overwrite an explicit length with stop/tool_calls.
+    """
+    if chunk.get("done_reason") == "length":
+        return "length"
+    return "tool_calls" if has_tool_calls else "stop"
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, http_request: Request = None):
     if inference_dispatcher is not None:
@@ -2092,7 +2105,7 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                             }) + "\n\n"
                         if chunk.get("done"):
                             _log_ollama_timings(mm.name, chunk, n_prompt)
-                            finish = "tool_calls" if saw_tool_calls else "stop"
+                            finish = _ollama_finish_reason(chunk, saw_tool_calls)
                             yield "data: " + json.dumps({
                                 "choices": [{"delta": {}, "finish_reason": finish}]
                             }) + "\n\n"
@@ -2238,7 +2251,7 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
             # iteration moves. This is why `_held_sync` is not used here.
             def _collect():
                 content, calls, counts = "", None, {}
-                saw_done = False
+                done_chunk = None
                 for chunk in mgr.ollama.chat(
                         mm.name, ollama_messages, service_owned=queue_owned, **ollama_kwargs):
                     if "message" in chunk:
@@ -2246,7 +2259,7 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                         if chunk["message"].get("tool_calls"):
                             calls = chunk["message"]["tool_calls"]
                     if chunk.get("done"):
-                        saw_done = True
+                        done_chunk = chunk
                         _log_ollama_timings(mm.name, chunk, n_prompt)
                         counts = {
                             "prompt_tokens": chunk.get("prompt_eval_count", 0),
@@ -2254,16 +2267,15 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
                             "total_tokens": (chunk.get("prompt_eval_count", 0) +
                                              chunk.get("eval_count", 0)),
                         }
-                if not saw_done:
+                if done_chunk is None:
                     raise RuntimeError("Ollama chat ended without a terminal done frame")
-                return content, calls, counts
+                return content, calls, counts, _ollama_finish_reason(done_chunk, bool(calls))
 
-            full_content, tool_calls, usage = await _run_claimed(
+            full_content, tool_calls, usage, finish_reason = await _run_claimed(
                 mm.name, _collect)
             message = {"role": "assistant", "content": full_content}
             if tool_calls:
                 message["tool_calls"] = _fix_tool_calls(tool_calls)
-            finish_reason = "tool_calls" if tool_calls else "stop"
             return {
                 "choices": [{
                     "message": message,

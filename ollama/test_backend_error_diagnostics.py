@@ -72,7 +72,7 @@ class Diagnostics(unittest.IsolatedAsyncioTestCase):
                       and n.name=="stream" and any(isinstance(v,ast.Name) and v.id=="saw_tool_calls"
                                                   for v in ast.walk(n)))
         helpers = [next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
-                   for name in ("_failure_frames","_fix_tool_calls")]
+                   for name in ("_failure_frames","_fix_tool_calls","_ollama_finish_reason")]
         helpers.insert(0,next(n for n in tree.body if isinstance(n,ast.Assign)
                               and any(isinstance(t,ast.Name) and t.id=="_FAILURE_FINISH_REASON"
                                       for t in n.targets)))
@@ -192,17 +192,18 @@ class CompletionDiagnostics(unittest.IsolatedAsyncioTestCase):
         value = bare_client()
         async def resolve(model):
             return types.SimpleNamespace(name=model,backend="ollama")
-        namespace = dict(json=json,CompletionRequest=types.SimpleNamespace,
+        sampling = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ollama_sampling_kwargs")
+        namespace = dict(json=json,ChatRequest=types.SimpleNamespace,CompletionRequest=types.SimpleNamespace,
                          _resolve_model=resolve,Backend=types.SimpleNamespace(EXO="exo",OLLAMA="ollama"),
                          mgr=types.SimpleNamespace(ollama=value),
                          OllamaBackendError=client.OllamaBackendError,
                          StreamingResponse=lambda iterator,**kwargs:iterator)
-        exec(compile(ast.Module(body=[route],type_ignores=[]),"exact-completions-route","exec"),namespace)
+        exec(compile(ast.Module(body=[sampling,route],type_ignores=[]),"exact-completions-route","exec"),namespace)
         with httpx.Client(base_url="http://offline",transport=httpx.MockTransport(
                 lambda request:httpx.Response(status,content=body))) as http:
             value._http=http
             response = await namespace["_completions_direct"](
-                types.SimpleNamespace(model="fixture",prompt="fixture",stream=True))
+                types.SimpleNamespace(model="fixture",prompt="fixture",stream=True,temperature=None,max_tokens=None))
             return [json.loads(line) for line in response]
 
     async def test_inband_error_ends_ndjson_with_safe_failure(self):
