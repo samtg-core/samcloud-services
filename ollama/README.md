@@ -3,6 +3,10 @@
 The core inference gateway. Manages multiple model backends behind a single OpenAI-compatible API
 with SAMcloud resource leasing for GPU memory.
 
+[Backend error diagnostics](BACKEND_ERRORS.md) describes safe cause tags,
+failure framing and the boundary between a failed response and confirmed
+backend termination.
+
 ## Modules
 
 | Module | Responsibility |
@@ -63,6 +67,22 @@ render                              json | text | verbose_json | srt | vtt
 
 ## Model Lifecycle
 
+Durable transcription consumes its exact staged initial reservation before
+spawning Whisper. The physical resource handoff pauses admission and drains
+known work before invoking confirmed Whisper cleanup. An uncertain execution
+keeps the handoff closed even when its Python request counter has returned to
+zero; an idle timer or `force` flag cannot authorize this cleanup.
+
+Cleanup signals only the manager's tracked child with the exact configured
+arguments. Its exit must be reaped, the process inventory must contain no
+Whisper server, and the Whisper port must refuse connections before the model's
+lease can be released. The explicit cleanup observation bound never escalates
+to a kill or frees bytes on expiry. Cold reconciliation uses these same Whisper
+observations, so an empty Ollama inventory cannot establish Whisper absence.
+
+These are model-service lifecycle responsibilities. The core registry remains
+the authority for queue admission, lease ownership and settlement.
+
 ```
 Not loaded → estimate memory → request SAMcloud lease → pull/start → load → serve
                                                                         │
@@ -111,6 +131,14 @@ This is transparent to consumers. See ticket #69 for details.
 
 ## Configuration
 
+A provider can assign an exact model tag to a second local Ollama daemon by setting
+`OLLAMA_MODEL_BACKENDS='{"inkling-2-mini:26b-a5b":"http://127.0.0.1:11435"}'`.
+Other tags use `OLLAMA_BASE`. Run each daemon with its own listener and model store.
+Discovery, metadata, loading, generation and unloading follow the assignment.
+The gateway checks every backend when reading residency and reports an inventory error
+if a model is running on a daemon other than its assigned one. Resource admission and
+grant scheduling still use the provider's existing queue configuration.
+
 See [root README](../README.md#configuration) for environment variables and tuning constants.
 
 ## Testing
@@ -130,3 +158,31 @@ python -m ollama.test_whisper_routing        # from the repo root
 python3 ollama/test_whisper_kill_guard.py
 $WHISPER_PYTHON ollama/test_whisper_child.py
 ```
+
+
+## Agent capability evaluation
+
+The [versioned capability playground](../model_eval/README.md) runs the same useful jobs against
+configured model, client, compute and Samcloud identity combinations. It lives in
+this repository and reuses deployed clients/admission; it adds no allocator or
+gateway runtime changes. Start with the small capability baseline; general model
+throughput and host-health benchmarks are separate.
+
+Current queue/native deployments may run pinned source ahead of this repository
+main. Record their exact revisions in the deployment configuration; installing
+this harness does not upgrade a serving gateway or prove rail availability.
+
+### Concurrent chat on two resident models
+
+A shared queue can opt in with `"parallel_models": ["model-a", "model-b"]` inside its
+`stint_policy`. Both models must have explicit reservations on the same physical
+resource and use different configured Ollama backends. The second call can start
+while the first runs when both exact leases and resident models pass the existing
+capacity checks. A cold model still gets its usual queued load. Each call has
+its own grant, execution ID and process-lifetime claim.
+
+Only the first queued grant with a saved call can take the second slot. An
+incompatible head waits for the pair to drain. An unknown lease, a service
+handoff, or uncertain compute prevents new parallel admission. The second
+work-session grant yields its scheduling preference when that call ends.
+Recovery quarantines each interrupted execution by its original ID.

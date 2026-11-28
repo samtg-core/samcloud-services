@@ -1,0 +1,159 @@
+diff --git a/docs/api.md b/docs/api.md
+index d795248..be385c5 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -37,6 +37,12 @@ Returns the current state of the cluster, including nodes and active instances.
+ **Response:**
+ JSON object describing topology, nodes, and instances.
+ 
++### Get leased inference state
++
++**GET** `/leased/state`
++
++A leased runtime serves one event snapshot through its authenticated loopback API. The response includes the event index, topology, instances, runners, downloads, prefill ports and instance links. Each task reports its original type, ID, instance ID and status. Task prompts and tool schemas stay in the full state. The coordinator uses this projection to verify startup and command completion. An ordinary runtime returns 404.
++
+ ### Get Events
+ 
+ **GET** `/events`
+diff --git a/src/exo/api/main.py b/src/exo/api/main.py
+index c904018..bf6e487 100644
+--- a/src/exo/api/main.py
++++ b/src/exo/api/main.py
+@@ -423,6 +423,7 @@ class API:
+         self.app.get("/state")(self.get_state)
+         self.app.get("/state/{path:path}")(self.get_state)
+         self.app.get("/events")(self.stream_events)
++        self.app.get("/leased/state")(self.leased_state)
+         self.app.get("/leased/commands/{command_id}/end")(self.leased_command_end)
+         self.app.post("/download/start")(self.start_download)
+         self.app.delete("/download/{node_id}/{model_id:path}")(self.delete_download)
+@@ -1107,6 +1108,35 @@ class API:
+             media_type="application/json",
+         )
+ 
++    def leased_state(self) -> JSONResponse:
++        if self._leased_profile is None:
++            raise HTTPException(status_code=404, detail="Private state unavailable")
++        # Use one immutable event snapshot. Retained task inputs can exceed
++        # the coordinator's metadata budget even for a single healthy call.
++        state = self.state
++        result = state.model_dump(
++            mode="json",
++            by_alias=True,
++            include={
++                "instances",
++                "runners",
++                "downloads",
++                "topology",
++                "last_event_applied_idx",
++                "prefill_server_ports",
++                "instance_links",
++            },
++        )
++        result["tasks"] = {
++            key: task.model_dump(
++                mode="json",
++                by_alias=True,
++                include={"task_id", "instance_id", "task_status"},
++            )
++            for key, task in state.tasks.items()
++        }
++        return JSONResponse(result)
++
+     async def leased_command_end(self, command_id: CommandId) -> JSONResponse:
+         profile = self._leased_profile
+         if profile is None:
+diff --git a/src/exo/api/tests/test_leased_memory.py b/src/exo/api/tests/test_leased_memory.py
+index 49bd492..a96dcba 100644
+--- a/src/exo/api/tests/test_leased_memory.py
++++ b/src/exo/api/tests/test_leased_memory.py
+@@ -4,6 +4,7 @@ import hashlib
+ import json
+ from dataclasses import replace
+ from pathlib import Path
++from typing import cast
+ from unittest.mock import AsyncMock
+ 
+ import pytest
+@@ -222,3 +223,54 @@ def test_full_window_cache_and_assigned_file_bytes_are_used(
+     (profile.model_bundle / "parent-manifest.json").write_text("{}")
+     with pytest.raises(ValueError, match="parent"):
+         read_staged_memory("fixture/qwen3", 65536, environment)
++
++
++def test_leased_state_retains_task_authority_without_generation_payload(
++    leased: tuple[LeasedRuntimeProfile, CreateInstanceParams],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    from exo.shared.types.common import CommandId
++    from exo.shared.types.state import State
++    from exo.shared.types.tasks import TaskStatus, TextGeneration
++    from exo.shared.types.text_generation import TextGenerationTaskParams
++
++    profile, _ = leased
++    task = TextGeneration(
++        command_id=CommandId(),
++        instance_id=InstanceId(),
++        task_status=TaskStatus.Running,
++        task_params=TextGenerationTaskParams(
++            model=ModelId("test"), input=[], tools=[{"description": "X" * 160000}]
++        ),
++    )
++    api = object.__new__(API)
++    monkeypatch.setattr(api, "_leased_profile", profile, raising=False)
++    api.state = State(tasks={task.task_id: task}, last_event_applied_idx=19)
++    assert len(api.state.model_dump_json()) > 128 * 1024
++    response = api.leased_state()
++    state = cast(dict[str, object], json.loads(bytes(response.body)))
++    assert len(response.body) < 128 * 1024
++    assert state["tasks"] == {
++        task.task_id: {
++            "TextGeneration": {
++                "taskId": task.task_id,
++                "instanceId": task.instance_id,
++                "taskStatus": "Running",
++            }
++        }
++    }
++    assert state["lastEventAppliedIdx"] == 19
++    full = api.state.model_dump(mode="json", by_alias=True)
++    for key in (
++        "instances",
++        "runners",
++        "downloads",
++        "topology",
++        "prefillServerPorts",
++        "instanceLinks",
++    ):
++        assert state[key] == full[key]
++    monkeypatch.setattr(api, "_leased_profile", None)
++    with pytest.raises(HTTPException) as exc:
++        api.leased_state()
++    assert exc.value.status_code == 404
+diff --git a/src/exo/worker/tests/unittests/test_runner/test_runner_supervisor.py b/src/exo/worker/tests/unittests/test_runner/test_runner_supervisor.py
+index 2d5d657..cd5e57a 100644
+--- a/src/exo/worker/tests/unittests/test_runner/test_runner_supervisor.py
++++ b/src/exo/worker/tests/unittests/test_runner/test_runner_supervisor.py
+@@ -239,10 +239,10 @@ async def test_a_failed_runner_keeps_its_diagnostics() -> None:
+ @pytest.mark.anyio
+ async def test_ring_confirmation_waits_for_connecting_status_handoff() -> None:
+     supervisor, _, _ = await _make_supervisor()
+-    events, supervisor._ev_recv = mp_channel[Event | RunnerTerminationError]()
+-    supervisor._connect_confirmation, confirmed = mp_channel[TaskId]()
++    events, supervisor._ev_recv = mp_channel[Event | RunnerTerminationError]()  # pyright: ignore[reportPrivateUsage]
++    supervisor._connect_confirmation, confirmed = mp_channel[TaskId]()  # pyright: ignore[reportPrivateUsage]
+     # Rendezvous channel: forwarding cannot finish until the worker reads.
+-    supervisor._event_sender, worker = channel[Event](0)
++    supervisor._event_sender, worker = channel[Event](0)  # pyright: ignore[reportPrivateUsage]
+     task = ConnectToGroup(instance_id=supervisor.bound_instance.instance.instance_id)
+     supervisor.in_progress[task.task_id] = task
+     pending = anyio.Event()
+@@ -252,7 +252,7 @@ async def test_ring_confirmation_waits_for_connecting_status_handoff() -> None:
+         runner_status=RunnerConnecting(),
+     )
+     async with anyio.create_task_group() as tg:
+-        tg.start_soon(supervisor._forward_events)
++        tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+         events.send(status)
+         events.send(TaskAcknowledged(task_id=task.task_id))
+         with anyio.fail_after(5):

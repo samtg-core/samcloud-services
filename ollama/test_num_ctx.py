@@ -70,6 +70,8 @@ class FakeHTTP:
         self.show_calls = 0
 
     class _Resp:
+        status_code = 200
+
         def __init__(self, body):
             self._body = body
 
@@ -116,6 +118,7 @@ class FakeHTTP:
 def client(mod, http):
     c = mod.OllamaClient.__new__(mod.OllamaClient)
     c.base_url = "http://fake"
+    c.model_backends = {}
     c._http = http
     c._clamped = set()
     c._native_ctx = {}

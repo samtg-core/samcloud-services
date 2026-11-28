@@ -42,21 +42,26 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 
+from . import inference_bindings
 from . import capacity
 from . import config
 from . import prompt_size
+from .inference_arbiter import CapacityDeferred
+from .reasoning_request import reasoning_request_error, ollama_think
 from .manager import (
+    backend_serves,
+    backend_is_exclusive,
     ModelManager, Backend, VLM_PORT, VLM_MODELS, hf_model_installed,
     match_vlm_model, match_gguf_model, match_exo_tier,
     WHISPER_MODELS, WHISPER_ALIASES, WHISPER_DEFAULT, match_whisper_model,
 )
 from .manager import TranscriberBusy
 from .exo_client import ExoUnavailable, ExoRequestFailed, ExoStalled
-from .ollama_client import OllamaStalled, OllamaRequestTimeout
+from .ollama_client import OllamaStalled, OllamaRequestTimeout, OllamaRefused, OllamaBackendError
 from .samcloud import SamcloudClient
 from .ollama_client import OllamaClient
 from .llama_client import LlamaServerClient
@@ -106,14 +111,54 @@ async def _held_async(model_name: str, gen):
 
 
 def _held_sync(model_name: str, gen):
-    """`_held_async` for the blocking collection loop. Same claim, same reason.
+    """`_held_async` for a blocking collection loop. NO PRODUCTION CALLER.
 
-    The non-streaming path blocks for the generation's whole length — up to
-    549s of measured prefill on this box, well past COOLDOWN_SECONDS.
+    DO NOT reach for this from a coroutine. It was the non-streaming chat
+    route's claim until #959, where the problem turned out to be the iteration
+    itself: a blocking generator driven from an `async def` handler runs the
+    whole generation on the event loop, and every other route — `/health`
+    included — goes dark for its length. Measured: 8 probes, all `http=000`,
+    while one `max_tokens:2` request ran. That route now claims on the loop and
+    iterates in a thread; see it for the full reasoning.
+
+    Kept, rather than deleted, for the shape it still describes correctly: a
+    caller already running OFF the loop (a threadpool route, a worker) that
+    needs the same claim. `test_in_flight` holds it to that. Adding a caller
+    back on the loop is the bug, not the helper.
     """
     with mgr.serving(model_name):
         for item in gen:
             yield item
+
+
+async def _run_claimed(model_name: str, fn):
+    """Run blocking `fn` in a worker, claiming the model for the WORKER's life.
+
+    The claim cannot be a `with` block around the await. Cancelling an
+    `asyncio.to_thread` await does NOT stop the worker it started — so a caller
+    that disconnects mid-generation would unwind the `with`, drop `in_flight`
+    to zero, and leave the model reading idle while a thread was still driving
+    a generation through it. `check_cooldowns` would then be free to unload and
+    release the lease under live work, which is #907 reopened through a door
+    the fix for #959 opened. codex named this boundary before it shipped; it is
+    the one part of the offload that is not mechanical.
+
+    So: claim on the loop, start the work as a task, and release from a done
+    callback that fires when the WORKER finishes — whatever happened to
+    whoever was awaiting it. `shield` is what keeps the cancellation off the
+    task: the awaiting handler still raises `CancelledError` promptly, which is
+    correct, and the generation it paid for is still accounted for until it
+    actually ends.
+
+    `claim`/`release` rather than `mm.in_flight` directly, so the cooldown and
+    this read one counter. Both run on the loop: the callback is a loop
+    callback, which is what makes this safe without a lock.
+    """
+    claimed = mgr.claim(model_name) is not None
+    task = asyncio.ensure_future(asyncio.to_thread(fn))
+    if claimed:
+        task.add_done_callback(lambda _f: mgr.release(model_name))
+    return await asyncio.shield(task)
 
 
 def _read_loaded_commit() -> str | None:
@@ -247,8 +292,19 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
         key = self._cache_key(token)
         self._cache[key] = (time.time() + AUTH_CACHE_TTL, identity)
 
+    async def _authorized(self, request, identity, call_next):
+        request.state.caller = identity
+        try:
+            request.state.inference_binding = inference_bindings.resolve(
+                request, os.environ.get('SC_INFERENCE_BINDINGS_DIRECTORY'))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        return await call_next(request)
+
     async def dispatch(self, request: Request, call_next):
         if not AUTH_ENABLED or request.url.path in AUTH_EXEMPT_PATHS:
+            if inference_bindings.HEADER in request.headers:
+                return JSONResponse(status_code=403, content={'detail': 'Verified runtime required'})
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
@@ -261,17 +317,20 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
         token = auth_header  # Forward full "Bearer xxx" header
 
         # Check cache
-        cached = self._get_cached(token)
+        bound = inference_bindings.HEADER in request.headers
+        if bound and httpx.URL(self.verify_url).scheme != "https":
+            return JSONResponse(status_code=503, content={"detail": "Secure runtime verification unavailable"})
+        cache_key = "bound " + token if bound else token
+        cached = self._get_cached(cache_key)
         if cached:
-            request.state.caller = cached
-            return await call_next(request)
+            return await self._authorized(request, cached, call_next)
 
         # Verify with SAMcloud
         try:
             url = self.verify_url
             if self.required_scope:
                 url += f"?scope={self.required_scope}"
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            async with httpx.AsyncClient(verify=bound, timeout=10) as client:
                 resp = await client.get(url, headers={"Authorization": token})
         except Exception as e:
             log.warning(f"SAMcloud verify failed: {e}")
@@ -291,11 +350,10 @@ class SamcloudAuthMiddleware(BaseHTTPMiddleware):
             )
 
         identity = resp.json()
-        self._set_cached(token, identity)
-        request.state.caller = identity
+        self._set_cached(cache_key, identity)
         log.info(f"Verified caller: {identity.get('username')} ({identity.get('role')})")
 
-        return await call_next(request)
+        return await self._authorized(request, identity, call_next)
 
 mgr: Optional[ModelManager] = None
 
@@ -306,15 +364,20 @@ async def lifespan(app: FastAPI):
     sc = SamcloudClient(token=SC_TOKEN)
     mgr = ModelManager(sc=sc)
 
-    # Discover and adopt running models
-    adopted = mgr.discover()
-    for m in adopted:
-        log.info(f"Adopted: {m.name} ({m.backend.value}) ~{m.memory_mb}MB on port {m.port}")
-
-    # Claim leases for everything running
-    leases = mgr.claim_leases()
-    for l in leases:
-        log.info(f"Lease: {l}")
+    if inference_startup is not None:
+        from .inference_bootstrap import QueueStartup
+        if not isinstance(inference_startup,QueueStartup):
+            raise TypeError('Trusted QueueStartup binding required')
+        # Must precede adoption and background maintenance. A failed durable
+        # startup propagates; it cannot fall through to unjournaled legacy work.
+        await inference_startup.start(sys.modules[__name__])
+    else:
+        adopted = mgr.discover()
+        for m in adopted:
+            log.info(f"Adopted: {m.name} ({m.backend.value}) ~{m.memory_mb}MB on port {m.port}")
+        leases = mgr.claim_leases()
+        for l in leases:
+            log.info(f"Lease: {l}")
 
     # Check the pool's resource id resolves, once, at boot. At runtime the code
     # genuinely cannot tell a missing resource from a registry outage — both
@@ -371,9 +434,29 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("Shutting down...")
+    runtime = inference_runtime
+    if (runtime is None) != (inference_dispatcher is None):
+        raise RuntimeError('Inference dispatcher has no matching lifecycle owner; shutdown refused')
+    if runtime is not None:
+        if runtime.manager is not mgr or runtime.queue is not inference_dispatcher:
+            raise RuntimeError('Inference runtime/manager ownership differs; shutdown refused')
+        composition = getattr(runtime, 'exo_service', None)
+        if composition is not None:
+            # Its observers outlive callers. Refuse while a host has no cleanup
+            # or a group lacks exact settlement, before manager lease release.
+            await composition.close()
+        state = await runtime.quiesce()
+        if not state['drained']:
+            # A stopped HTTP waiter is not backend termination. Do not enter
+            # the manager's lease-release path or close its journal on unknown
+            # work. This protects graceful cleanup, not SIGKILL/power loss.
+            log.error('Inference ownership unresolved; manager shutdown refused')
+            raise RuntimeError('Inference ownership requires reconciliation before shutdown')
     results = mgr.shutdown()
     for r in results:
         log.info(f"  {r}")
+    if runtime is not None:
+        runtime.close()
 
 
 app = FastAPI(
@@ -387,6 +470,14 @@ app.add_middleware(
     verify_url=SC_VERIFY_URL,
     required_scope=SC_REQUIRED_SCOPE,
 )
+
+# Installed explicitly by the service bootstrap once queue admission/ownership
+# is configured. None preserves the deployed behaviour; no rollout is implied.
+inference_dispatcher = None
+inference_runtime = None
+# Trusted service launcher may bind this before ASGI startup. No environment
+# activation switch is exposed before the real capacity source is qualified.
+inference_startup = None
 
 
 # -- Request models --
@@ -442,12 +533,48 @@ class ChatRequest(BaseModel):
     # the ticket.
     response_format: Optional[dict] = None
 
+    # The raw-input reasoning verdict (task 965), kept aside and never raised
+    # here: Exo forwards reasoning_effort unbudgeted and its accepted inputs stay
+    # exactly as they were. Ollama entry points refuse on it, so "64", 64.0 or
+    # True cannot become a budget through pydantic's coercion.
+    _reasoning_problem: Optional[str] = PrivateAttr(default=None)
+    _native_sampling: dict = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def _keep_raw_reasoning_verdict(cls, data, handler):
+        model = handler(data)
+        if isinstance(data, dict):
+            model._reasoning_problem = reasoning_request_error(data)
+            # Keep native options outside the ordinary Ollama request shape.
+            # Only a registered provider validates and forwards these values.
+            model._native_sampling = {key: data[key] for key in
+                                      ('top_p', 'top_k', 'min_p') if key in data}
+        return model
+
+    def native_sampling(self):
+        return dict(self._native_sampling)
+
+    def reasoning_problem(self):
+        """Raw-input verdict, else the parsed values (a model built without a dict)."""
+        return self._reasoning_problem or reasoning_request_error(
+            {"reasoning_effort": self.reasoning_effort, "max_tokens": self.max_tokens})
+
 class CompletionRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = False          # same reason as ChatRequest
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+
+
+def _ollama_sampling_kwargs(req: ChatRequest | CompletionRequest) -> dict:
+    options = {}
+    if req.temperature is not None:
+        options['temperature'] = req.temperature
+    if req.max_tokens is not None:
+        options['num_predict'] = req.max_tokens
+    return {'options': options} if options else {}
 
 
 # -- Endpoints --
@@ -706,6 +833,14 @@ async def status():
     if LOADED_COMMIT is not None:
         out["loaded_commit"] = LOADED_COMMIT
     out["loaded_modules"] = loaded_modules()
+    runtime = inference_runtime
+    handoff = getattr(runtime, 'shared_resource', None)
+    if handoff is not None:
+        state = handoff.snapshot()  # loop-owned journal, never in mgr.status's thread
+        out['resource_queue'] = {'resource':state['resource'], 'handoff':state['phase'],
+            'queued_behind':state['contender'] if state['phase'] != 'idle' else None,
+            'allocations':state['allocations'],
+            'capacity':runtime.capacity_source.last.get(state['resource'],{})}
     return out
 
 
@@ -777,6 +912,12 @@ async def list_models_openai():
                 "created": now,
                 "owned_by": owned_by,
                 "status": status,
+                # #931. `owned_by` is the backend, and until now a consumer had
+                # to know that `mlx-whisper` cannot answer a chat and that `exo`
+                # is a mutex. Both are published rather than inferred; OpenAI
+                # SDKs ignore unknown fields, same as `status` and `memory_mb`.
+                "serves": backend_serves(owned_by),
+                "exclusive": backend_is_exclusive(owned_by),
             }
             if memory_mb is not None:
                 entry["memory_mb"] = memory_mb
@@ -1124,9 +1265,16 @@ def _pool_unavailable_503(e: Exception) -> HTTPException:
                 reason = pool["reason"]
                 note = pool.get("detail")
             offer = mgr.offering()
+            # FILTERED ON CAPABILITY, not just on "not the pool" (#931).
+            # This is a chat decline, and before this it offered both whisper
+            # models — `mlx-whisper` serves one route and cannot answer a chat
+            # at all. Two of eight suggestions could not serve the request type
+            # they were answering, which is worse than a list a caller picks
+            # from: `alternatives` is the gateway RECOMMENDING a substitute.
             alternatives = [
                 m["name"] for m in offer["resident"] + offer["loadable"]
                 if m.get("backend") != Backend.EXO.value
+                and "chat" in (m.get("serves") or [])
             ]
         except Exception as inner:
             # A decline must not fail. Losing the sharper reason costs a caller
@@ -1151,21 +1299,33 @@ def _pool_unavailable_503(e: Exception) -> HTTPException:
     if alternatives:
         detail["alternatives"] = alternatives
         detail["alternatives_note"] = (
-            "models this gateway can serve right now, offered as information: "
-            "nothing is substituted for the tier you asked for, so falling back "
-            "is your choice and needs a second request naming one of these"
+            "models this gateway can serve a CHAT with right now, offered as "
+            "information: nothing is substituted for the tier you asked for, so "
+            "falling back is your choice and needs a second request naming one "
+            "of these. Transcription-only models are excluded — they cannot "
+            "answer this request at all (#931)"
         )
     return HTTPException(status_code=503, detail=detail)
 
 
 @app.post("/models/load")
-async def load_model(req: LoadRequest):
+async def load_model(req: LoadRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.control('model_load', req, http_request)
+    return await _load_model_direct(req)
+
+
+async def _load_model_direct(req: LoadRequest, *, queue_owned=False):
+    async def local_call(function, *args, **kwargs):
+        if queue_owned:
+            return await asyncio.to_thread(function, *args, **kwargs)
+        return function(*args, **kwargs)
     try:
         # Only probe for a GGUF match when the backend could plausibly be
         # llama-server, so an explicit backend="ollama" still bypasses it.
         gguf_match = None
         if req.backend in ("auto", "llama-server"):
-            gguf_match = match_gguf_model(req.model, mgr.llama.available_models())
+            gguf_match = match_gguf_model(req.model, await local_call(mgr.llama.available_models))
 
         if req.backend == "exo" or (
             req.backend == "auto" and match_exo_tier(req.model)
@@ -1179,7 +1339,7 @@ async def load_model(req: LoadRequest):
         elif req.backend == "mlx-vlm" or (
             req.backend == "auto" and match_vlm_model(req.model)
         ):
-            mm = mgr.load_vlm_model(req.model)
+            mm = await local_call(mgr.load_vlm_model, req.model)
         elif req.backend == "llama-server" or gguf_match or (
             req.backend == "auto" and req.model.endswith(".gguf")
         ):
@@ -1191,14 +1351,14 @@ async def load_model(req: LoadRequest):
                 model_path = req.model
             else:
                 model_path = str(config.MODELS_DIR / req.model)
-            mm = mgr.load_llama_model(
+            mm = await local_call(mgr.load_llama_model,
                 model_path,
                 port=req.port,
                 ctx_size=req.ctx_size,
                 gpu_layers=req.gpu_layers,
             )
         else:
-            mm = mgr.load_ollama_model(req.model)
+            mm = await local_call(mgr.load_ollama_model, req.model)
 
         return {
             "status": "loaded",
@@ -1224,14 +1384,23 @@ async def load_model(req: LoadRequest):
 
 
 @app.post("/models/unload")
-async def unload_model(req: UnloadRequest):
+async def unload_model(req: UnloadRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.control('model_unload', req, http_request)
+    return await _unload_model_direct(req)
+
+
+async def _unload_model_direct(req: UnloadRequest, *, queue_owned=False):
     # Accept the same partial names as /models/load and inference: exact key
     # first, then case-insensitive substring match against loaded models.
     key = req.model
     if key not in mgr.models:
         lower = req.model.lower()
         key = next((n for n in mgr.models if lower in n.lower()), req.model)
-    result = mgr.unload(key, force=req.force)
+    if queue_owned:
+        result = await asyncio.to_thread(mgr.unload, key, force=req.force, require_confirmed=True)
+    else:
+        result = mgr.unload(key, force=req.force)
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=f"{req.model} not found")
     return result
@@ -1349,10 +1518,10 @@ def _openai_messages_to_ollama(messages: list[dict]) -> list[dict]:
     return converted
 
 
-async def _resolve_model(model_name: str):
+async def _resolve_model(model_name: str, *, queue_owned: bool = False):
     """Find a managed model, or auto-load it. Never returns None for known models.
 
-    Async only because of the pool. Resolving a tier reads exo's `/state` over
+    Legacy mode is async only because of the pool. Resolving a tier reads exo's `/state` over
     synchronous httpx with a 15s timeout, and this runs inside the request
     handlers — so on the happy path that was tens of milliseconds nobody
     noticed, and against a wedged or unreachable pool it froze the **entire**
@@ -1366,12 +1535,23 @@ async def _resolve_model(model_name: str):
     lease and loads nothing, so it is bounded and strands nothing if it outlives
     its caller. A generation is neither, which is why that path uses aiohttp.
 
-    Only the pool's calls are moved. The three local backends keep their
+    By default only the pool's calls are moved. The three local backends keep their
     existing behaviour deliberately — `load_ollama_model` and `load_vlm_model`
     block this loop today for as long as a model takes to load, which is a
     larger, pre-existing problem than this commit should quietly change. Making
     this function async is the seam that lets it be fixed separately.
+
+    A trusted queue-owned worker also offloads local health/list/load calls.
+    Admission must already be held before selecting this policy: making legacy
+    loads concurrent without shared admission could race two model loads. The
+    scheduler owns the worker, not its HTTP observer. If that scheduler is
+    cancelled, a load thread may survive; queue ownership remains uncertain,
+    never released on the assumption that cancellation stopped the load.
     """
+    async def local_call(function, *args):
+        if queue_owned:
+            return await asyncio.to_thread(function, *args)
+        return function(*args)
     # The pool first, and before the partial-match scan below. Two reasons it
     # cannot be folded in with the others: a tier is matched exactly (see
     # match_exo_tier) where every other backend matches on substrings, and
@@ -1411,8 +1591,13 @@ async def _resolve_model(model_name: str):
         if mm.backend == Backend.EXO:
             # Re-reads /state to pick up a swap; same blocking read as above.
             alive = await asyncio.to_thread(mgr.ensure_running, matched_name)
+        elif queue_owned:
+            # A residency check may reload dropped weights. Keep its existing
+            # model claimed for the actual thread lifetime, including after a
+            # cancelled scheduler observer, not only the later generation.
+            alive = await _run_claimed(matched_name, lambda: mgr.ensure_running(matched_name))
         else:
-            alive = mgr.ensure_running(matched_name)
+            alive = await local_call(mgr.ensure_running, matched_name)
         if not alive and mm.backend == Backend.EXO:
             # For local backends ensure_running() reloads and a False is worth
             # attempting anyway. For the pool there is nothing to reload: False
@@ -1432,23 +1617,37 @@ async def _resolve_model(model_name: str):
     if match_vlm_model(model_name):
         log.info(f"Auto-loading VLM (requested: {model_name})")
         try:
-            return mgr.load_vlm_model(model_name)
+            return await local_call(mgr.load_vlm_model, model_name)
         except Exception as e:
             log.error(f"VLM auto-load failed for {model_name}: {e}")
             return None
 
     # Check if it's a known Ollama model (already pulled).
     lower = model_name.lower()
-    for m in mgr.ollama.list_models():
+    for m in await local_call(mgr.ollama.list_models):
         ollama_name = m["name"]
         if lower in ollama_name.lower() or ollama_name.lower() in lower:
             log.info(f"Auto-loading {ollama_name} (requested: {model_name})")
             try:
-                mm = mgr.load_ollama_model(ollama_name)
+                mm = await local_call(mgr.load_ollama_model, ollama_name)
                 return mm
+            except CapacityDeferred:
+                if queue_owned:
+                    raise
+                # Durable-manager mode must not make an accidental legacy
+                # resolver bypass admission or collapse a known refusal to None.
+                raise HTTPException(503, 'Memory reservation is waiting for capacity') from None
             except capacity.DeviceInUse as e:
+                if queue_owned:
+                    # The manager's work-mode gate runs before pull/lease/load.
+                    # Preserve this affirmative no-start verdict, not HTTP prose.
+                    raise CapacityDeferred('work_mode') from None
                 raise _device_in_use_503(e)
             except capacity.InsufficientCapacity as e:
+                if queue_owned:
+                    # The Ollama fit refusal precedes provider mutation. A
+                    # transport/load error below is NOT safe to retry this way.
+                    raise CapacityDeferred('capacity_unavailable') from None
                 # Not a missing model — a capacity answer. Surface it, with the
                 # list of what does fit, instead of collapsing to "not pulled".
                 raise _capacity_503(e)
@@ -1457,11 +1656,11 @@ async def _resolve_model(model_name: str):
                 return None
 
     # Check GGUF files
-    for m in mgr.llama.available_models():
+    for m in await local_call(mgr.llama.available_models):
         if lower in m["name"].lower():
             log.info(f"Auto-loading {m['file']} (requested: {model_name})")
             try:
-                mm = mgr.load_llama_model(m["file"])
+                mm = await local_call(mgr.load_llama_model, m["file"])
                 return mm
             except capacity.DeviceInUse as e:
                 raise _device_in_use_503(e)
@@ -1809,7 +2008,13 @@ def _ollama_finish_reason(chunk: dict, has_tool_calls: bool) -> str:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, http_request: Request = None):
-    mm = await _resolve_model(req.model)
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.compat('chat', req, http_request)
+    return await _chat_completions_direct(req, http_request)
+
+
+async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved=None, queue_owned=False):
+    mm = resolved if resolved is not None else await _resolve_model(req.model)
     if not mm:
         raise HTTPException(status_code=404, detail=f"Model '{req.model}' not available (not pulled or no GGUF file)")
 
@@ -1824,7 +2029,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
         # content is populated correctly alongside thinking.
         # Convert OpenAI-format messages to Ollama native format.
         ollama_messages = _openai_messages_to_ollama(req.messages)
-        ollama_kwargs = {}
+        ollama_kwargs = _ollama_sampling_kwargs(req)
         if req.tools:
             ollama_kwargs["tools"] = req.tools
         # think:false — this is the documented #69 decision but was never wired
@@ -1833,14 +2038,14 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
         # message.content), which both wastes the inference slot for minutes
         # (the #97 hang) and starves any num_predict budget below. Disable it so
         # tokens go to the content we actually return.
-        ollama_kwargs["think"] = False
-        # Bound generation length: Ollama takes this under options.num_predict,
-        # not the OpenAI-style top-level max_tokens. Without this an unbounded
-        # generation can occupy the single inference slot for minutes and starve
-        # every other route (ticket #97).
-        if req.max_tokens is not None:
-            ollama_kwargs["options"] = {"num_predict": req.max_tokens}
-
+        # Opt-in: an explicit, budgeted level turns it on; absent or `none`
+        # sends exactly the old `False` (task 965). Queued calls were already
+        # checked on enqueue; this covers the direct route, before any backend
+        # call or prompt work.
+        problem = req.reasoning_problem()
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        ollama_kwargs["think"] = ollama_think(req.reasoning_effort)
         # Count the prompt, so the first-token deadline can scale to it (#904).
         # NOT a limit — nothing is refused here, unlike the pool's #837 gate.
         # The only consumer is the deadline, and an unknown count falls back to
@@ -1850,7 +2055,24 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
         # model, which holds its own weights), and anything else is swallowed.
         n_prompt = None
         try:
-            n_prompt, how = prompt_size.count(
+            # Off the loop (#974). #959's offload moved the two blocking
+            # CLIENTS and left this, and #959's own test cannot see it: it
+            # stubs `prompt_size.count` to `lambda *a, **kw: (19, "stub")`, so
+            # the call that still runs on the loop is the one replaced by an
+            # instant lambda. That test's own warning — "a fast stub would pass
+            # the tick test for the wrong reason" — applied to a different call
+            # than the one it guards.
+            #
+            # MEASURED COST, because this is small and should not be sold as an
+            # outage: since #906's exact path went live this renders the chat
+            # template and runs the tokenizer over the whole prompt, and on
+            # this box that is 32-114 ms for 20k-60k tokens (380 ms on the
+            # first call, which includes loading the tokenizer). So it blocks
+            # every other request for about a tenth of a second per large turn
+            # — real, and two orders of magnitude off the five-minute hang
+            # #959 fixed. Worth moving; not worth hurrying.
+            n_prompt, how = await asyncio.to_thread(
+                prompt_size.count,
                 req.messages, mm.name,
                 models_dir=str(config.MODELS_DIR),
                 chars_per_token=config.OLLAMA_CHARS_PER_TOKEN,
@@ -1864,10 +2086,11 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
         if req.stream:
             async def stream():
                 saw_tool_calls = False
+                diagnostic_started = time.monotonic()
                 try:
                     async for chunk in mgr.ollama.chat_stream(
                         mm.name, ollama_messages,
-                        prompt_tokens=n_prompt, **ollama_kwargs
+                        prompt_tokens=n_prompt, service_owned=queue_owned, **ollama_kwargs
                     ):
                         delta = {}
                         if "message" in chunk and chunk["message"].get("content"):
@@ -1875,21 +2098,38 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                         if "message" in chunk and chunk["message"].get("tool_calls"):
                             delta["tool_calls"] = _fix_tool_calls(chunk["message"]["tool_calls"])
                             saw_tool_calls = True
+                        if delta:
+                            yield "data: " + json.dumps({
+                                "choices": [{"delta": delta, "finish_reason": None}],
+                                "model": mm.name,
+                            }) + "\n\n"
                         if chunk.get("done"):
                             _log_ollama_timings(mm.name, chunk, n_prompt)
                             finish = _ollama_finish_reason(chunk, saw_tool_calls)
                             yield "data: " + json.dumps({
                                 "choices": [{"delta": {}, "finish_reason": finish}]
                             }) + "\n\n"
+                            if (req.stream_options or {}).get('include_usage') is True:
+                                prompt = chunk.get('prompt_eval_count')
+                                completion = chunk.get('eval_count')
+                                # Provider counts only; missing values stay unknown.
+                                if (type(prompt) is int and prompt>=0 and
+                                        type(completion) is int and completion>=0):
+                                    yield 'data: '+json.dumps({'model':mm.name,'choices':[],
+                                        'usage':{'prompt_tokens':prompt,
+                                                 'completion_tokens':completion,
+                                                 'total_tokens':prompt+completion}})+'\n\n'
                             yield "data: [DONE]\n\n"
-                        elif delta:
-                            yield "data: " + json.dumps({
-                                "choices": [{"delta": delta, "finish_reason": None}],
-                                "model": mm.name,
-                            }) + "\n\n"
                 except asyncio.CancelledError:
                     log.info(f"Client disconnected during stream for {mm.name}")
                     raise
+                except OllamaRefused as e:
+                    if queue_owned:
+                        raise  # preserve typed evidence to the owning scheduler
+                    for frame in _failure_frames('provider_refused', e.result['detail'],
+                                                 {'status': e.result['status']}):
+                        yield 'data: ' + json.dumps(frame) + '\n\n'
+                    yield 'data: [DONE]\n\n'
                 # Everything below TELLS THE CALLER (#904). The headers went out
                 # with the first chunk, so none of this can be a 504 — but the
                 # alternative was worse than a wrong status code: this used to
@@ -1909,7 +2149,21 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 # relative to every other timeout on the path, and the one that
                 # fires first should be the one that reports best. Ours fires
                 # first and used to report worst.
+                except OllamaBackendError as e:
+                    if queue_owned:
+                        raise  # owning scheduler retains uncertainty; client logged safe diagnostics
+                    detail = e.diagnostics()
+                    detail["elapsed_s"] = round(time.monotonic() - diagnostic_started, 3)
+                    log.warning("Ollama backend_error %s", json.dumps(detail, sort_keys=True))
+                    for frame in _failure_frames(
+                        "backend_error", "Ollama backend reported an error; execution needs reconciliation",
+                        detail,
+                    ):
+                        yield "data: " + json.dumps(frame) + "\n\n"
+                    yield "data: [DONE]\n\n"
                 except OllamaStalled as e:
+                    if queue_owned:
+                        raise  # scheduler records uncertainty, not a model delta
                     log.error(
                         f"Ollama STALLED mid-stream for {mm.name} on the "
                         f"{e.phase} deadline ({e.deadline:.0f}s): {e.tokens} "
@@ -1925,6 +2179,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                         yield "data: " + json.dumps(frame) + "\n\n"
                     yield "data: [DONE]\n\n"
                 except OllamaRequestTimeout as e:
+                    if queue_owned:
+                        raise
                     # Named apart from a stall because the caller's correct
                     # response is the opposite: a stall means the runner is
                     # stuck, this means the request was legitimately long and
@@ -1946,6 +2202,8 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                         yield "data: " + json.dumps(frame) + "\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
+                    if queue_owned:
+                        raise  # no raw exception text in queued output/log copy
                     # Also terminated now, for the same reason. `{e!r}` not
                     # `{e}`: a bare TimeoutError stringifies to the empty
                     # string, which is how 17 cut-off requests were logged as
@@ -1960,31 +2218,64 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
             return StreamingResponse(_held_async(mm.name, stream()),
                                      media_type="text/event-stream")
         else:
-            # Non-streaming: collect full response via native API
-            full_content = ""
-            tool_calls = None
-            usage = {}
-            done_chunk = {}
-            for chunk in _held_sync(
-                    mm.name,
-                    mgr.ollama.chat(mm.name, ollama_messages, **ollama_kwargs)):
-                if "message" in chunk:
-                    full_content += chunk["message"].get("content", "")
-                    if chunk["message"].get("tool_calls"):
-                        tool_calls = chunk["message"]["tool_calls"]
-                if chunk.get("done"):
-                    done_chunk = chunk
-                    _log_ollama_timings(mm.name, chunk, n_prompt)
-                    usage = {
-                        "prompt_tokens": chunk.get("prompt_eval_count", 0),
-                        "completion_tokens": chunk.get("eval_count", 0),
-                        "total_tokens": (chunk.get("prompt_eval_count", 0) +
-                                         chunk.get("eval_count", 0)),
-                    }
+            # Non-streaming: collect the whole reply IN A THREAD (#959).
+            #
+            # `OllamaClient.chat` is a BLOCKING generator and this handler is
+            # `async def`, so iterating it here ran the entire generation on the
+            # event loop. One non-streaming request therefore took the whole
+            # gateway dark for its full length — not just itself. Every route
+            # went with it, `/health` included, because there was no loop left
+            # to answer them on.
+            #
+            # MEASURED, deliberately, on slice 2026-10-11 22:37Z. One request
+            # with `stream:false` and `max_tokens:2`, then eight probes over
+            # 30s while it ran:
+            #
+            #     GET /warm    x4   http=000  (6s timeout, each)
+            #     GET /health  x4   http=000  (6s timeout, each)
+            #
+            # `/health` returns a four-key dict and touches no backend; 30s
+            # earlier it answered in 0.07s. That is what identifies this as the
+            # loop and not the backend. It is also exactly the shape
+            # claude-containers reported an hour before — "socket accepted, no
+            # reply, process at 0.0% CPU, nothing restarts it because it never
+            # exits" — and why the registry still read `online` throughout: the
+            # process was healthy and unable to speak.
+            #
+            # THE CLAIM STAYS ON THE LOOP. `serving()` is entered and exited
+            # here rather than inside the thread, because its docstring rests on
+            # `in_flight` being mutated from the event loop alone — a
+            # read-modify-write from a worker thread races `check_cooldowns`,
+            # which is #907's unload-under-a-live-request in a form a test would
+            # almost never catch. So the claim spans the await; only the
+            # iteration moves. This is why `_held_sync` is not used here.
+            def _collect():
+                content, calls, counts = "", None, {}
+                done_chunk = None
+                for chunk in mgr.ollama.chat(
+                        mm.name, ollama_messages, service_owned=queue_owned, **ollama_kwargs):
+                    if "message" in chunk:
+                        content += chunk["message"].get("content", "")
+                        if chunk["message"].get("tool_calls"):
+                            calls = chunk["message"]["tool_calls"]
+                    if chunk.get("done"):
+                        done_chunk = chunk
+                        _log_ollama_timings(mm.name, chunk, n_prompt)
+                        counts = {
+                            "prompt_tokens": chunk.get("prompt_eval_count", 0),
+                            "completion_tokens": chunk.get("eval_count", 0),
+                            "total_tokens": (chunk.get("prompt_eval_count", 0) +
+                                             chunk.get("eval_count", 0)),
+                        }
+                if done_chunk is None:
+                    raise RuntimeError("Ollama chat ended without a terminal done frame")
+                return content, calls, counts, _ollama_finish_reason(done_chunk, bool(calls))
+
+            full_content, tool_calls, usage, finish_reason = await _run_claimed(
+                mm.name, _collect)
             message = {"role": "assistant", "content": full_content}
             if tool_calls:
                 message["tool_calls"] = _fix_tool_calls(tool_calls)
-            finish_reason = _ollama_finish_reason(done_chunk, bool(tool_calls))
             return {
                 "choices": [{
                     "message": message,
@@ -2152,6 +2443,22 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     log.warning(f"Pool stream error for {mm.name}: {e}")
+                    # SAME REASONING AS ExoRequestFailed ABOVE, which this handler did
+                    # not follow: headers are already sent, so an unexpected error here
+                    # closed the stream with NO terminal event and NO `[DONE]`. A caller
+                    # cannot tell that from a short generation — the silent-drop case #43
+                    # fixed on the owned path, surviving here because the assertion
+                    # written to catch it (step 9 of test_stream_deadlines) counted
+                    # `[DONE]` over a TEXT SLICE spanning two backends, so it never
+                    # measured this branch at all.
+                    #
+                    # Matches its siblings (an inline error event) rather than importing
+                    # the owned path's `_failure_frames` shape into this generator.
+                    yield "data: " + json.dumps({
+                        "error": {"message": f"{type(e).__name__}: {e}",
+                                  "type": "stream_error"},
+                    }) + "\n\n"
+                    yield "data: [DONE]\n\n"
                 finally:
                     # Covers a clean finish, an error, and a client that walked
                     # away mid-generation (CancelledError unwinds through here).
@@ -2354,7 +2661,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                     resp = await client.post(
                         f"http://127.0.0.1:{mm.port}/v1/chat/completions",
                         json={**payload, "stream": False},
-                        timeout=300,
+                        timeout=None if queue_owned else 300,
                     )
                     data = resp.json()
                     content = data["choices"][0]["message"].get("content", "")
@@ -2392,7 +2699,7 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
                 resp = await client.post(
                     f"http://127.0.0.1:{mm.port}/v1/chat/completions",
                     json=payload,
-                    timeout=300,
+                    timeout=None if queue_owned else 300,
                 )
                 data = resp.json()
                 # Parse Gemma tool calls from content
@@ -2407,8 +2714,14 @@ async def chat_completions(req: ChatRequest, http_request: Request = None):
 
 
 @app.post("/v1/completions")
-async def completions(req: CompletionRequest):
-    mm = await _resolve_model(req.model)
+async def completions(req: CompletionRequest, http_request: Request = None):
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.compat('completion', req, http_request)
+    return await _completions_direct(req)
+
+
+async def _completions_direct(req: CompletionRequest, resolved=None, queue_owned=False):
+    mm = resolved if resolved is not None else await _resolve_model(req.model)
     if not mm:
         raise HTTPException(status_code=404, detail=f"Model '{req.model}' not available (not pulled or no GGUF file)")
 
@@ -2430,13 +2743,35 @@ async def completions(req: CompletionRequest):
         })
 
     if mm.backend == Backend.OLLAMA:
+        sampling = _ollama_sampling_kwargs(req)
         if req.stream:
             def stream():
-                for chunk in mgr.ollama.generate(mm.name, req.prompt):
-                    yield json.dumps(chunk) + "\n"
+                try:
+                    for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned, **sampling):
+                        yield json.dumps(chunk) + "\n"
+                except OllamaBackendError as e:
+                    if queue_owned:
+                        raise  # owning scheduler retains uncertainty
+                    yield json.dumps({"error": "backend_error",
+                                      "diagnostics": e.diagnostics(), "done": True,
+                                      "done_reason": "error"}) + "\n"
             return StreamingResponse(stream(), media_type="application/x-ndjson")
         else:
-            chunks = list(mgr.ollama.generate(mm.name, req.prompt))
+            # In a thread, for the reason the chat route carries in full
+            # (#959): `generate` blocks, this handler is `async def`, and
+            # iterating it here took every other route down with it.
+            #
+            # The `serving()` claim is NEW on this route, not moved. This path
+            # never held `in_flight` at all, so #907's unload-under-a-live
+            # request was still open here — `check_cooldowns` could release the
+            # lease and unload the model mid-generation, and on the whole-box
+            # measurement that cost 18 unloads in a day on the chat route
+            # alone. Same bug, same fix, one route later.
+            chunks = await _run_claimed(
+                mm.name,
+                lambda: list(mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned, **sampling)))
+            if not chunks or not chunks[-1].get('done'):
+                raise RuntimeError("Ollama completion ended without a terminal done frame")
             return chunks[-1] if chunks else {}
 
     elif mm.backend == Backend.LLAMA:
@@ -2695,6 +3030,7 @@ async def create_transcription(
     response_format: str = Form("json"),
     temperature: Optional[float] = Form(None),
     timestamp_granularities: Optional[list[str]] = Form(None, alias="timestamp_granularities[]"),
+    http_request: Request = None,
 ):
     """OpenAI-shaped speech to text. Multipart `file` + `model`, `{"text": ...}` back.
 
@@ -2751,6 +3087,11 @@ async def create_transcription(
     # and vtt be rendered without a granularity parameter. Word timings cost a
     # second DTW pass, so they are computed only when they will be returned.
     need_words = "word" in granularities
+
+    if inference_dispatcher is not None:
+        return await inference_dispatcher.transcription(file,model,{
+            'language':language,'prompt':prompt,'temperature':temperature,
+            'format':fmt,'granularities':sorted(granularities)},http_request)
 
     # Resolve and claim under one lock, with no await between the claim and the
     # release — see `_whisper_gate`. The transcription itself runs outside it, so
@@ -2811,6 +3152,10 @@ async def create_transcription(
         except OSError as e:
             log.warning(f"could not remove {spooled}: {e}")
 
+    return _format_transcription_result(mm,result,fmt,granularities)
+
+
+def _format_transcription_result(mm, result, fmt, granularities):
     # No `mgr.touch()`: `load_whisper_model` has already counted this request on
     # both the fresh-load and the already-resident path, and touch() counts as
     # well as stamping. The stamp is in the finally above.

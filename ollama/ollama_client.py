@@ -5,14 +5,268 @@ import time
 import httpx
 import json
 import logging
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Iterator
+from urllib.parse import urlsplit
 
 from . import config
 
 OLLAMA_BASE = config.OLLAMA_BASE
 
 log = logging.getLogger("ollama-client")
+
+
+ERROR_BODY_LIMIT = 4096
+ERROR_BODY_TIMEOUT = 2.0
+# These literal prefixes are present in the installed 0.33.0 backend. Anything
+# else remains unclassified; model-generated text is never a diagnostic tag.
+_ERROR_PREFIXES = (
+    ("model runner has unexpectedly stopped", "runner_stopped"),
+    ("error parsing tool call", "tool_parse"),
+    ("an error was encountered while running the model", "model_runtime"),
+    ("context canceled", "context_cancelled"),
+)
+# 0.33.0 raises tool_parse only in the harmony parser's done branch
+# (harmony/harmonyparser.go:445), and the chat route reports it after the
+# runner's Completion call has returned (server/routes.go:2892). Unlike every
+# other tag it is affirmative evidence that generation ended.
+_COMPLETED_GENERATION = frozenset({"tool_parse", "tool_parse_xml"})
+# 0.33.0's XML tool parser (qwen3-coder and qwen3.5 renderers) fails only in
+# model/parsers/qwen3coder.go parseToolCall's xml.Unmarshal, so its errors are Go
+# encoding/xml texts: a SyntaxError ("XML syntax error on line N: ...") or an
+# UnmarshalError ("expected element type <a> but have <b>"). The chat route
+# handles every builtin parser error alike: it sets parserErr and cancels the
+# runner request (server/routes.go:2810-2814), then sends the error frame only
+# after r.Completion has returned (server/routes.go:2892-2894), the same point
+# as harmony's tool_parse. Bare "EOF" is not matched: too generic to be proof.
+_XML_TOOL_PARSE_PREFIXES = (
+    ("xml syntax error on line ", "syntax"),
+    ("expected element type <", "element_type"),
+)
+# The kind of syntax error only; element names come from model text and are
+# never recorded.
+_XML_SYNTAX_KINDS = (
+    (re.compile(r"element <[^>]*> closed by </[^>]*>$"), "mismatched_close"),
+    (re.compile(r"unexpected EOF$"), "eof"),
+    (re.compile(r"unexpected end element </[^>]*>$"), "unexpected_end"),
+    (re.compile(r"invalid character entity "), "bad_entity"),
+)
+
+
+def _xml_tool_parse_shape(detail, kind):
+    """Content-free shape of a Go encoding/xml tool-call error."""
+    shape = {"parser": "xml", "xml_error": kind}
+    if kind == "syntax":
+        shape["xml_error"] = next((k for pattern, k in _XML_SYNTAX_KINDS if pattern.search(detail)),
+                                  "syntax_other")
+    return shape
+_TOOL_PARSE_PREFIX = "error parsing tool call"
+_TOOL_PARSE_STATUS_HEAD = b'{"error":"' + _TOOL_PARSE_PREFIX.encode()
+# Go encoding/json messages, so the shape of a rejected tool call is recorded
+# without its text: a fixed kind and the class of the offending character.
+_GO_JSON_ERRORS = (
+    (re.compile(r"unexpected end of JSON input$"), "eof"),
+    (re.compile(r"invalid character (.+) looking for beginning of value$"), "not_json"),
+    (re.compile(r"invalid character (.+) after top-level value$"), "trailing_data"),
+    (re.compile(r"invalid character (.+) after object key(?::value pair)?$"), "bad_separator"),
+    (re.compile(r"invalid character (.+) looking for beginning of object key string$"), "bad_key"),
+    (re.compile(r"invalid character (.+) in string literal$"), "control_in_string"),
+    (re.compile(r"invalid character (.+) in string escape code$"), "bad_escape"),
+    (re.compile(r"invalid character (.+) in numeric literal$"), "bad_number"),
+    # Valid JSON that is not an object fails in wk8/go-ordered-map v2.1.8 via
+    # buger/jsonparser.ObjectEach, after encoding/json's own syntax check.
+    (re.compile(r"Value looks like object, but can't find closing '\}' symbol$"), "not_object"),
+)
+
+
+def _char_class(c):
+    if not c:
+        return "none"
+    if c in "{}":
+        return "brace"
+    if c in "[]":
+        return "bracket"
+    if c in "\"'`":
+        return {"\"": "quote", "'": "apostrophe", "`": "backtick"}[c]
+    if c == "\\":
+        return "backslash"
+    if c in "\n\r\t":
+        return "newline_or_tab"
+    if c.isspace():
+        return "space"
+    if c.isalpha():
+        return "letter"
+    if c.isdigit():
+        return "digit"
+    if not c.isprintable():
+        return "control"
+    return "punct"
+
+
+def _go_quoted_char(token):
+    # Go's quoteChar: 'x', '\'', '\\', '\n', '\x01' or '\u00a0'.
+    inner = token[1:-1] if len(token) >= 2 and token[0] == token[-1] == "'" else ""
+    if inner.startswith("\\") and len(inner) > 1:
+        return {"n": "\n", "r": "\r", "t": "\t", "'": "'", "\\": "\\"}.get(inner[1], "\x00")
+    return inner[:1]
+
+
+def _tool_parse_shape(detail):
+    """Content-free shape of `error parsing tool call: raw='...', err=...`."""
+    body = detail[len(_TOOL_PARSE_PREFIX):]
+    head, sep, err = body.rpartition("', err=")
+    raw = head[len(": raw='"):] if sep and head.startswith(": raw='") else None
+    shape = {"raw_len": None if raw is None else len(raw),
+             "raw_first": _char_class(raw.lstrip()[:1]) if raw is not None else "unknown",
+             "raw_last": _char_class(raw.rstrip()[-1:]) if raw is not None else "unknown",
+             "json_error": "unknown", "char": "unknown"}
+    if raw is None:
+        return shape
+    for pattern, kind in _GO_JSON_ERRORS:
+        m = pattern.search(err)
+        if m:
+            shape["json_error"] = kind
+            if m.groups():
+                shape["char"] = _char_class(_go_quoted_char(m.group(1)))
+            else:
+                shape["char"] = "none"
+            return shape
+    shape["json_error"] = "other"
+    return shape
+
+
+class OllamaBackendError(Exception):
+    """Safe provider diagnostics, NOT evidence that execution/compute ended."""
+    def __init__(self, status, phase, chunks_before, detail=b"", *, truncated=False):
+        raw = detail.encode("utf-8", errors="replace") if isinstance(detail, str) else bytes(detail)
+        self.status, self.phase, self.chunks_before = status, phase, chunks_before
+        self.detail_len = len(raw)
+        self.detail_truncated = truncated or len(raw) > ERROR_BODY_LIMIT
+        bounded = raw[:ERROR_BODY_LIMIT]
+        self.detail_sha256 = hashlib.sha256(bounded).hexdigest()
+        self.subtype = "unclassified"
+        if isinstance(detail, str) and not self.detail_truncated:
+            self.subtype = next((tag for prefix, tag in _ERROR_PREFIXES
+                                 if detail.lower().startswith(prefix)), "unclassified")
+        # A tool call's arguments can exceed the retained bound. The fixed prefix
+        # comes first, so it is still identifiable; the shape is then unknown.
+        elif isinstance(detail, str) and detail.startswith(_TOOL_PARSE_PREFIX):
+            self.subtype = "tool_parse"
+        elif phase == "status" and raw.startswith(_TOOL_PARSE_STATUS_HEAD):
+            self.subtype = "tool_parse"
+        xml_kind = None
+        if self.subtype == "unclassified" and isinstance(detail, str) and not self.detail_truncated:
+            xml_kind = next((kind for prefix, kind in _XML_TOOL_PARSE_PREFIXES
+                             if detail.lower().startswith(prefix)), None)
+            if xml_kind is not None:
+                self.subtype = "tool_parse_xml"
+        self.parse_shape = None
+        if xml_kind is not None:
+            self.parse_shape = _xml_tool_parse_shape(detail, xml_kind)
+        elif self.subtype == "tool_parse":
+            self.parse_shape = (_tool_parse_shape(detail) if isinstance(detail, str)
+                                and not self.detail_truncated else
+                                {"raw_len": None, "raw_first": "unknown", "raw_last": "unknown",
+                                 "json_error": "unknown", "char": "unknown"})
+        super().__init__(f"Ollama backend error: status={status} phase={phase} "
+                         f"subtype={self.subtype} chunks_before={chunks_before}")
+
+    @property
+    def completed_generation(self):
+        return self.subtype in _COMPLETED_GENERATION
+
+    def diagnostics(self):
+        out = dict(status=self.status, phase=self.phase, subtype=self.subtype,
+                   chunks_before=self.chunks_before, detail_len=self.detail_len,
+                   detail_sha256=self.detail_sha256[:12], detail_truncated=self.detail_truncated)
+        if self.parse_shape is not None:
+            out["parse_shape"] = dict(self.parse_shape)
+        return out
+
+
+def _backend_error(status, phase, chunks_before, body, *, truncated=False, parsed=False):
+    detail = body
+    if not parsed:
+        try:
+            value = json.loads(body)
+            if isinstance(value, dict) and isinstance(value.get("error"), str):
+                detail = value["error"]
+        except (ValueError, TypeError):
+            pass
+    if not isinstance(detail, (str, bytes, bytearray)):
+        detail = b""
+    error = OllamaBackendError(status, phase, chunks_before, detail, truncated=truncated)
+    # The durable queue may bypass server.stream's compatibility framing.
+    # Keep the same safe diagnostic available on that path as well.
+    log.warning("Ollama backend_error %s", json.dumps(error.diagnostics(), sort_keys=True))
+    return error
+
+
+async def _async_status_error(resp):
+    import asyncio
+    body = bytearray()
+    async def read_bounded():
+        while len(body) < ERROR_BODY_LIMIT:
+            part = await resp.content.read(ERROR_BODY_LIMIT - len(body))
+            if not part:
+                break
+            body.extend(part)
+    incomplete = False
+    try:
+        await asyncio.wait_for(read_bounded(), timeout=ERROR_BODY_TIMEOUT)
+    except Exception:
+        incomplete = True
+    return _backend_error(resp.status, "status", 0, bytes(body),
+                          truncated=incomplete or len(body) >= ERROR_BODY_LIMIT)
+
+
+def _sync_status_error(resp):
+    # Preserve the existing httpx per-read timeout. Bound retained bytes; unlike
+    # the async path, this read uses the synchronous request's configured timeout.
+    body = bytearray()
+    try:
+        for part in resp.iter_bytes(chunk_size=1024):
+            body.extend(part[:ERROR_BODY_LIMIT-len(body)])
+            if len(body) >= ERROR_BODY_LIMIT:
+                break
+    except Exception:
+        return _backend_error(resp.status_code, "status", 0, bytes(body), truncated=True)
+    return _backend_error(resp.status_code, "status", 0, bytes(body),
+                          truncated=len(body) >= ERROR_BODY_LIMIT)
+
+
+def _checked_chunk(chunk, seen):
+    if isinstance(chunk, dict) and "error" in chunk and "message" not in chunk and "done" not in chunk:
+        raise _backend_error(200, "in_stream", seen, chunk["error"], parsed=True)
+    return chunk
+
+
+class OllamaRefused(Exception):
+    """Complete 400/404 JSON refusal received BEFORE any generation frames.
+
+    Not a timeout, load error, 5xx or an in-stream error. Error bodies can contain
+    prompts/paths, so only status and fixed safe copy cross the queue boundary.
+    https://docs.ollama.com/api/errors
+    """
+    def __init__(self, status):
+        if status not in (400, 404):
+            raise ValueError('not a qualified Ollama refusal')
+        self.result = {'kind': 'error', 'status': status, 'code': 'ollama_refused',
+            'detail': 'Ollama rejected an invalid request before streaming' if status == 400
+                      else 'Ollama could not find the requested model'}
+        super().__init__(self.result['detail'])
+
+
+def _raise_complete_refusal(status, raw):
+    if status not in (400, 404):
+        return
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return
+    if isinstance(body, dict) and isinstance(body.get('error'), str) and body['error']:
+        raise OllamaRefused(status)
 
 
 class OllamaStalled(Exception):
@@ -108,7 +362,37 @@ class OllamaClient:
     # so a typo is reported once rather than on every request.
     _clamped: set = field(default_factory=set, repr=False)
 
+    model_backends: dict[str, str] = field(
+        default_factory=lambda: json.loads(config.OLLAMA_MODEL_BACKENDS))
+
+    def _model_key(self, model):
+        return model if ':' in model.rsplit('/', 1)[-1] else model + ':latest'
+
+    def _backend(self, model):
+        return self.model_backends.get(self._model_key(model), self.base_url)
+
+    def _path(self, model, path):
+        # Preserve relative URLs for the default httpx client.
+        base = self._backend(model)
+        return path if base == self.base_url else base + path
+
     def __post_init__(self):
+        if not isinstance(self.model_backends, dict):
+            raise ValueError('OLLAMA_MODEL_BACKENDS must be a JSON object')
+        self.base_url = self.base_url.rstrip('/')
+        backends = {}
+        for name, base in self.model_backends.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(base, str):
+                raise ValueError('Invalid Ollama backend assignment')
+            url = urlsplit(base)
+            if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
+                    or url.password is not None or url.query or url.fragment or url.path.strip('/')):
+                raise ValueError('Expected an Ollama backend origin')
+            key = self._model_key(name)
+            if key in backends:
+                raise ValueError('Duplicate Ollama model assignment: ' + key)
+            backends[key] = base.rstrip('/')
+        self.model_backends = backends
         # Used for non-streaming requests only (health, list, show, etc.)
         self._http = httpx.Client(base_url=self.base_url, timeout=600)
 
@@ -255,20 +539,34 @@ class OllamaClient:
             pass
         return None
 
+    def _inventory(self, path, running):
+        rows = []
+        for base in dict.fromkeys([self.base_url, *self.model_backends.values()]):
+            response = self._http.get(path if base == self.base_url else base + path)
+            response.raise_for_status()
+            body = response.json()
+            if not running and not self.model_backends:
+                return body.get('models', [])
+            if not isinstance(body, dict) or not isinstance(body.get('models'), list):
+                raise ValueError('Ollama inventory is unknown')
+            for row in body['models']:
+                if not self.model_backends or self._backend(row['name']) == base:
+                    rows.append(row)
+                elif running:
+                    # Never unload or adopt a resident via the other daemon.
+                    raise ValueError('Ollama model resident outside its configured backend')
+        return rows
+
     def list_models(self) -> list[dict]:
-        r = self._http.get("/api/tags")
-        r.raise_for_status()
-        return r.json().get("models", [])
+        return self._inventory('/api/tags', running=False)
 
     def list_running(self) -> list[dict]:
-        r = self._http.get("/api/ps")
-        r.raise_for_status()
-        return r.json().get("models", [])
+        return self._inventory('/api/ps', running=True)
 
     def pull_model(self, model: str, stream: bool = True) -> Iterator[dict]:
         """Pull a model. Yields progress dicts if stream=True."""
         with self._http.stream(
-            "POST", "/api/pull", json={"model": model, "stream": stream}, timeout=None
+            "POST", self._path(model, "/api/pull"), json={"model": model, "stream": stream}, timeout=None
         ) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -276,7 +574,7 @@ class OllamaClient:
                     yield json.loads(line)
 
     def load_model(self, model: str, keep_alive: str | int = "1h",
-                   num_ctx: Optional[int] = None) -> dict:
+                   num_ctx: Optional[int] = None, *, service_owned=False) -> dict:
         """Load a model into memory without generating (warm-up).
         keep_alive: duration string ("1h", "30m") or -1 for indefinite.
 
@@ -291,16 +589,22 @@ class OllamaClient:
             payload["options"] = {"num_ctx": int(num_ctx)}
         else:
             payload = self._with_num_ctx(model, payload)
-        r = self._http.post("/api/generate", json=payload, timeout=300)
+        if service_owned:
+            payload['stream'] = False
+        r = self._http.post(self._path(model, "/api/generate"), json=payload,
+            timeout=self._owned_stream_timeout if service_owned else 300)
         r.raise_for_status()
         return r.json()
 
-    def unload_model(self, model: str) -> dict:
+    def unload_model(self, model: str, *, service_owned=False) -> dict:
         """Unload a model from memory by setting keep_alive to 0."""
+        payload = {"model": model, "prompt": "", "keep_alive": "0"}
+        if service_owned:
+            payload['stream'] = False
         r = self._http.post(
-            "/api/generate",
-            json={"model": model, "prompt": "", "keep_alive": "0"},
-            timeout=60,
+            self._path(model, "/api/generate"),
+            json=payload,
+            timeout=self._owned_stream_timeout if service_owned else 60,
         )
         r.raise_for_status()
         return r.json()
@@ -317,33 +621,50 @@ class OllamaClient:
     # and changing a correct line to look like the fix is how the next reader
     # loses track of which one was broken.
     _stream_timeout = httpx.Timeout(connect=10, read=300, write=10, pool=10)
+    # Only an admitted durable worker selects this. Its lifetime is independent
+    # of consumer sockets, with ambiguous termination quarantined by the queue.
+    _owned_stream_timeout = httpx.Timeout(connect=10, read=None, write=10, pool=10)
 
-    def generate(self, model: str, prompt: str, **kwargs) -> Iterator[dict]:
+    def generate(self, model: str, prompt: str, *, service_owned=False, **kwargs) -> Iterator[dict]:
         """Generate completion, streaming."""
         payload = self._with_num_ctx(
             model, {"model": model, "prompt": prompt, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/generate", json=payload, timeout=self._stream_timeout
+            "POST", self._path(model, "/api/generate"), json=payload,
+            timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
+            if resp.status_code in (400, 404):
+                _raise_complete_refusal(resp.status_code, resp.read())
+            if resp.status_code >= 400:
+                raise _sync_status_error(resp)
             resp.raise_for_status()
+            seen = 0
             for line in resp.iter_lines():
                 if line.strip():
-                    yield json.loads(line)
+                    yield _checked_chunk(json.loads(line), seen)
+                    seen += 1
 
-    def chat(self, model: str, messages: list[dict], **kwargs) -> Iterator[dict]:
+    def chat(self, model: str, messages: list[dict], *, service_owned=False, **kwargs) -> Iterator[dict]:
         """Chat completion, streaming (sync, for non-streaming collection)."""
         payload = self._with_num_ctx(
             model, {"model": model, "messages": messages, "stream": True, **kwargs})
         with self._http.stream(
-            "POST", "/api/chat", json=payload, timeout=self._stream_timeout
+            "POST", self._path(model, "/api/chat"), json=payload,
+            timeout=self._owned_stream_timeout if service_owned else self._stream_timeout
         ) as resp:
+            if resp.status_code in (400, 404):
+                _raise_complete_refusal(resp.status_code, resp.read())
+            if resp.status_code >= 400:
+                raise _sync_status_error(resp)
             resp.raise_for_status()
+            seen = 0
             for line in resp.iter_lines():
                 if line.strip():
-                    yield json.loads(line)
+                    yield _checked_chunk(json.loads(line), seen)
+                    seen += 1
 
     async def _stream_with_deadlines(self, path: str, payload: dict,
-                                     prompt_tokens: Optional[int] = None):
+                                     prompt_tokens: Optional[int] = None, *, service_owned=False):
         """POST a streaming Ollama request under three separate deadlines (#904).
 
         WHY NOT aiohttp's own `total=`, which is what this used to be.
@@ -387,7 +708,7 @@ class OllamaClient:
         session = aiohttp.ClientSession()
         try:
             async with session.post(
-                f"{self.base_url}{path}",
+                f"{self._backend(payload.get('model', ''))}{path}",
                 json=payload,
                 # `total=None` is NOT "no ceiling". OLLAMA_GENERATE_TIMEOUT
                 # is a real ceiling, enforced in the loop below — because
@@ -406,7 +727,24 @@ class OllamaClient:
                 # neither a stall nor a long generation.
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
             ) as resp:
+                if getattr(resp, 'status', None) in (400, 404):
+                    _raise_complete_refusal(resp.status, await resp.read())
+                if resp.status >= 400:
+                    raise await _async_status_error(resp)
                 resp.raise_for_status()
+                if service_owned:
+                    # This connection is owned by the durable scheduler, NOT
+                    # its HTTP observer. Silence or elapsed queue/generation
+                    # time does not establish failure. Real transport errors
+                    # still propagate for uncertainty/reconciliation; terminal
+                    # output is validated by the owning adapter before release.
+                    seen = 0
+                    async for raw in resp.content:
+                        line = raw.decode(errors='replace').strip()
+                        if line:
+                            yield _checked_chunk(json.loads(line), seen)
+                            seen += 1
+                    return
                 stream = resp.content.__aiter__()
                 seen = 0
                 started = time.monotonic()
@@ -535,39 +873,40 @@ class OllamaClient:
                         )
                     line = raw.decode(errors="replace").strip()
                     if line:
+                        chunk = _checked_chunk(json.loads(line), seen)
                         seen += 1
                         last = time.monotonic()
-                        yield json.loads(line)
+                        yield chunk
         finally:
             await session.close()
 
     async def chat_stream(self, model: str, messages: list[dict],
-                          prompt_tokens: Optional[int] = None, **kwargs):
+                          prompt_tokens: Optional[int] = None, *, service_owned=False, **kwargs):
         """Chat completion, async streaming. Kills connection on cancel."""
         payload = self._with_num_ctx(
             model, {"model": model, "messages": messages, "stream": True, **kwargs})
         async for chunk in self._stream_with_deadlines(
-            "/api/chat", payload, prompt_tokens
+            "/api/chat", payload, prompt_tokens, service_owned=service_owned
         ):
             yield chunk
 
     async def generate_stream(self, model: str, prompt: str,
-                              prompt_tokens: Optional[int] = None, **kwargs):
+                              prompt_tokens: Optional[int] = None, *, service_owned=False, **kwargs):
         """Generate completion, async streaming. Kills connection on cancel."""
         payload = self._with_num_ctx(
             model, {"model": model, "prompt": prompt, "stream": True, **kwargs})
         async for chunk in self._stream_with_deadlines(
-            "/api/generate", payload, prompt_tokens
+            "/api/generate", payload, prompt_tokens, service_owned=service_owned
         ):
             yield chunk
 
     def show_model(self, model: str) -> dict:
         """Get model metadata."""
-        r = self._http.post("/api/show", json={"model": model})
+        r = self._http.post(self._path(model, "/api/show"), json={"model": model})
         r.raise_for_status()
         return r.json()
 
     def delete_model(self, model: str) -> dict:
-        r = self._http.request("DELETE", "/api/delete", json={"model": model})
+        r = self._http.request("DELETE", self._path(model, "/api/delete"), json={"model": model})
         r.raise_for_status()
         return r.json()

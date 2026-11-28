@@ -1,0 +1,605 @@
+"""Opt-in, fixed-configuration host metadata and rank control on model-service.
+
+The existing authentication middleware must supply the exact configured group
+owner. A request cannot select a model, path, command, credential or deployment.
+Preparation accepts only the admitted member of the fixed deployment; no caller
+selects runtime configuration. Operations belong to the supervisor and journal.
+"""
+
+import asyncio
+import base64
+from dataclasses import asdict
+from datetime import datetime
+import hashlib
+import os
+from pathlib import Path
+import re
+import sqlite3
+import time
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from ..inference_events import source_call
+
+from .deployment import HostDeployment
+from .cleanup import CleanupExpectation, NoStartExpectation, validate_cleanup
+from .reboot_cleanup import RebootExpectation, validate_reboot_cleanup
+from .http import decode_json
+from .member import ExpectedMember, settlement_confirmed
+from .plan import LaunchBinding, MemberPlan
+from .prepare import canonical, digest
+from . import receipt_files
+from .host_receipts import observe_local_attempt
+from .token_receipts import collect_tokens
+from .rank_process import Listener, ProcessIdentity, RunBinding
+from .rank_runtime import LaunchPreflightPending
+from .load_capacity import metal_policy
+
+
+_SOURCE_NAMES = ('host_control.py', 'deployment.py', 'rank_runtime.py', 'receipt_files.py', 'load_capacity.py', 'staging_files.py',
+                 'host_receipts.py', 'host_channel.py', 'token_receipts.py', 'pf_transport.py', 'reboot_cleanup.py')
+_SOURCE = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+           for name in _SOURCE_NAMES}
+SOURCE_SHA256 = digest(_SOURCE)
+
+
+def run_identity(binding):
+    return {name: getattr(binding, name) for name in (
+        'group_id', 'generation', 'lease_id', 'resource_id',
+        'rank_manifest_sha256', 'runtime_sha256')}
+
+
+def configuration_sha256(deployment):
+    configuration = {'plan': asdict(deployment.plan), 'files': deployment.files_json,
+        'runtime_sha256': deployment.runtime_sha256, 'boot_id': deployment.boot_id,
+        'home': str(deployment.home), 'state_base': str(deployment.state_base),
+        'peer_ips': deployment.peer_ips, 'ports': deployment.ports,
+        'cleanup_tolerance_bytes': deployment.cleanup_tolerance_bytes,
+        'qualification_token_limit': deployment.qualification_token_limit,
+        'transport_sha256': deployment.transport_sha256}
+    # Preserve existing profile identities when this explicit accommodation is
+    # absent. A changed step must bind a new host configuration and launch hash.
+    if deployment.prefill_step_size is not None:
+        configuration['prefill_step_size'] = deployment.prefill_step_size
+    if deployment.served_context_length is not None:
+        configuration['served_context_length'] = deployment.served_context_length
+    return digest(configuration)
+
+
+async def _verify_settlement(reader, expected, *, require_fence, minimum_generation=None):
+    projection = await reader.projection(expected)
+    if not settlement_confirmed(expected, projection, require_fence=require_fence,
+                                minimum_generation=minimum_generation):
+        raise ValueError('prior exact member settlement is unconfirmed')
+
+
+class HostControl:
+    def __init__(self, runtime, deployment, composition):
+        if (not isinstance(deployment, HostDeployment) or composition.runtime is not runtime
+                or getattr(runtime, 'exo_host_control', None) is not None
+                or set(runtime.settings.models.values()) != {deployment.files.resource_id}
+                or any(getattr(route, 'path', '').startswith('/v1/exo/host')
+                       for route in runtime.queue.service.app.routes)):
+            raise ValueError('one explicit host deployment on its own queue runtime required')
+        self.runtime, self.deployment, self.composition = runtime, deployment, composition
+        self.configuration_sha256 = configuration_sha256(deployment)
+        self.accepting = True
+        self.tasks = {}
+        journal = runtime.queue.supervisor.journal
+        with journal.transaction():
+            journal.db.execute('''CREATE TABLE IF NOT EXISTS exo_host_controls (
+                resource_id TEXT NOT NULL, lease_id TEXT NOT NULL, action TEXT NOT NULL,
+                request_id TEXT NOT NULL UNIQUE, identity_json TEXT NOT NULL,
+                state TEXT NOT NULL, error_type TEXT, created REAL NOT NULL,
+                PRIMARY KEY(resource_id,lease_id,action))''')
+            columns = {row['name'] for row in journal.db.execute('PRAGMA table_info(exo_host_controls)')}
+            if 'prefix' not in columns:
+                # Old incomplete operations have no prefix proof. Never make
+                # them resumable retrospectively on a source upgrade.
+                journal.db.execute('ALTER TABLE exo_host_controls ADD COLUMN prefix TEXT')
+        runtime.queue.service.app.include_router(self.router())
+        runtime.exo_host_control = self
+
+    def _authorized(self, request):
+        caller = getattr(request.state, 'caller', None)
+        if not isinstance(caller, dict) or caller.get('valid') is not True:
+            raise HTTPException(401, 'Verified coordinator required')
+        if caller.get('owner_id') != self.deployment.plan.owner_id:
+            raise HTTPException(403, 'Configured coordinator required')
+        if (configuration_sha256(self.deployment) != self.configuration_sha256
+                or any(hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() != pin
+                       for name, pin in _SOURCE.items())):
+            raise HTTPException(503, 'Host control source or configuration changed')
+
+    async def _body(self, request, fields):
+        self._authorized(request)  # Do not read a foreign caller's body.
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 128 * 1024:
+                raise HTTPException(413, 'Host control metadata exceeds bound')
+            raw.extend(chunk)
+        try:
+            body = decode_json(raw)
+            if (set(body) != fields | {'request_id'} or not isinstance(body['request_id'], str)
+                    or not re.fullmatch('[a-f0-9]{64}', body['request_id'])):
+                raise ValueError('shape')
+            return body
+        except (ValueError, TypeError, KeyError):
+            raise HTTPException(422, 'Invalid host control metadata') from None
+
+    def _response(self, request_id, report):
+        return JSONResponse({'request_id': request_id, 'source_sha256': SOURCE_SHA256,
+            'configuration_sha256': self.configuration_sha256, 'report': report},
+            headers={'Cache-Control': 'no-store'})
+
+    def _owner(self, identity):
+        owner = getattr(self.runtime, 'host_rank', None)
+        if owner is None or self.composition.roles.get('host') is not owner or owner.closed:
+            raise HTTPException(409, 'No registered live host attempt')
+        binding = owner.actor.spec.binding
+        ExpectedMember.from_launch(self.deployment.plan, binding.expected.binding)
+        compiled = self.deployment.compile(binding.expected.binding)
+        if (canonical(identity) != canonical(run_identity(binding))
+                or compiled.spec != owner.actor.spec
+                or canonical(compiled.environment) != canonical(owner._environment)):
+            raise HTTPException(409, 'Host attempt identity differs')
+        return owner
+
+    def _status(self, owner):
+        owner.inventory_changed()  # Explicit physical reconciliation, not a new timer.
+        row = owner._attempt()
+        child = owner.actor.process
+        return {'identity': run_identity(owner.actor.spec.binding), 'phase': row['phase'],
+            'runtime_phase': owner.actor.phase, 'launch_attempted': owner.actor.launch_attempted,
+            'child': asdict(child.identity) if child is not None else None,
+            'cleanup_observed': owner.actor.receipt is not None,
+            'events_reconciled': owner._events_ready,
+            'host_reader_owner': owner.adapter.reader.owner_id,
+            'authority_from_this_status': False,
+            'operations': [dict(v) for v in self.runtime.queue.supervisor.journal.db.execute(
+                'SELECT action,request_id,state,error_type,prefix FROM exo_host_controls '
+                'WHERE resource_id=? AND lease_id=? ORDER BY action',
+                (row['resource_id'], row['lease_id']))]}
+
+    def _launch(self, value):
+        try:
+            if (not isinstance(value, dict) or set(value) != set(LaunchBinding.__dataclass_fields__)
+                    or type(value['generation']) is not int or type(value['pipeline_rank']) is not int
+                    or not isinstance(value['layers'], list) or len(value['layers']) != 2
+                    or any(type(v) is not int for v in value['layers'])
+                    or any(not isinstance(value[k], str) for k in value if k not in (
+                        'generation', 'pipeline_rank', 'layers'))
+                    or datetime.fromisoformat(value['expires_at']).utcoffset() is None):
+                raise ValueError('shape')
+            binding = LaunchBinding(**(value | {'layers': tuple(value['layers'])}))
+            self.deployment.compile(binding)
+            return binding
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(422, 'Exact fixed-deployment launch binding required') from None
+
+    def _preparation_status(self, binding):
+        row = self.runtime.queue.supervisor.journal.db.execute('SELECT * FROM exo_host_controls '
+            'WHERE resource_id=? AND lease_id=? AND action=?',
+            (binding.resource_id, binding.lease_id, 'prepare')).fetchone()
+        if row is None or canonical(asdict(binding)).decode() != row['identity_json']:
+            raise HTTPException(409, 'No exact preparation record')
+        owner = getattr(self.runtime, 'host_rank', None)
+        if owner is not None and self.composition.roles.get('host') is owner:
+            return self._status(self._owner(run_identity(self.deployment.compile(binding).spec.binding)))
+        return {'identity': run_identity(self.deployment.compile(binding).spec.binding),
+            'phase': 'preparation_unconfirmed', 'authority_from_this_status': False,
+            'operations': [{k: row[k] for k in ('action', 'request_id', 'state', 'error_type', 'prefix')}]}
+
+    async def _observed_status(self, identity):
+        if getattr(self.runtime, 'host_rank', None) is not None:
+            owner = self._owner(identity)
+            binding = owner.actor.spec.binding
+            await self._resume_prefix((binding.resource_id, binding.lease_id, 'start'), owner=owner)
+            return self._status(owner)
+        if not isinstance(identity, dict) or not isinstance(identity.get('lease_id'), str):
+            raise HTTPException(409, 'No exact registered host attempt')
+        row = self.runtime.queue.supervisor.journal.db.execute('SELECT * FROM exo_host_controls '
+            'WHERE resource_id=? AND lease_id=? AND action=?',
+            (self.deployment.files.resource_id, identity.get('lease_id'), 'prepare')).fetchone()
+        if row is None:
+            raise HTTPException(409, 'No exact registered host attempt')
+        binding = self._launch(decode_json(row['identity_json']))
+        if canonical(identity) != canonical(run_identity(self.deployment.compile(binding).spec.binding)):
+            raise HTTPException(409, 'Host preparation identity differs')
+        await self._resume_prefix((binding.resource_id, binding.lease_id, 'prepare'), binding=binding)
+        return self._preparation_status(binding)
+
+    async def _prepare(self, body):
+        if body['plan_sha256'] != digest(asdict(self.deployment.plan)):
+            raise HTTPException(409, 'Host deployment plan differs')
+        binding = self._launch(body['launch'])
+        key = binding.resource_id, binding.lease_id, 'prepare'
+        journal = self.runtime.queue.supervisor.journal
+        identity_json = canonical(body['launch']).decode()
+        with journal.transaction():
+            old = journal.db.execute('SELECT * FROM exo_host_controls '
+                'WHERE resource_id=? AND lease_id=? AND action=?', key).fetchone()
+            if old is not None:
+                if old['request_id'] != body['request_id'] or old['identity_json'] != identity_json:
+                    raise HTTPException(409, 'Preparation already owned; inspect the same attempt')
+            else:
+                if (not self.accepting or not self.composition.started or self.composition.draining
+                        or self.composition.closed or getattr(self.runtime, 'host_rank', None) is not None):
+                    raise HTTPException(409, 'Fresh configured host preparation required')
+                try:
+                    journal.db.execute('INSERT INTO exo_host_controls '
+                        '(resource_id,lease_id,action,request_id,identity_json,state,error_type,created,prefix) '
+                        "VALUES(?,?,?,?,?,?,NULL,?,'prepare')",
+                        (*key, body['request_id'], identity_json, 'owned', time.time()))
+                except sqlite3.IntegrityError:
+                    raise HTTPException(409, 'Preparation request identity already used') from None
+        await self._resume_prefix(key, binding=binding)
+        # A failed/unknown preparation with no registered owner remains owned.
+        # This report permits no retry, launch, absence inference or settlement.
+        return self._preparation_status(binding)
+
+    async def _resume_prefix(self, key, *, binding=None, owner=None):
+        """Continue only already-owned, explicitly recorded read-only work.
+
+        Metadata reconciliation is a wake for the supervisor's original
+        operation, not a new POST/attempt. No timer and no new call identity.
+        A bind decision or launch decision permanently closes this path.
+        """
+        task = self.tasks.get(key)
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+            return
+        row = self.runtime.queue.supervisor.journal.db.execute(
+            'SELECT * FROM exo_host_controls WHERE resource_id=? AND lease_id=? AND action=?', key).fetchone()
+        if (row is None or row['state'] != 'owned' or row['prefix'] != key[2]
+                or not self.accepting or self.composition.draining or self.composition.closed):
+            return
+        if key[2] == 'prepare':
+            if (binding is None or canonical(asdict(binding)).decode() != row['identity_json']
+                    or getattr(self.runtime, 'host_rank', None) is not None):
+                return
+            operation = self._bind_prepared(binding, key)
+        elif key[2] == 'start':
+            if (owner is None or owner.closed or owner.actor.draining
+                    or canonical(run_identity(owner.actor.spec.binding)).decode() != row['identity_json']
+                    or owner._attempt()['phase'] != 'prepared' or owner.actor.launch_attempted
+                    or owner.actor.process is not None or not owner._events_ready):
+                return
+            operation = self._perform(owner, key)
+        else:
+            return
+        try:
+            task = self.tasks[key] = self.runtime.queue.supervisor.prepare(operation)
+        except BaseException:
+            operation.close()
+            raise
+        await asyncio.shield(task)
+
+    def _preparation_history(self, lease_id):
+        return [dict(row) for row in self.runtime.queue.supervisor.journal.db.execute(
+            "SELECT * FROM exo_host_controls WHERE action='prepare' AND lease_id<>? "
+            'ORDER BY resource_id,lease_id', (lease_id,))]
+
+    async def _completed_preparations(self, history):
+        """Allow a fresh fixed session only after exact prior cleanup/settlement.
+
+        Read the old host-owned journal/immutable receipts and a fresh projection
+        with this service's own credential. No history is removed or reset.
+        A started attempt requires its independent child birth and launch
+        receipt, plus cleanup validated against that exact child. A preparation
+        that stopped before registration requires a later fence, exact
+        settlement and a matching prepare-only boundary. A reboot requires independent kernel evidence.
+        """
+        journal = self.runtime.queue.supervisor.journal
+        reader = self.deployment.host_reader(self.runtime)
+        try:
+            for prior in history:
+                row = journal.db.execute('SELECT * FROM exo_host_rank_attempts '
+                    'WHERE resource_id=? AND lease_id=?',
+                    (prior['resource_id'], prior['lease_id'])).fetchone()
+                if row is None:
+                    # A prepare control is persisted before local checks. A start
+                    # requires both a registered attempt and a distinct start control.
+                    binding = self._launch(decode_json(prior['identity_json']))
+                    compiled = self.deployment.compile(binding)
+                    if ((binding.resource_id, binding.lease_id) != (prior['resource_id'], prior['lease_id'])
+                            or journal.db.execute("SELECT 1 FROM exo_host_controls WHERE lease_id=? AND action<>'prepare'",
+                                                  (binding.lease_id,)).fetchone()):
+                        raise ValueError('prior command cannot be proven prepare-only')
+                    await _verify_settlement(reader, compiled.expected, require_fence=True)
+                    receipt_files.verify_prepare_only(str(compiled.session), self.deployment.files.uid,
+                        prior['state'], prior['prefix'], asdict(compiled.spec.binding), self.deployment.boot_id)
+                    continue
+                if (prior['state'] != 'returned' or row['phase'] not in ('launch_fenced', 'spawning')
+                        or row['resource_id'] != self.deployment.files.resource_id
+                        or not Path(row['state_path']).is_relative_to(self.deployment.state_base)):
+                    raise ValueError('prior attempt is not a fixed completed session')
+                spec = {key: row[key] for key in ('resource_id', 'group_id', 'generation',
+                    'lease_id', 'runtime_sha256', 'launch_sha256', 'state_path')}
+                spec.update(boot_id=row['boot_id'], uid=self.deployment.files.uid,
+                            journal_path=str(self.runtime.settings.journal))
+                report = await observe_local_attempt(spec, historical=True)
+                if report.get('observed_host_boot') != self.deployment.boot_id:
+                    raise ValueError('historical observation came from another current boot')
+                prepared = report['prepared']
+                data = prepared['binding']['expected']
+                launch = dict(data['binding'])
+                launch['layers'] = tuple(launch['layers'])
+                member = dict(data['member'])
+                member['layers'] = tuple(member['layers'])
+                expected = ExpectedMember(LaunchBinding(**launch), MemberPlan(**member))
+                run = RunBinding.from_expected(expected, row['runtime_sha256'])
+                pin = NoStartExpectation(run, prepared['host_boot'], prepared['launch_sha256'],
+                    prepared['attempt_sha256'], tuple(Listener(**v) for v in prepared['listeners']),
+                    prepared['baseline_in_use_bytes'], prepared['tolerance_bytes'], prepared['prepared_at'])
+                if (canonical(asdict(pin)) != canonical(prepared)
+                        or canonical(asdict(expected.binding)) != canonical(decode_json(prior['identity_json']))
+                        or expected.binding.rank != self.deployment.files.rank
+                        or expected.member.rank != expected.binding.rank
+                        or expected.member.resource_id != row['resource_id']
+                        or any(getattr(expected.binding, key) != row[key]
+                               for key in ('resource_id', 'lease_id', 'group_id', 'generation'))):
+                    raise ValueError('prior preparation identity changed')
+                prepared_pin = pin
+                started, launch = report['started'], report['launch_intent']
+                if started is None:
+                    if report['phase'] != 'launch_fenced' or launch is not None:
+                        raise ValueError('prior no-start fence is unconfirmed')
+                else:
+                    if (report['phase'] != 'spawning' or not isinstance(started, dict)
+                            or started.get('type') != 'rank_started' or not isinstance(launch, dict)
+                            or canonical({k: started.get(k) for k in ('group_id', 'generation', 'lease_id', 'resource_id')})
+                                != canonical({k: getattr(expected.binding, k) for k in ('group_id', 'generation', 'lease_id', 'resource_id')})
+                            or started.get('host_boot') != row['boot_id'] or launch.get('host_boot') != row['boot_id']
+                            or canonical(launch.get('binding')) != canonical(asdict(run))):
+                        raise ValueError('prior child launch differs from preparation')
+                    child = started.get('child')
+                    fields = ProcessIdentity.__dataclass_fields__
+                    if (not isinstance(child, dict) or set(child) != set(fields)
+                            or any(type(child[k]) is not int or child[k] < 0 for k in fields)
+                            or any(child[k] == 0 for k in ('pid', 'group_id', 'started_seconds'))
+                            or child['started_microseconds'] >= 1000000
+                            or child['uid'] != self.deployment.files.uid):
+                        raise ValueError('prior exact child birth identity unavailable')
+                    pin = CleanupExpectation(run, ProcessIdentity(**child), pin.listeners,
+                        launch.get('baseline_in_use_bytes'), pin.tolerance_bytes)
+                cleanup = report['cleanup']
+                raw = base64.b64decode(cleanup['base64'], validate=True)
+                if (len(raw) != cleanup['bytes']
+                        or hashlib.sha256(raw).hexdigest() != cleanup['sha256']):
+                    raise ValueError('prior cleanup bytes changed')
+                reboot_fence = None
+                if decode_json(raw).get('kind') == 'observed_rank_rebooted':
+                    if started is None or self.deployment.boot_id == row['boot_id']:
+                        raise ValueError('reboot cleanup requires an old-boot started attempt')
+                    reboot_proof = validate_reboot_cleanup(raw, RebootExpectation(prepared_pin, pin))
+                    reboot_fence = reboot_proof['observation']['fenced_generation']
+                else:
+                    validate_cleanup(raw, pin)
+                await _verify_settlement(reader, expected, require_fence=False, minimum_generation=reboot_fence)
+        except Exception:
+            raise HTTPException(409, 'Prior host preparation needs exact cleanup and settlement') from None
+        finally:
+            await reader.close()
+
+    async def _bind_prepared(self, binding, key):
+        state, error_type = 'returned', None
+        prefix = 'prepare'
+        try:
+            # Own the exact request before any fallible historical/plane read.
+            history = self._preparation_history(binding.lease_id)
+            if history:
+                await self._completed_preparations(history)
+            await self.deployment.admit_preparation(self.runtime, binding)
+            if not self.accepting or self.composition.draining:
+                raise RuntimeError('service draining before preparation')
+            journal = self.runtime.queue.supervisor.journal
+            with journal.transaction():
+                if (getattr(self.runtime, 'host_rank', None) is not None
+                        or self._preparation_history(binding.lease_id) != history):
+                    raise RuntimeError('host preparation changed during read-only preflight')
+                changed = journal.db.execute(
+                    "UPDATE exo_host_controls SET prefix=NULL WHERE resource_id=? AND lease_id=? "
+                    "AND action=? AND state='owned' AND prefix='prepare'", key).rowcount
+                if changed != 1:
+                    raise RuntimeError('host preparation effect already owned')
+            prefix = None  # Before any directory, file or host binding effect.
+
+            def emit(event):
+                # The exact host lifecycle retains immutable local event files;
+                # metadata notification contains no bearer, prompt or stdout.
+                self.runtime.queue.supervisor.journal.capacity_event(
+                    binding.resource_id, None, 'unknown', 'exo_rank_' + event['type'])
+
+            try:
+                owner = await self.deployment.bind(self.runtime, binding, emit=emit)
+            finally:
+                # Partial private setup may already have journaled a host owner.
+                # Preserve its subscription and permanent no-start cleanup path.
+                owner = getattr(self.runtime, 'host_rank', None)
+                if (owner is not None and not owner.closed
+                        and owner.actor.spec.binding == self.deployment.compile(binding).spec.binding):
+                    self.composition.attach_host(owner)
+            await owner.wait_connected(self.composition.tasks['host'])
+        except (Exception, asyncio.CancelledError) as error:
+            state, error_type = ('owned' if prefix else 'unconfirmed'), type(error).__name__
+            if isinstance(error, asyncio.CancelledError):
+                raise
+        finally:
+            with self.runtime.queue.supervisor.journal.transaction():
+                self.runtime.queue.supervisor.journal.db.execute(
+                    'UPDATE exo_host_controls SET state=?,error_type=? '
+                    'WHERE resource_id=? AND lease_id=? AND action=?', (state, error_type, *key))
+
+    async def _operate(self, action, body):
+        owner = self._owner(body['identity'])
+        if not self.accepting and action == 'start':
+            raise HTTPException(409, 'Host control is draining')
+        journal = self.runtime.queue.supervisor.journal
+        binding = owner.actor.spec.binding
+        key = binding.resource_id, binding.lease_id, action
+        identity_json = canonical(body['identity']).decode()
+        with journal.transaction():
+            old = journal.db.execute('SELECT * FROM exo_host_controls '
+                'WHERE resource_id=? AND lease_id=? AND action=?', key).fetchone()
+            if old is not None:
+                if old['request_id'] != body['request_id'] or old['identity_json'] != identity_json:
+                    raise HTTPException(409, 'Host operation already owned; inspect it')
+            else:
+                if action == 'start' and not owner._events_ready:
+                    raise HTTPException(409, 'Reconciled host feed required before accepting start')
+                try:
+                    journal.db.execute('INSERT INTO exo_host_controls '
+                        '(resource_id,lease_id,action,request_id,identity_json,state,error_type,created,prefix) '
+                        'VALUES(?,?,?,?,?,?,NULL,?,?)',
+                        (*key, body['request_id'], identity_json, 'owned', time.time(),
+                         'start' if action == 'start' else None))
+                except sqlite3.IntegrityError:
+                    raise HTTPException(409, 'Host operation identity already used') from None
+        task = self.tasks.get(key)
+        if old is None:
+            # Commit the one operation before scheduling it. A lost HTTP reply
+            # or service restart cannot turn this into another start decision.
+            operation = self._perform(owner, key)
+            try:
+                task = self.tasks[key] = self.runtime.queue.supervisor.prepare(operation)
+            except BaseException:
+                operation.close()
+                raise
+        if task is not None:
+            await asyncio.shield(task)
+        return self._status(owner)
+
+    async def _perform(self, owner, key):
+        state, error_type = 'returned', None
+        prefix = None
+        try:
+            if key[2] == 'start':
+                await owner.start()
+            elif key[2] == 'stop':
+                owner.stop('configured coordinator requested group drain')
+            else:
+                await owner.attest_never_started()
+        except LaunchPreflightPending as error:
+            if key[2] == 'start' and owner._attempt()['phase'] == 'prepared':
+                state, error_type, prefix = 'owned', type(error).__name__, 'start'
+            else:
+                state, error_type = 'unconfirmed', type(error).__name__
+        except (Exception, asyncio.CancelledError) as error:
+            state, error_type = 'unconfirmed', type(error).__name__
+            if isinstance(error, asyncio.CancelledError):
+                raise
+        finally:
+            with self.runtime.queue.supervisor.journal.transaction():
+                self.runtime.queue.supervisor.journal.db.execute(
+                    'UPDATE exo_host_controls SET state=?,error_type=?,prefix=? '
+                    'WHERE resource_id=? AND lease_id=? AND action=?', (state, error_type, prefix, *key))
+
+    def pause(self):
+        self.accepting = False
+
+    async def drain(self):
+        tasks = tuple(task for task in self.tasks.values() if not task.done())
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+
+    def router(self):
+        router = APIRouter(prefix='/v1/exo/host')
+
+        @router.post('/files')
+        async def files(request: Request):
+            body = await self._body(request, {'policy_sha256'})
+            if body['policy_sha256'] != digest(asdict(self.deployment.files)):
+                raise HTTPException(409, 'Host file policy differs')
+            member = next(m for m in self.deployment.plan.members if m.rank == self.deployment.files.rank)
+            # Structural preflight only, before any group exists. The identity
+            # is never submitted/read and cannot be used by the start route.
+            binding = LaunchBinding('group_' + '0' * 24, 1, self.deployment.plan.owner_id,
+                member.rank, member.pipeline_rank, member.resource_id, 'lease_' + '0' * 16,
+                member.layers, '2100-01-01T00:00:00+00:00', self.deployment.plan.rank_manifest_sha256)
+            try:
+                report = await self.deployment.observe(self.deployment.compile(binding))
+            except Exception:
+                raise HTTPException(503, 'Host files or live transport unconfirmed') from None
+            return self._response(body['request_id'], report)
+
+        @router.post('/status')
+        async def status(request: Request):
+            body = await self._body(request, {'identity'})
+            return self._response(body['request_id'], await self._observed_status(body['identity']))
+
+        @router.post('/capacity')
+        async def capacity(request: Request):
+            body = await self._body(request, {'identity'})
+            owner = self._owner(body['identity'])
+            # Use the host's existing canonical collector, not EXO discovery,
+            # file sizes, ledger availability or an earlier successful sample.
+            reading = await source_call(self.runtime.manager._collect_stats)
+            available, total = (reading.get(key) for key in
+                                ('memory_available_mb', 'memory_total_mb'))
+            if (type(available) is not int or type(total) is not int
+                    or not 0 <= available <= total):
+                raise HTTPException(503, 'Fresh host RAM capacity unavailable')
+            try:
+                policy = await source_call(metal_policy, reading)
+                if policy['boot_id'] != self.deployment.boot_id:
+                    raise ValueError('host boot differs')
+            except Exception:
+                raise HTTPException(503, 'Fresh host Metal policy unavailable') from None
+            return self._response(body['request_id'], {
+                'identity': run_identity(owner.actor.spec.binding),
+                'boot_id': self.deployment.boot_id, 'uid': os.getuid(),
+                'manager_empty': not bool(self.runtime.manager.models),
+                'available_bytes': available * 1024 * 1024,
+                'total_bytes': total * 1024 * 1024, **policy})
+
+        @router.post('/prepare')
+        async def prepare(request: Request):
+            body = await self._body(request, {'launch', 'plan_sha256'})
+            return self._response(body['request_id'], await self._prepare(body))
+
+        @router.post('/receipts')
+        async def receipts(request: Request):
+            body = await self._body(request, {'identity'})
+            owner = self._owner(body['identity'])
+            binding = owner.actor.spec.binding
+            spec = {**run_identity(binding), 'launch_sha256': owner.launch_sha256,
+                'boot_id': owner.boot_id, 'uid': self.deployment.files.uid,
+                'state_path': str(owner.actor.state), 'journal_path': str(self.runtime.settings.journal)}
+            spec.pop('rank_manifest_sha256')  # Collector derives it from the actual prepared row.
+            try:
+                report = await observe_local_attempt(spec)
+            except Exception:
+                raise HTTPException(503, 'Exact host receipt unconfirmed') from None
+            return self._response(body['request_id'], report)
+
+        @router.post('/tokens')
+        async def tokens(request: Request):
+            body = await self._body(request, {'identity', 'command_id', 'task_id'})
+            owner = self._owner(body['identity'])
+            if self.deployment.qualification_token_limit != 16:
+                raise HTTPException(409, 'Raw token qualification is not configured')
+            binding = owner.actor.spec.binding
+            compiled = self.deployment.compile(binding.expected.binding)
+            expected = {'group_id': binding.group_id, 'generation': binding.generation,
+                'rank': self.deployment.files.rank, 'device_rank': binding.expected.binding.pipeline_rank,
+                'rank_manifest_sha256': binding.rank_manifest_sha256,
+                'command_id': body['command_id'], 'task_id': body['task_id'],
+                'model': self.deployment.plan.model_id}
+            try:
+                report = await asyncio.to_thread(collect_tokens, str(compiled.native_home),
+                    self.deployment.files.uid, owner.boot_id, expected)
+            except Exception:
+                raise HTTPException(503, 'Exact raw token receipt unconfirmed') from None
+            return self._response(body['request_id'], {'identity': run_identity(binding), **report})
+
+        def add_operation(action):
+            async def operation(request: Request):
+                body = await self._body(request, {'identity'})
+                return self._response(body['request_id'], await self._operate(action, body))
+            router.add_api_route('/' + action, operation, methods=['POST'], name='exo_host_' + action)
+
+        for action in ('start', 'stop', 'fence-unstarted'):
+            add_operation(action)
+        return router

@@ -40,7 +40,7 @@ class FinishReasonTests(unittest.IsolatedAsyncioTestCase):
 
         manager = SimpleNamespace(
             ollama=SimpleNamespace(chat=chat, chat_stream=chat_stream),
-            serving=lambda _: nullcontext())
+            serving=lambda _: nullcontext(), claim=lambda _: model, release=lambda _: None)
         model = SimpleNamespace(name='test-model', backend=server.Backend.OLLAMA)
         with patch.object(server, 'mgr', manager), \
              patch.object(server, '_resolve_model', AsyncMock(return_value=model)), \

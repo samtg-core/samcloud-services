@@ -20,7 +20,7 @@ from . import config
 
 
 class WhisperUnavailable(Exception):
-    """The child process is not answering. Nothing was transcribed."""
+    """The child is not answering; this alone does not establish backend end."""
 
 
 class WhisperFailed(Exception):
@@ -63,6 +63,7 @@ class WhisperClient:
         prompt: Optional[str] = None,
         temperature: Optional[float] = None,
         word_timestamps: bool = False,
+        service_owned: bool = False,
     ) -> dict:
         body = {
             "path": path,
@@ -72,7 +73,9 @@ class WhisperClient:
             "word_timestamps": word_timestamps,
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            timeout = (httpx.Timeout(None,connect=10,write=10,pool=10)
+                       if service_owned else self.timeout)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(f"{self.base}/transcribe", json=body)
         except Exception as e:
             raise WhisperUnavailable(f"{self.base} did not answer: {e}") from e

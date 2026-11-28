@@ -22,6 +22,7 @@ import subprocess
 import time
 import logging
 import threading
+from datetime import datetime
 
 import httpx
 from contextlib import contextmanager
@@ -61,6 +62,57 @@ class Backend(str, Enum):
     # and does not place the model — it holds an exclusive lease around a
     # generation and proxies. See exo_client.py.
     EXO = "exo"
+
+
+# WHAT EACH BACKEND CAN BE ASKED FOR, as data rather than as a comment (#931).
+#
+# The facts were already written down -- the enum above says whisper "serves ONE
+# route and cannot answer a chat", and that exo is held under an exclusive lease
+# -- but they were published nowhere, so every consumer had to hardcode them
+# from the backend string. Two did not, and read `/warm`'s entries as chat
+# candidates: both whisper models were offered as alternatives to a chat
+# completion, on the one surface that is a RECOMMENDATION rather than a list.
+#
+# ONE TABLE, because the alternative is the failure this repo just paid for
+# twice: when two places encode the same rule they drift, and the second is a
+# copy of the first's assumptions. Every surface that lists or recommends reads
+# from here.
+BACKEND_SERVES = {
+    Backend.OLLAMA: ("chat",),
+    Backend.LLAMA: ("chat",),
+    Backend.VLM: ("chat", "vision"),
+    Backend.WHISPER: ("transcription",),
+    Backend.EXO: ("chat",),
+}
+
+# Backends whose model is held under an EXCLUSIVE claim, so taking it stops
+# every other caller rather than sharing the box. Published because a chooser
+# cannot see it: `think` sorts first under any `memory_mb or 0` fallback (its
+# size is absent, and 0 when resident), so "pick the smallest" reaches for the
+# one mutex on the box. Naming it is what both near-misses needed.
+BACKEND_EXCLUSIVE = {Backend.EXO}
+
+
+def backend_serves(backend) -> list:
+    """What `backend` can be asked for. Unknown backends serve nothing.
+
+    An unrecognised backend returns `[]` rather than assuming chat: a consumer
+    filtering on "chat" then skips it, which is the safe direction. Guessing
+    chat for something we do not recognise is how an unservable entry gets
+    recommended, which is the bug.
+    """
+    try:
+        return list(BACKEND_SERVES.get(Backend(backend), ()))
+    except Exception:
+        return []
+
+
+def backend_is_exclusive(backend) -> bool:
+    """True when taking this backend's model excludes every other caller."""
+    try:
+        return Backend(backend) in BACKEND_EXCLUSIVE
+    except Exception:
+        return False
 
 VLM_PORT = config.VLM_PORT
 VLM_HOST = config.VLM_HOST
@@ -314,6 +366,13 @@ class ManagedModel:
 @dataclass
 class ModelManager:
     sc: SamcloudClient
+    # Set only by an installed durable runtime. Background cooldown and explicit
+    # controls must preserve accounting when backend termination is unconfirmed.
+    durable_inference: bool = field(default=False, repr=False, kw_only=True)
+    residency_renewal: object = field(default=None, repr=False, kw_only=True)
+    initial_reservations: object = field(default=None, repr=False, kw_only=True)
+    inference_capacity_source: object = field(default=None, repr=False, kw_only=True)
+    _background_started: bool = field(default=False, init=False, repr=False)
     ollama: OllamaClient = field(default_factory=OllamaClient)
     llama: LlamaServerClient = field(default_factory=LlamaServerClient)
     exo: ExoClient = field(default_factory=ExoClient)
@@ -383,6 +442,8 @@ class ModelManager:
         still want to pick up llama-server and mlx-vlm. No backend being up
         is a valid state for a fresh service start.
         """
+        if self.durable_inference:
+            raise RuntimeError('Durable startup requires ownership reconciliation, not legacy discovery')
         adopted = []
 
         # Discover llama-server instances
@@ -456,7 +517,7 @@ class ModelManager:
                 adopted_ctx = int(adopted_ctx) if adopted_ctx else None
                 try:
                     self.ollama.load_model(name, keep_alive=OLLAMA_KEEP_ALIVE,
-                                           num_ctx=adopted_ctx)
+                        num_ctx=adopted_ctx, **({'service_owned':True} if self.durable_inference else {}))
                     log.info(f"Re-applied keep_alive={OLLAMA_KEEP_ALIVE} to adopted Ollama model {name}")
                 except Exception as e:
                     log.warning(f"Failed to set keep_alive on {name}: {e}")
@@ -487,6 +548,8 @@ class ModelManager:
 
     def claim_leases(self) -> list[dict]:
         """Request leases for all models that don't have one."""
+        if self.durable_inference:
+            raise RuntimeError('Durable startup cannot allocate legacy adoption leases')
         results = []
         for name, mm in self.models.items():
             if mm.lease_id:
@@ -755,12 +818,40 @@ class ModelManager:
                 "memory_mb": mm.memory_mb,
                 "idle_seconds": int(now - mm.last_used),
                 "request_count": mm.request_count,
+                # Generations open on this model RIGHT NOW (#959), because the
+                # two fields above CANNOT answer "can this backend serve me"
+                # and read reassuring when the answer is no. `touch()` stamps
+                # `last_used` and counts the request BEFORE the work, so a
+                # model mid-prefill looks progressively MORE idle with a frozen
+                # count. Measured on slice 2026-10-10: claude-containers read
+                # `idle_seconds` 959 -> 1147 across 3 minutes of real time with
+                # `request_count` pinned at 83, while the runner held 99% of a
+                # core and a 2-token completion timed out at 10.1s. Both
+                # numbers were correct and the pair was misleading.
+                #
+                # The gateway already knew: `serving()` holds this for the
+                # cooldown's sake (#907). Only the offer was silent. A consumer
+                # deciding where to route reads `in_flight` beside
+                # `idle_seconds` and can tell "idle 1147s because nothing came"
+                # from "busy for 1147s", which is the whole question.
+                #
+                # NOT a health verdict, and deliberately not one: it counts
+                # what WE dispatched, so it is blind to another tenant of the
+                # same runner for the same reason `foreign_mb` is (#861). A
+                # caller that needs "is this thing alive" still has to send a
+                # bounded completion — see the probe note on #959.
+                "in_flight": mm.in_flight,
                 # What this instance is serving RIGHT NOW, so a consumer sizes
                 # against the window it will actually get rather than one we
                 # declared (#903). None means we could not read it, which is
                 # not the same as "no limit" — a caller must not take it as
                 # permission to send an unbounded prompt.
                 "context_length": mm.context_length,
+                # #931: what it can be asked for, and whether taking it
+                # excludes everyone. Both were knowable only by hardcoding the
+                # backend string.
+                "serves": backend_serves(mm.backend),
+                "exclusive": backend_is_exclusive(mm.backend),
             }
             for name, mm in self.models.items()
             if mm.backend != Backend.EXO
@@ -814,7 +905,9 @@ class ModelManager:
         for name, (backend, need) in sorted(
             candidates.items(), key=lambda kv: kv[1][1], reverse=True
         ):
-            entry = {"name": name, "backend": backend, "need_mb": need}
+            entry = {"name": name, "backend": backend, "need_mb": need,
+                     "serves": backend_serves(backend),
+                     "exclusive": backend_is_exclusive(backend)}
             if name in prospective_ctx:
                 entry["context_length"] = prospective_ctx[name]
             if working:
@@ -995,7 +1088,13 @@ class ModelManager:
         tier = config.EXO_TIERS[0] if config.EXO_TIERS else None
         if not tier:
             return None
-        entry = {"name": tier, "backend": Backend.EXO.value}
+        entry = {"name": tier, "backend": Backend.EXO.value,
+                 # #931: the tier is the one EXCLUSIVE thing on the box, and a
+                 # chooser cannot see that — its size is absent here and 0 on
+                 # `/warm`, so it sorts first under any `memory_mb or 0`
+                 # fallback and "pick the smallest" reaches for the mutex.
+                 "serves": backend_serves(Backend.EXO),
+                 "exclusive": True}
         view = self._pool_view
         age = None if view is None else time.monotonic() - view[0]
         if view is None or age > config.EXO_POOL_VIEW_MAX_AGE_S:
@@ -1171,6 +1270,9 @@ class ModelManager:
         # caller picks from what fits rather than us making room by force.
         # Ollama would otherwise silently evict to fit, ignoring keep_alive.
         need_mb = self.ollama.memory_estimate_mb(model_name)
+        initial = getattr(self, 'initial_reservations', None)
+        if self.durable_inference and initial is not None:
+            need_mb = initial.required_memory(model_name, need_mb)
         avail_mb = capacity.collect().get("memory_available_mb", 0)
 
         if not capacity.fits(need_mb, avail_mb):
@@ -1204,13 +1306,23 @@ class ModelManager:
         # Re-read the size now the weights are local — the gate above may
         # have run against a name-guess for a model we had not pulled yet.
         memory_mb = self.ollama.memory_estimate_mb(model_name)
+        if self.durable_inference and initial is not None:
+            memory_mb = initial.required_memory(model_name, memory_mb)
+            if memory_mb > need_mb:
+                # A pull may replace an unknown-name estimate. Recheck before
+                # reserving/loading; the configured budget is never a ceiling
+                # that hides larger actual weights.
+                current = capacity.collect().get('memory_available_mb', 0)
+                if not capacity.fits(memory_mb, current):
+                    self._refuse_for_capacity(model_name, memory_mb, current)
 
         # Request lease
-        lease_id = self._request_lease(model_name, memory_mb)
+        lease_id = self._request_lease(model_name, memory_mb, before_load=True)
 
         # Load with indefinite keep_alive — our lease system manages memory
         log.info(f"Loading {model_name} into Ollama (keep_alive={OLLAMA_KEEP_ALIVE})...")
-        self.ollama.load_model(model_name, keep_alive=OLLAMA_KEEP_ALIVE)
+        self.ollama.load_model(model_name, keep_alive=OLLAMA_KEEP_ALIVE,
+                              **({'service_owned':True} if self.durable_inference else {}))
 
         # Get actual VRAM from Ollama ps, and the window it actually got.
         # Both are read AFTER the load and neither is assumed: the window is
@@ -1218,11 +1330,15 @@ class ModelManager:
         # derived it from free VRAM (#903).
         actual_mb = memory_mb
         served_ctx = None
+        confirmed_residency = False
         for m in self.ollama.list_running():
-            if model_name in m.get("name", ""):
+            matched = (m.get('name', '').removesuffix(':latest') == model_name.removesuffix(':latest')
+                       if self.durable_inference else model_name in m.get('name', ''))
+            if matched:
                 reported = int(m.get("size", 0) / 1024 / 1024)
                 if reported > 0:
                     actual_mb = reported
+                    confirmed_residency = True
                     log.info(f"Actual VRAM for {model_name}: {actual_mb}MB (estimated {memory_mb}MB)")
                 ctx = m.get("context_length")
                 served_ctx = int(ctx) if ctx else None
@@ -1232,9 +1348,6 @@ class ModelManager:
                     f"({'pinned ' + str(asked) if asked else 'ollama-derived, not pinned'})"
                 )
                 break
-
-        lease_id = self._reconcile_lease(
-            model_name, lease_id, memory_mb, actual_mb)
 
         now = time.time()
         mm = ManagedModel(
@@ -1249,6 +1362,16 @@ class ModelManager:
             managed=True,
             context_length=served_ctx,
         )
+        if self.durable_inference:
+            # Load and residency metadata have returned. Preserve the exact
+            # model/lease link BEFORE sizing validation can refuse publication
+            # to the inference caller. Durable reconciliation below performs no
+            # I/O or fresh allocation; an undersized reservation stays owned.
+            self.models[model_name] = mm
+            if not confirmed_residency:
+                raise RuntimeError('Loaded residency size is unconfirmed; reconciliation required')
+        mm.lease_id = self._reconcile_lease(
+            model_name, lease_id, memory_mb, actual_mb)
         self.models[model_name] = mm
         return mm
 
@@ -1444,9 +1567,16 @@ class ModelManager:
                 self.unload(existing, force=True)
 
         # Ensure the port is clear of any un-owned process.
-        self._kill_stray_vlm()
+        if self.durable_inference:
+            from .inference_shared_resource import cold_vision_absent
+            if cold_vision_absent() is not True:
+                raise RuntimeError('Vision backend ownership requires reconciliation')
+        else:
+            self._kill_stray_vlm()
 
-        lease_id = self._request_lease(resolved, memory_mb)
+        # Consume the controller's exact staged claim, as the Ollama load path
+        # does. A fresh POST here double-charges reserved vision demand.
+        lease_id = self._request_lease(resolved, memory_mb, before_load=True)
 
         log.info(f"Starting mlx-vlm server for {resolved} on {VLM_HOST}:{VLM_PORT}...")
         proc = subprocess.Popen(
@@ -1462,8 +1592,16 @@ class ModelManager:
 
         base = f"http://{VLM_HOST}:{VLM_PORT}"
         ready = False
-        for _ in range(VLM_STARTUP_TIMEOUT):
+        attempt = 0
+        startup_at = time.monotonic()
+        next_startup_report = startup_at
+        while self.durable_inference or attempt < VLM_STARTUP_TIMEOUT:
+            attempt += 1
             if proc.poll() is not None:
+                if self.durable_inference:
+                    from .inference_shared_resource import cold_vision_absent
+                    if cold_vision_absent() is not True:
+                        raise RuntimeError('Exited vision child requires reconciliation')
                 self._release_lease_quietly(lease_id)
                 raise RuntimeError(
                     f"mlx-vlm server for {resolved} exited early (code {proc.returncode})"
@@ -1474,6 +1612,11 @@ class ModelManager:
                     break
             except Exception:
                 pass
+            observed_at = time.monotonic()
+            if self.durable_inference and observed_at >= next_startup_report:
+                log.info("Vision startup: pid %s alive, health not ready, %.0fs elapsed",
+                         proc.pid, observed_at - startup_at)
+                next_startup_report = observed_at + 30
             time.sleep(1)
 
         if not ready:
@@ -1675,7 +1818,7 @@ class ModelManager:
 
         self._kill_stray_whisper()
 
-        lease_id = self._request_lease(model_id, memory_mb)
+        lease_id = self._request_lease(model_id, memory_mb, before_load=True)
 
         config.WHISPER_SPOOL_DIR.mkdir(parents=True, exist_ok=True)
         config.WHISPER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -2038,6 +2181,39 @@ class ModelManager:
 
         Residency is untouched on every path — see `_renew_leases`.
         """
+        if self.durable_inference:
+            initial = getattr(self, 'initial_reservations', None)
+            if initial is not None and model_name not in initial.budgets:
+                # Run 3 preserves existing sizing: weight estimate, the same
+                # 25% reconciliation threshold, and acquire-before-release.
+                # Only allocation intent persistence is new, so a lost reply
+                # cannot manufacture a second resize on a retry/restart.
+                if not lease_id or actual_mb <= estimated_mb * self._RECONCILE_RATIO:
+                    return lease_id
+                new_id = initial.resize(model_name,lease_id,actual_mb,LEASE_TTL)
+                if new_id:
+                    self._release_lease_quietly(lease_id)
+                    log.info('Lease for %s reconciled to actual VRAM: %sMB (was %sMB)',
+                             model_name,actual_mb,estimated_mb)
+                    return new_id
+                log.warning('%s occupies %sMB; resize refused, keeping %sMB lease %s',
+                            model_name,actual_mb,estimated_mb,lease_id)
+                return lease_id
+            # The legacy resize is another non-idempotent allocation followed
+            # by release, outside the saved initial intent. Do not enter that
+            # path after provider mutation or quietly accept a 25% shortfall.
+            # Preserve the initial reservation and require explicit sizing/
+            # residency reconciliation before further inference admission.
+            reserved_mb = estimated_mb
+            if initial is not None:
+                saved = initial.snapshot(model_name)
+                if (saved is None or saved['lease_id'] != lease_id or
+                        saved['state'] != 'handed_off'):
+                    raise RuntimeError('Initial residency reservation link is unconfirmed')
+                reserved_mb = saved['memory_mb']
+            if not lease_id or actual_mb > reserved_mb:
+                raise RuntimeError('Loaded residency exceeds confirmed initial reservation; reconciliation required')
+            return lease_id
         if not lease_id or actual_mb <= estimated_mb * self._RECONCILE_RATIO:
             return lease_id
 
@@ -2094,10 +2270,45 @@ class ModelManager:
         )
         return lease_id
 
-    def _request_lease(self, model_name: str, memory_mb: int) -> Optional[str]:
+    def reconcile_initial_reservation(self, model_name: str):
+        """Explicit recovery under held queue admission, never a retry timer.
+
+        This retires a known initial allocation; it neither unloads a model nor
+        declares an uncertain inference execution ended. Those boundaries must
+        be reconciled by the owning service before dispatch can resume.
+        """
+        initial = getattr(self, 'initial_reservations', None)
+        if not self.durable_inference or initial is None:
+            raise RuntimeError('durable initial reservation controller required')
+        def absent(name):
+            if name in self.models:
+                return False  # manager ownership must be resolved, not ignored
+            if any(info['default'] == name for info in VLM_MODELS.values()):
+                from .inference_shared_resource import cold_vision_absent
+                return cold_vision_absent()
+            if match_whisper_model(name) is not None:
+                from .whisper_lifecycle import cold_whisper_absent
+                return cold_whisper_absent()
+            running = self.ollama.list_running()
+            return (isinstance(running, list) and
+                    all(isinstance(row, dict) and isinstance(row.get('name'), str) and
+                        row['name'].removesuffix(':latest') != name.removesuffix(':latest')
+                        for row in running))
+        return initial.reconcile_absent(model_name, confirm_absent=absent)
+
+    def _request_lease(self, model_name: str, memory_mb: int, *, before_load: bool = False) -> Optional[str]:
         """Lease memory for a model on the shared GPU resource.
 
-        Returns a lease id only when one was actually granted. A queued lease
+        Returns a lease id only when one was actually granted. Durable mode
+        refuses before model load unless the response proves a current finite
+        active grant; transport loss is unconfirmed, never permission to load
+        unleased. Initial reservation waiting/reconciliation belongs to the
+        queue/capacity controller, not a repeated blind request here.
+        Only a caller explicitly before provider load may turn a received 409
+        into CapacityDeferred. Post-load sizing/reconciliation also uses this
+        helper and must retain uncertain ownership rather than repeat compute.
+
+        In legacy mode, a queued lease
         is released rather than kept: we are not going to wait for it, and a
         row left sitting in `queued` is renewed by the renewal loop and
         released by nobody. The load itself still proceeds — the capacity gate
@@ -2106,6 +2317,28 @@ class ModelManager:
         proceeds honestly unleased instead of recording a lease it does not
         hold.
         """
+        initial = getattr(self, 'initial_reservations', None)
+        if self.durable_inference and before_load and initial is not None:
+            memory_mb = initial.required_memory(model_name, memory_mb)
+            if initial.models.get(model_name) != RESOURCE_ID or initial.service != SERVICE_ID:
+                raise RuntimeError('Initial reservation configuration differs from this manager')
+            saved = initial.snapshot(model_name)
+            if (saved is not None and saved['state'] in ('handed_off','retiring')
+                    and model_name not in self.models):
+                # Ordinary cooldown/unload may have ended the former residency.
+                # Confirm backend absence and retire exact saved allocations;
+                # never mistake an empty manager alone for permission to reload.
+                self.reconcile_initial_reservation(model_name)
+                saved = initial.snapshot(model_name)
+            if saved is not None and saved['state'] == 'queued':
+                if (saved['resource'], saved['memory_mb'], saved['ttl_seconds']) != (
+                        RESOURCE_ID, memory_mb, LEASE_TTL):
+                    raise RuntimeError('Queued allocation dimensions changed; reconcile explicitly')
+                # Promotion keeps this exact row. reserve() reobserves its
+                # ownership/current grant and consumes it once; never DELETE
+                # and POST again, which would discard the waiter's position.
+            return initial.reserve(model_name, resource=RESOURCE_ID, service_id=SERVICE_ID,
+                                   memory_mb=memory_mb, ttl_seconds=LEASE_TTL)
         try:
             resp = self.sc.request_lease(
                 resource_id=RESOURCE_ID,
@@ -2114,11 +2347,22 @@ class ModelManager:
                 ttl_seconds=LEASE_TTL,
             )
         except Exception as e:
+            if self.durable_inference:
+                raise RuntimeError('Memory reservation is unconfirmed; model was not loaded') from None
             log.warning(f"Lease request failed for {model_name}: {e}")
             return None
 
         outcome = self._lease_outcome(resp)
         if outcome.granted:
+            if self.durable_inference:
+                try:
+                    expiry = datetime.fromisoformat(outcome.expires_at.replace('Z','+00:00'))
+                    valid = (resp.get('status') == 'active' and expiry.tzinfo is not None
+                             and expiry.timestamp() > time.time())
+                except (AttributeError,TypeError,ValueError,OverflowError):
+                    valid = False
+                if not valid:
+                    raise RuntimeError('Memory reservation is unconfirmed; model was not loaded')
             # A grant is the end of any contention we were remembering: the
             # registry has just told us the resource has room for us.
             self._lease_contended_at = None
@@ -2136,6 +2380,19 @@ class ModelManager:
         # Contention, not a fault: the registry considered it and said the
         # resource is full. `error` states deliberately do not count.
         self.note_lease_contention(outcome.state, model_name)
+
+        if self.durable_inference:
+            if before_load and outcome.state == 'conflict':
+                # A received registry 409 is an affirmative refusal before
+                # model load. Unlike a lost reply or a queued row, it created
+                # no reservation that needs reconciliation before another try.
+                # A post-load resize calls this helper too: it must NEVER
+                # produce a safe-to-repeat pre-provider verdict.
+                from .inference_arbiter import CapacityDeferred
+                raise CapacityDeferred('capacity_unavailable')
+            if outcome.state == 'queued':
+                self._release_lease_quietly(outcome.lease_id)
+            raise RuntimeError('Memory reservation is not granted; model was not loaded')
 
         if outcome.state == "queued":
             log.warning(
@@ -2439,16 +2696,41 @@ class ModelManager:
         Nothing here needs a lock: `in_flight` is mutated only from the event
         loop, and a load runs in a thread but never touches it.
         """
-        mm = self.models.get(model_name)
-        if mm is None:
+        if self.claim(model_name) is None:
             yield
             return
-        mm.in_flight += 1
         try:
             yield
         finally:
-            mm.in_flight -= 1
-            mm.last_used = time.time()
+            self.release(model_name)
+
+    def claim(self, model_name: str):
+        """Take an `in_flight` claim. Returns the model, or None if unknown.
+
+        Split out of `serving()` because a claim whose lifetime is a `with`
+        block cannot express the one case that matters: a blocking generation
+        running in a worker thread, where the awaiting coroutine can be
+        cancelled while the worker keeps using the model (#959, codex). That
+        caller needs to take and release at two points it chooses, and it must
+        be the SAME counter the cooldown reads — so it lives here rather than
+        being open-coded against `mm.in_flight` in the route.
+
+        CALL FROM THE EVENT LOOP ONLY, as `serving()` does: `in_flight` is a
+        read-modify-write and `check_cooldowns` reads it from the loop.
+        """
+        mm = self.models.get(model_name)
+        if mm is None:
+            return None
+        mm.in_flight += 1
+        return mm
+
+    def release(self, model_name: str) -> None:
+        """Drop a claim and re-stamp `last_used`. Loop only, as `claim`."""
+        mm = self.models.get(model_name)
+        if mm is None:
+            return
+        mm.in_flight -= 1
+        mm.last_used = time.time()
 
     def ensure_running(self, model_name: str) -> bool:
         """Check if an Ollama model is actually running. Reload if dropped."""
@@ -2482,6 +2764,12 @@ class ModelManager:
         if mm.backend == Backend.VLM:
             # Restart our mlx-vlm process if it died.
             if mm.managed and mm.vlm_process and mm.vlm_process.poll() is not None:
+                if self.durable_inference:
+                    # The capacity owner reconciles this exact dead child and
+                    # claim before another load. This pre-dispatch deferral has
+                    # not sent a generation and preserves the accepted call.
+                    from .inference_arbiter import CapacityDeferred
+                    raise CapacityDeferred('capacity_unavailable')
                 log.warning(f"mlx-vlm process for {mm.name} died — restarting")
                 name = mm.name
                 del self.models[name]
@@ -2514,19 +2802,32 @@ class ModelManager:
         # Model was dropped by Ollama — reload it
         log.warning(f"Model {mm.name} dropped by Ollama — reloading (keep_alive={OLLAMA_KEEP_ALIVE})")
         try:
-            self.ollama.load_model(mm.name, keep_alive=OLLAMA_KEEP_ALIVE)
+            self.ollama.load_model(mm.name, keep_alive=OLLAMA_KEEP_ALIVE,
+                                  **({'service_owned':True} if self.durable_inference else {}))
             log.info(f"Reloaded {mm.name}")
             return True
         except Exception as e:
             log.error(f"Failed to reload {mm.name}: {e}")
             return False
 
-    def unload(self, model_name: str, force: bool = False) -> dict:
+    def unload(self, model_name: str, force: bool = False, *, require_confirmed: bool = False) -> dict:
         """Unload/stop a model and release its lease."""
         if model_name not in self.models:
             return {"status": "not_found"}
 
         mm = self.models[model_name]
+
+        strict = require_confirmed or self.durable_inference
+        if strict and mm.in_flight:
+            raise RuntimeError('Model still has owned work; unload requires reconciliation')
+        if strict and mm.backend == Backend.WHISPER and not require_confirmed:
+            # A Python request counter can reach zero after contact loss while
+            # native transcription remains uncertain. Only ResourceHandoff's
+            # successful durable queue drain may enter qualified cleanup. An
+            # idle timer or force flag is not that authority.
+            raise RuntimeError('Whisper cleanup requires a drained queue handoff')
+        if strict and mm.backend not in (Backend.OLLAMA, Backend.VLM, Backend.WHISPER):
+            raise RuntimeError('Backend unload is not qualified for durable accounting')
 
         if mm.backend == Backend.EXO:
             # Deregister the tier, never touch the pool. We did not start the
@@ -2551,14 +2852,31 @@ class ModelManager:
         # Stop the backend
         if mm.backend == Backend.OLLAMA:
             try:
-                self.ollama.unload_model(mm.name)
+                result = self.ollama.unload_model(mm.name,
+                                                **({'service_owned':True} if strict else {}))
+                if strict:
+                    if not isinstance(result, dict) or result.get('done') is not True:
+                        raise RuntimeError('No confirmed backend termination')
+                    running = self.ollama.list_running()
+                    if (not isinstance(running, list) or
+                            any(not isinstance(row, dict) or not isinstance(row.get('name'), str)
+                                or row['name'].removesuffix(':latest') == mm.name.removesuffix(':latest')
+                                for row in running)):
+                        raise RuntimeError('Backend residency remains unresolved')
             except Exception as e:
+                if strict:
+                    # Neither a timeout nor a failed verification frees bytes.
+                    # Keep the exact model/lease link for explicit reconciliation.
+                    raise RuntimeError('Backend unload requires reconciliation') from None
                 log.warning(f"Ollama unload error: {e}")
         elif mm.backend == Backend.LLAMA:
             result = self.llama.stop(mm.port)
             log.info(f"Stopped llama-server: {result}")
         elif mm.backend == Backend.WHISPER:
-            if mm.whisper_process:
+            if strict:
+                from .whisper_lifecycle import stop_owned_whisper
+                stop_owned_whisper(mm, observation_seconds=10)
+            elif mm.whisper_process:
                 try:
                     mm.whisper_process.terminate()
                     try:
@@ -2571,7 +2889,10 @@ class ModelManager:
             else:
                 self._kill_stray_whisper()
         elif mm.backend == Backend.VLM:
-            if mm.vlm_process:
+            if strict:
+                from .vision_lifecycle import stop_owned_vision
+                stop_owned_vision(mm)
+            elif mm.vlm_process:
                 try:
                     mm.vlm_process.terminate()
                     try:
@@ -2902,7 +3223,7 @@ class ModelManager:
         )
 
     async def stats_loop(self):
-        """Push unified-memory stats to this box's SAMcloud resource every 15s.
+        """Sample local capacity every 15s and optionally publish device stats.
 
         Without it a resource shows `last_stats: never` and the dashboard reads
         NaN. The reading is the full `capacity.collect()`; `registry_payload()`
@@ -2912,9 +3233,18 @@ class ModelManager:
         """
         while True:
             try:
-                stats = self._collect_stats()
-                if stats:
-                    self.sc.push_stats(RESOURCE_ID, capacity.registry_payload(stats))
+                source = self.inference_capacity_source
+                if source is not None:
+                    from .inference_events import source_call
+                    source.invalidate()
+                    stats = await source_call(self._collect_stats)
+                    await source.refresh(stats)
+                    if stats and config.PUBLISH_RESOURCE_STATS:
+                        await source_call(self.sc.push_stats,RESOURCE_ID,capacity.registry_payload(stats))
+                else:
+                    stats = self._collect_stats()
+                    if stats and config.PUBLISH_RESOURCE_STATS:
+                        self.sc.push_stats(RESOURCE_ID, capacity.registry_payload(stats))
             except Exception as e:
                 log.warning(f"Stats push error: {e}")
             await asyncio.sleep(15)
@@ -2998,7 +3328,7 @@ class ModelManager:
         while True:
             await asyncio.sleep(interval)
             try:
-                self._renew_leases()
+                await self.renew_model_leases()
             except Exception as e:
                 log.warning(f"Lease renewal error: {e}")
             # Same loop rather than a new task: it already wakes on the lease
@@ -3007,6 +3337,14 @@ class ModelManager:
                 self._retry_unreleased()
             except Exception as e:
                 log.warning(f"Unreleased-lease retry error: {e}")
+
+    async def renew_model_leases(self):
+        """One maintenance pass; an enabled queue never falls back to swaps."""
+        if self.durable_inference:
+            if self.residency_renewal is None:
+                raise RuntimeError('Durable residency renewal has not been bound')
+            return await self.residency_renewal.renew_models()
+        return self._renew_leases()
 
     def _renew_leases(self):
         """Re-take MODEL leases to prevent expiry: ACQUIRE, then release.
@@ -3071,6 +3409,8 @@ class ModelManager:
         problem here — for a share lease that was survivable, as argued. The
         problem was what a refusal left behind.
         """
+        if self.durable_inference:
+            raise RuntimeError('Legacy lease swaps cannot run under durable admission')
         for name, mm in list(self.models.items()):
             if not mm.lease_id:
                 continue
@@ -3362,6 +3702,9 @@ class ModelManager:
                 )
 
     def start_background_tasks(self):
+        # Sticky even if a task later exits: a previously started manager may
+        # already have mutated residency/lease state and cannot be hot-converted.
+        self._background_started = True
         if self._cooldown_task is None or self._cooldown_task.done():
             self._cooldown_task = asyncio.create_task(self.cooldown_loop())
         if self._health_task is None or self._health_task.done():
@@ -3379,6 +3722,17 @@ class ModelManager:
 
     def shutdown(self) -> list[dict]:
         """Release all leases. Only stop processes we started (managed=True)."""
+        if self.durable_inference:
+            # This check must precede EVERY release, including pool leases and
+            # adopted models. An HTTP caller disappearing is not worker exit.
+            # The launcher must quiesce/reconcile before entering shutdown.
+            if any(mm.in_flight for mm in self.models.values()):
+                raise RuntimeError('Owned work remains; shutdown requires reconciliation')
+            # Adopted residency cannot be left running while its reservation is
+            # released. Require an explicit confirmed unload first rather than
+            # silently changing the legacy promise to keep adopted processes.
+            if any(not mm.managed and mm.lease_id for mm in self.models.values()):
+                raise RuntimeError('Adopted residency remains; confirmed unload required before shutdown')
         results = []
         # Give the pool back first. uvicorn runs lifespan shutdown on SIGTERM
         # and SIGINT, so this is the trap that `scripts/with-pool.sh` installs

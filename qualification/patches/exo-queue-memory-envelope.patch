@@ -1,0 +1,406 @@
+diff --git a/src/exo/api/main.py b/src/exo/api/main.py
+index fd0e173..c904018 100644
+--- a/src/exo/api/main.py
++++ b/src/exo/api/main.py
+@@ -484,8 +484,14 @@ class API:
+-        required_memory = model_card.storage_size
+-        available_memory = self._calculate_total_available_memory()
+-
+-        if required_memory > available_memory:
+-            raise HTTPException(
+-                status_code=400,
+-                detail=f"Insufficient memory to create instance. Required: {required_memory.in_gb:.1f}GB, Available: {available_memory.in_gb:.1f}GB",
+-            )
++        # Automatic placement uses discovery RAM. A fixed leased placement is
++        # admitted by its host queues; pinned_instance_card validates each rank
++        # and its full-context minimum against those exact envelopes. Comparing
++        # the parent checkpoint with free RAM here would create a second,
++        # inconsistent allocator and discard reclaimable/compressible capacity.
++        # Legacy leased profiles without envelopes retain the original guard.
++        if self._leased_profile is None or self._leased_profile.memory_mb is None:
++            required_memory = model_card.storage_size
++            available_memory = self._calculate_total_available_memory()
++            if required_memory > available_memory:
++                raise HTTPException(
++                    status_code=400,
++                    detail=f"Insufficient memory to create instance. Required: {required_memory.in_gb:.1f}GB, Available: {available_memory.in_gb:.1f}GB",
++                )
+diff --git a/src/exo/api/tests/test_leased_memory.py b/src/exo/api/tests/test_leased_memory.py
+new file mode 100644
+index 0000000..49bd492
+--- /dev/null
++++ b/src/exo/api/tests/test_leased_memory.py
+@@ -0,0 +1,224 @@
++"""Real instance and rank metadata; no model, process, sockets or allocation."""
++
++import hashlib
++import json
++from dataclasses import replace
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++import pytest
++from fastapi import HTTPException
++
++from exo.api.main import API
++from exo.api.types.api import CreateInstanceParams
++from exo.shared.models.model_cards import ModelCard, ModelTask
++from exo.shared.types.backends import Backend
++from exo.shared.types.common import Host, ModelId, NodeId
++from exo.shared.types.memory import Memory
++from exo.shared.types.worker.instances import InstanceId, MlxRingInstance
++from exo.shared.types.worker.runners import RunnerId, ShardAssignments
++from exo.shared.types.worker.shards import PipelineShardMetadata
++from exo.utils.leased_instance import pinned_instance_card
++from exo.utils.leased_runtime import LeasedRuntimeProfile
++from exo.utils.staged_rank import read_staged_memory
++
++
++def encoded(value: object) -> bytes:
++    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
++
++
++def digest(value: object) -> str:
++    return hashlib.sha256(encoded(value)).hexdigest()
++
++
++@pytest.fixture
++def leased(tmp_path: Path) -> tuple[LeasedRuntimeProfile, CreateInstanceParams]:
++    config = {
++        "model_type": "qwen3",
++        "num_hidden_layers": 4,
++        "num_key_value_heads": 1,
++        "head_dim": 2,
++        "max_position_embeddings": 65536,
++    }
++    records: list[dict[str, object]] = []
++    sidecars: list[dict[str, object]] = []
++    for number, name in enumerate(("slice", "obelisk")):
++        directory = tmp_path / name
++        directory.mkdir()
++        names = [f"model.layers.{number * 2 + i}.weight" for i in range(2)]
++        names += ["model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"]
++        raw = encoded(
++            {
++                n: {"dtype": "U8", "shape": [4], "data_offsets": [i * 4, (i + 1) * 4]}
++                for i, n in enumerate(names)
++            }
++        )
++        raw += b" " * (-len(raw) % 8)
++        weights = len(raw).to_bytes(8, "little") + raw + b"abcd" * len(names)
++        (directory / "rank.safetensors").write_bytes(weights)
++        (directory / "model-rank.safetensors").symlink_to("rank.safetensors")
++        sidecars = []
++        for filename, value in (
++            ("config.json", encoded(config)),
++            ("tokenizer.json", b"{}"),
++            ("tokenizer_config.json", b"{}"),
++        ):
++            (directory / filename).write_bytes(value)
++            sidecars.append(
++                {
++                    "name": filename,
++                    "bytes": len(value),
++                    "sha256": hashlib.sha256(value).hexdigest(),
++                }
++            )
++        records.append(
++            {
++                "name": name,
++                "layers": [number * 2, number * 2 + 2],
++                "file": f"{name}/rank.safetensors",
++                "required_tensor_names": names,
++                "expected_bytes": len(weights),
++                "sha256": hashlib.sha256(weights).hexdigest(),
++            }
++        )
++    parent = {
++        "model_id": "fixture/qwen3",
++        "revision": "a" * 40,
++        "config": config,
++        "sidecar_files": sidecars,
++    }
++    manifest = {
++        "format": "samcloud-qwen3-rank-staging-v1",
++        "model_id": "fixture/qwen3",
++        "revision": "a" * 40,
++        "parent_manifest_sha256": digest(parent),
++        "parent_index_sha256": "b" * 64,
++        "config_sha256": digest(config),
++        "rank_policy": "assigned_layers_plus_all_nonlayers",
++        "ranks": records,
++        "loader_status": "requires_qualified_shard_aware_adapter",
++    }
++    (tmp_path / "parent-manifest.json").write_bytes(encoded(parent))
++    (tmp_path / "rank-bundle.json").write_bytes(encoded(manifest))
++    (tmp_path / "VERIFIED").write_text(digest(manifest))
++    profile = LeasedRuntimeProfile(
++        "group_" + "a" * 24,
++        1,
++        "slice",
++        digest(manifest),
++        tmp_path,
++        tmp_path,
++        ("192.168.50.11", "192.168.50.13"),
++        tmp_path / "key",
++        53515,
++        53514,
++        53513,
++        53516,
++        memory_mb=(2, 2),
++    )
++    card = ModelCard(
++        model_id=ModelId("fixture/qwen3"),
++        storage_size=Memory.from_bytes(1000),
++        n_layers=4,
++        hidden_size=8,
++        supports_tensor=False,
++        num_key_value_heads=1,
++        tasks=[ModelTask.TextGeneration],
++        family="qwen3",
++        context_length=65536,
++        trust_remote_code=False,
++        backends=[Backend.MlxMetal],
++    )
++
++    def identity(name: str) -> str:
++        return digest(
++            [profile.group_id, profile.generation, profile.manifest_sha256, name]
++        )
++
++    runners = tuple(RunnerId(identity("runner:" + n)) for n in profile.ranks)
++    nodes = (NodeId("1"), NodeId("2"))
++    instance = MlxRingInstance(
++        instance_id=InstanceId(identity("instance")),
++        ephemeral_port=53516,
++        shard_assignments=ShardAssignments(
++            model_id=card.model_id,
++            node_to_runner=dict(zip(nodes, runners, strict=True)),
++            runner_to_shard={
++                runner: PipelineShardMetadata(
++                    model_card=card,
++                    device_rank=i,
++                    world_size=2,
++                    start_layer=i * 2,
++                    end_layer=i * 2 + 2,
++                    n_layers=4,
++                )
++                for i, runner in enumerate(runners)
++            },
++        ),
++        hosts_by_node={
++            n: [Host(ip=ip, port=53516) for ip in profile.peer_ips] for n in nodes
++        },
++    )
++    return profile, CreateInstanceParams(instance=instance)
++
++
++async def test_queue_placement_creates_once_even_when_discovery_free_ram_is_zero(
++    leased: tuple[LeasedRuntimeProfile, CreateInstanceParams],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile, request = leased
++    api = object.__new__(API)
++    sent = AsyncMock()
++    monkeypatch.setattr(api, "_leased_profile", profile, raising=False)
++    monkeypatch.setattr(api, "_send", sent)
++    monkeypatch.setattr(api, "_calculate_total_available_memory", lambda: Memory())
++    response = await api.create_instance(request)
++    assert response.model_card.model_id == ModelId("fixture/qwen3")
++    sent.assert_awaited_once()
++
++
++async def test_legacy_leased_profile_keeps_the_existing_free_memory_guard(
++    leased: tuple[LeasedRuntimeProfile, CreateInstanceParams],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    profile, request = leased
++    api = object.__new__(API)
++    sent = AsyncMock()
++    monkeypatch.setattr(
++        api, "_leased_profile", replace(profile, memory_mb=None), raising=False
++    )
++    monkeypatch.setattr(api, "_send", sent)
++    monkeypatch.setattr(api, "_calculate_total_available_memory", lambda: Memory())
++    with pytest.raises(HTTPException, match="Insufficient memory"):
++        await api.create_instance(request)
++    sent.assert_not_awaited()
++
++
++@pytest.mark.parametrize(
++    "budgets", [(100, 1), (1, 100), (2,), (2, 2, 2), (2, 0), (True, 2)]
++)
++def test_each_rank_needs_its_own_full_cache_not_spare_memory_on_another_host(
++    leased: tuple[LeasedRuntimeProfile, CreateInstanceParams], budgets: tuple[int, ...]
++) -> None:
++    profile, request = leased
++    with pytest.raises(ValueError, match="envelope"):
++        pinned_instance_card(replace(profile, memory_mb=budgets), request.instance)
++
++
++def test_full_window_cache_and_assigned_file_bytes_are_used(
++    leased: tuple[LeasedRuntimeProfile, CreateInstanceParams],
++) -> None:
++    profile, _ = leased
++    environment = {
++        "EXO_RANK_BUNDLE": str(profile.model_bundle),
++        "EXO_RANK_MANIFEST_SHA256": profile.manifest_sha256,
++        "EXO_RANK_NAME": profile.rank,
++    }
++    needed = read_staged_memory("fixture/qwen3", 65536, environment)
++    assert tuple(n.layers for n in needed) == ((0, 2), (2, 4))
++    assert all(n.kv_bytes == 1048576 and n.minimum_bytes > n.kv_bytes for n in needed)
++    with pytest.raises(ValueError, match="native window"):
++        read_staged_memory("fixture/qwen3", 65537, environment)
++    (profile.model_bundle / "parent-manifest.json").write_text("{}")
++    with pytest.raises(ValueError, match="parent"):
++        read_staged_memory("fixture/qwen3", 65536, environment)
+diff --git a/src/exo/utils/leased_instance.py b/src/exo/utils/leased_instance.py
+index 1940043..a90ab77 100644
+--- a/src/exo/utils/leased_instance.py
++++ b/src/exo/utils/leased_instance.py
+@@ -14,0 +15 @@ from exo.utils.leased_runtime import LeasedRuntimeProfile
++from exo.utils.staged_rank import read_staged_memory
+@@ -82,0 +84,25 @@ def pinned_instance_card(
++    if profile.memory_mb is not None:
++        requirements = read_staged_memory(
++            str(card.model_id),
++            card.context_length,
++            {
++                "EXO_RANK_BUNDLE": str(profile.model_bundle),
++                "EXO_RANK_MANIFEST_SHA256": profile.manifest_sha256,
++                "EXO_RANK_NAME": profile.rank,
++            },
++        )
++        if len(requirements) != len(names) or len(profile.memory_mb) != len(names):
++            raise ValueError("queue envelopes differ from the pinned pipeline")
++        for name, (_, shard), needed, memory_mb in zip(
++            names, ordered, requirements, profile.memory_mb, strict=True
++        ):
++            if (
++                needed.name != name
++                or needed.layers != (shard.start_layer, shard.end_layer)
++                or type(memory_mb) is not int
++                or memory_mb <= 0
++                or needed.minimum_bytes > memory_mb * 1024 * 1024
++            ):
++                raise ValueError(
++                    "assigned weights and full cache exceed the exact queue envelope"
++                )
+diff --git a/src/exo/utils/leased_runtime.py b/src/exo/utils/leased_runtime.py
+index 9e4868e..4a6b4f5 100644
+--- a/src/exo/utils/leased_runtime.py
++++ b/src/exo/utils/leased_runtime.py
+@@ -40,0 +41 @@ _FIELDS = (
++_MEMORY_FIELD = "EXO_LEASED_MEMORY_MB"
+@@ -56,0 +58 @@ class LeasedRuntimeProfile:
++    memory_mb: tuple[int, ...] | None = None
+@@ -117 +119,3 @@ def read_leased_runtime_profile(
+-    if not any(name in environment for name in _FIELDS if name != "EXO_HOME"):
++    if not any(
++        name in environment for name in (*_FIELDS, _MEMORY_FIELD) if name != "EXO_HOME"
++    ):
+@@ -156,0 +161,8 @@ def read_leased_runtime_profile(
++    memory_mb = None
++    if _MEMORY_FIELD in environment:
++        values = environment[_MEMORY_FIELD].split(",")
++        if len(values) != len(peers) or any(
++            not re.fullmatch(r"[1-9][0-9]{0,8}", value) for value in values
++        ):
++            raise ValueError("exact positive pipeline-ordered queue envelopes required")
++        memory_mb = tuple(int(value) for value in values)
+@@ -166,0 +179 @@ def read_leased_runtime_profile(
++        memory_mb=memory_mb,
+diff --git a/src/exo/utils/staged_rank.py b/src/exo/utils/staged_rank.py
+index 96bc3ee..2bdea3f 100644
+--- a/src/exo/utils/staged_rank.py
++++ b/src/exo/utils/staged_rank.py
+@@ -87,0 +88,14 @@ class StagedRank:
++@dataclass(frozen=True)
++class RankMemory:
++    name: str
++    layers: tuple[int, int]
++    weights_bytes: int
++    kv_bytes: int
++
++    @property
++    def minimum_bytes(self) -> int:
++        # Excludes allocator, loading/prefill workspace and process overhead.
++        # This is a lower-bound refusal, never a measured residency verdict.
++        return self.weights_bytes + self.kv_bytes
++
++
+@@ -259,0 +274,52 @@ def verify_rank_bytes(rank: StagedRank) -> None:
++def read_staged_memory(
++    model_id: str, context_length: int, environment: Mapping[str, str]
++) -> tuple[RankMemory, ...]:
++    """Pinned assigned weights plus the full F16 GQA cache, without MLX.
++
++    Reuse the real staged-rank checks, including the local loading view. The
++    exact manifest and parent pins bind every rank's layer range and file size.
++    Full weight hashes remain the loader's separate one-time prerequisite.
++    """
++    if read_staged_rank(model_id, environment) is None:
++        raise ValueError("explicit staged-rank profile required for queue envelopes")
++    root = Path(environment["EXO_RANK_BUNDLE"])
++    raw = _read_metadata(root / "rank-bundle.json")
++    if hashlib.sha256(raw).hexdigest() != environment["EXO_RANK_MANIFEST_SHA256"]:
++        raise ValueError("rank manifest changed during capacity validation")
++    manifest = _Bundle.model_validate_json(raw)
++    parent = _OBJECT.validate_json(_read_metadata(root / "parent-manifest.json"))
++    if _object_digest(parent) != manifest.parent_manifest_sha256:
++        raise ValueError("rank parent changed during capacity validation")
++    config = parent.get("config")
++    if not isinstance(config, dict):
++        raise ValueError("pinned Qwen3 cache geometry required")
++
++    def positive(name: str) -> int:
++        value = config.get(name)
++        if type(value) is not int or value <= 0:
++            raise ValueError("positive pinned Qwen3 cache geometry required: " + name)
++        return value
++
++    maximum = positive("max_position_embeddings")
++    heads = positive("num_key_value_heads")
++    if "head_dim" in config:
++        dimension = positive("head_dim")
++    else:
++        hidden, attention = positive("hidden_size"), positive("num_attention_heads")
++        if hidden % attention:
++            raise ValueError("integral pinned Qwen3 head dimension required")
++        dimension = hidden // attention
++    if type(context_length) is not int or not 0 < context_length <= maximum:
++        raise ValueError("served context exceeds the pinned native window")
++    per_layer = context_length * heads * dimension * 2 * 2  # keys+values, F16
++    return tuple(
++        RankMemory(
++            rank.name,
++            rank.layers,
++            rank.expected_bytes,
++            (rank.layers[1] - rank.layers[0]) * per_layer,
++        )
++        for rank in manifest.ranks
++    )
++
++
+diff --git a/src/exo/utils/tests/test_leased_runtime.py b/src/exo/utils/tests/test_leased_runtime.py
+index c048430..f60020f 100644
+--- a/src/exo/utils/tests/test_leased_runtime.py
++++ b/src/exo/utils/tests/test_leased_runtime.py
+@@ -78,0 +79,5 @@ def test_partial_profile_cannot_fall_back_to_ordinary(tmp_path: Path) -> None:
++        ("EXO_LEASED_MEMORY_MB", "49152,27648"),
++        ("EXO_LEASED_MEMORY_MB", "49152,0,124518"),
++        ("EXO_LEASED_MEMORY_MB", "49152,-1,124518"),
++        ("EXO_LEASED_MEMORY_MB", "49152,True,124518"),
++        ("EXO_LEASED_MEMORY_MB", "49152,027648,124518"),
+@@ -123,0 +129,10 @@ def test_node_arguments_and_namespace_are_bound(tmp_path: Path) -> None:
++def test_queue_envelopes_are_explicit_and_pipeline_ordered(tmp_path: Path) -> None:
++    values = environment(tmp_path)
++    values["EXO_LEASED_MEMORY_MB"] = "49152,27648,124518"
++    profile = read_leased_runtime_profile(values)
++    assert profile is not None
++    assert profile.memory_mb == (49152, 27648, 124518)
++    with pytest.raises(ValueError):
++        read_leased_runtime_profile({"EXO_LEASED_MEMORY_MB": "49152,27648,124518"})
++
++
