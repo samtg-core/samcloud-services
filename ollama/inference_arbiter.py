@@ -583,7 +583,7 @@ class Arbiter:
     def _parallel_candidate(self, incumbent, permitted_pair):
         policy = self.stint_policy
         if (not policy or incumbent['model'] not in policy.parallel_models or
-                incumbent['parallel_slot'] or incumbent['yield_requested'] or permitted_pair is None):
+                incumbent['yield_requested'] or permitted_pair is None):
             return None
         # Look only at the actual FIFO head. An incompatible waiter drains the
         # pair before subsequent work can enter the second slot.
@@ -633,9 +633,14 @@ class Arbiter:
                 if grant['state'] == 'uncertain' or grant['release_requested']:
                     return None
                 if grant['active_execution']:
-                    grant = self._parallel_candidate(grant, permitted_pair)
-                    if grant is None:
+                    candidate = self._parallel_candidate(grant, permitted_pair)
+                    if candidate is None:
                         return None
+                    if grant['parallel_slot']:
+                        # The original primary has released. Promote the surviving
+                        # owner only when its compatible FIFO peer can start.
+                        self.db.execute('UPDATE grants SET parallel_slot=0 WHERE id=?', (grant['id'],))
+                    grant = candidate
                     slot = 1
             dependency_selected = False
             if grant is not None and not slot:

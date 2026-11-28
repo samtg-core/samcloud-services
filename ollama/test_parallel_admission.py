@@ -39,6 +39,25 @@ class ParallelAdmission(unittest.TestCase):
                     self.journal.request_release(gid,'seat')
                     self.assertEqual(self.journal.get(gid,'seat')['state'], 'released')
 
+    def test_surviving_owner_can_pair_again_after_primary_releases(self):
+        first, x = self.enqueue('qwen')
+        survivor, y = self.enqueue('inkling')
+        self.dispatch()
+        self.dispatch()
+        self.journal.request_release(first, 'seat')
+        self.journal.finish(x, {'ok': True})
+        peer, z = self.enqueue('qwen', 'next-turn')
+        self.assertIsNone(self.dispatch(None))
+        self.assertEqual(self.journal.get(survivor, 'seat')['parallel_slot'], 1)
+        self.assertEqual(self.dispatch()['execution']['id'], z)
+        self.assertEqual(self.journal.execution(y, 'seat')['state'], 'running')
+        self.assertEqual(self.journal.get(survivor, 'seat')['parallel_slot'], 0)
+        self.assertEqual(self.journal.get(peer, 'seat')['parallel_slot'], 1)
+        for gid, eid in ((survivor, y), (peer, z)):
+            self.journal.request_release(gid, 'seat')
+            self.journal.finish(eid, {'ok': True})
+            self.assertEqual(self.journal.get(gid, 'seat')['state'], 'released')
+
     def test_fifo_head_cannot_be_skipped(self):
         self.enqueue('qwen')
         self.enqueue('large')
