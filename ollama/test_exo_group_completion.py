@@ -245,6 +245,11 @@ class CompletionControls(unittest.IsolatedAsyncioTestCase):
         self.assertIs(provider.local_permission(),True)
         self.assertFalse(provider.owns_group())
         self.assertFalse(self.actor.may_start_ranks())
+        self.actor.events_lost()
+        self.assertIs(provider.local_permission(), True)
+        self.assertFalse(self.actor.may_start_ranks())
+        self.actor.group_snapshot['generation'] += 1
+        self.assertIsNone(provider.local_permission())
 
     async def test_no_create_is_needed_to_close_unsubmitted_demand(self):
         self.end_call()
