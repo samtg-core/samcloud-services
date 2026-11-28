@@ -60,6 +60,7 @@ def fake_aiohttp(response):
 def bare_client():
     value = client.OllamaClient.__new__(client.OllamaClient)
     value.base_url = "http://offline"
+    value.model_backends = {}
     value._with_num_ctx = lambda model, payload:payload
     return value
 

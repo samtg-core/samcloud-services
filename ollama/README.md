@@ -131,6 +131,14 @@ This is transparent to consumers. See ticket #69 for details.
 
 ## Configuration
 
+A provider can assign an exact model tag to a second local Ollama daemon by setting
+`OLLAMA_MODEL_BACKENDS='{"inkling-2-mini:26b-a5b":"http://127.0.0.1:11435"}'`.
+Other tags use `OLLAMA_BASE`. Run each daemon with its own listener and model store.
+Discovery, metadata, loading, generation and unloading follow the assignment.
+The gateway checks every backend when reading residency and reports an inventory error
+if a model is running on a daemon other than its assigned one. Resource admission and
+grant scheduling still use the provider's existing queue configuration.
+
 See [root README](../README.md#configuration) for environment variables and tuning constants.
 
 ## Testing

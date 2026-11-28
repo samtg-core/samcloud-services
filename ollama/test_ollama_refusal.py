@@ -66,6 +66,7 @@ class RefusalClient(unittest.TestCase):
         async def run():
             client = OllamaClient.__new__(OllamaClient)
             client.base_url = 'http://fake'
+            client.model_backends = {}
             fake = SimpleNamespace(ClientSession=Session, ClientTimeout=lambda **kw: None)
             with patch.dict(sys.modules, {'aiohttp': fake}):
                 with self.assertRaises(OllamaRefused) as caught:
@@ -90,6 +91,7 @@ class RefusalClient(unittest.TestCase):
         async def run():
             client = OllamaClient.__new__(OllamaClient)
             client.base_url = 'http://fake'
+            client.model_backends = {}
             fake = SimpleNamespace(ClientSession=Session, ClientTimeout=lambda **kw: None)
             with patch.dict(sys.modules, {'aiohttp': fake}):
                 for owned in (False, True):

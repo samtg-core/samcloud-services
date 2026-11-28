@@ -119,6 +119,7 @@ class OwnedProviderLifetime(unittest.TestCase):
         async def run():
             client = OllamaClient.__new__(OllamaClient)
             client.base_url = 'http://fake'
+            client.model_backends = {}
             fake = SimpleNamespace(ClientSession=Session,
                                    ClientTimeout=lambda **kw: kw)
             with patch.dict(sys.modules, {'aiohttp': fake}), \
