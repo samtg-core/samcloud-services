@@ -111,6 +111,36 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     QueueSettings.from_file(path)
 
+    def test_one_exclusive_model_leaves_other_providers_on_existing_policy(self):
+        from . import config
+        from .manager import ModelManager
+        resource = config.SC_RESOURCE_ID
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'settings.json'
+            document = dict(journal=str(Path(folder)/'queue.sqlite'),
+                models={'inkling': resource, 'qwen': resource, 'exo': resource},
+                reservation_mb={'inkling': 61440}, cold_load_mb={'inkling': 28672},
+                exclusive_models=['inkling'], shared_queue_enabled=True)
+            path.write_text(json.dumps(document))
+            settings = QueueSettings.from_file(path)
+            host = service()
+            host.config = config
+            host.mgr = object.__new__(ModelManager)
+            host.mgr.sc = Mock()
+            runtime = QueueRuntime.install(host, settings, registry_owner='owner')
+            try:
+                initial = host.mgr.initial_reservations
+                self.assertEqual(initial.required_memory('inkling', 21000), 61440)
+                self.assertEqual(initial.load_requirement('inkling', 21000), 28672)
+                self.assertEqual(initial.required_memory('qwen', 18000), 18000)
+                host.mgr.sc.request_lease.assert_not_called()
+            finally:
+                runtime.queue.supervisor.close()
+            document['reservation_mb']['qwen'] = 17000
+            path.write_text(json.dumps(document))
+            with self.assertRaises(ValueError):
+                QueueSettings.from_file(path)
+
     def test_file_loader_refuses_extra_fields_partial_budgets_and_invalid_numbers(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/'settings.json'

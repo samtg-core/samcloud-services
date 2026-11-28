@@ -83,7 +83,8 @@ class QueueSettings:
             if (not isinstance(document['journal'], str) or
                     not isinstance(document['models'], dict) or
                     not isinstance(reservations, dict) or
-                    (reservations and set(document['models']) != set(reservations))):
+                    (reservations and set(reservations) != set(document['models']) and
+                     set(reservations) != set(document.get('exclusive_models', ())))):
                 raise ValueError('exact model/resource map and optional complete reservation map required')
             return cls(Path(document['journal']), document['models'],
                        stint_policy=StintPolicy(**policy),
@@ -348,8 +349,9 @@ class QueueRuntime:
                     getattr(manager,'initial_reservations',None) or
                     getattr(manager,'durable_inference',False)):
                 raise RuntimeError('Queue installation requires a fresh manager before startup adoption')
-            if settings.reservation_mb and set(settings.reservation_mb) != set(settings.models):
-                raise ValueError('explicit reservation overrides must cover every model')
+            if (settings.reservation_mb and set(settings.reservation_mb) != set(settings.models)
+                    and set(settings.reservation_mb) != set(settings.exclusive_models)):
+                raise ValueError('reservation overrides must cover the full catalogue or exactly the exclusive models')
             if set(settings.models.values()) != {service.config.SC_RESOURCE_ID}:
                 raise ValueError('model resources must match this manager local allocation target')
             # The launcher must verify its own registry bearer before binding;
@@ -462,7 +464,7 @@ class QueueRuntime:
             self.manager.sc)
         try:
             binding = ManagerResidency(self.manager,actor,self.settings.models,ttl_seconds=LEASE_TTL,
-                                      require_size=bool(self.settings.reservation_mb))
+                                      require_size=frozenset(self.settings.reservation_mb))
             source = ManagerCapacitySource(self,binding,work_permitted=work_permitted)
         except BaseException:
             actor.close()

@@ -433,7 +433,7 @@ class ManagerCapacitySource:
                 if not self.binding.ready(model):
                     publish('unknown','residency_unconfirmed')
                     continue
-                if not settings.reservation_mb:
+                if model not in settings.reservation_mb:
                     # Existing serving policy reuses a resident model. Keep
                     # measured use/free/reserved bytes separate in telemetry;
                     # do not add the draft's new resident physical-size gate.

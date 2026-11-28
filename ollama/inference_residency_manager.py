@@ -76,11 +76,12 @@ class ManagerResidency:
             snapshot = self.actor.store.snapshot(allocation)
         except Conflict:
             return False
+        check_size = self.require_size if isinstance(self.require_size, bool) else model in self.require_size
         return (self.actor.has_current_receipt(allocation) and
                 snapshot['lease_id'] == mm.lease_id and
                 snapshot['resource'] == self.models[model] and
                 snapshot['model'] == mm.name and
-                (not self.require_size or snapshot['memory_mb'] >= mm.memory_mb))
+                (not check_size or snapshot['memory_mb'] >= mm.memory_mb))
 
     def begin(self, model):
         if self.paused:
