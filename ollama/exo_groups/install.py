@@ -85,10 +85,16 @@ class GroupProvider:
         saved = self._saved()
         if saved is None or not saved['create_started'] and saved['group_id'] is None:
             return True
+        group = self.actor.group_snapshot
+        # A terminal plane group cannot acquire again. The physical queue still
+        # checks current lease ownership and capacity before any local load.
+        if (isinstance(group, dict) and group.get('id') == saved['group_id']
+                and saved['group_id'] is not None and group.get('generation') == saved['generation']
+                and group.get('phase') in ('released', 'cancelled')):
+            return True
         if (self.actor.ownership_uncertain or not self.actor._events_ready
                 or self.actor._task is not None and not self.actor._task.done()):
             return None
-        group = self.actor.group_snapshot
         if not isinstance(group, dict):
             return None
         if group.get('phase') in ('released', 'cancelled'):
