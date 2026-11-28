@@ -477,7 +477,7 @@ class InitialReservation(unittest.TestCase):
             list_models=Mock(return_value=[{'name':'qwen'}]), load_model=Mock(),
             list_running=Mock(return_value=[{'name':'qwen', 'size':110*1024*1024,
                                             'context_length':65536}]),
-            num_ctx_for=Mock(return_value=65536))
+            num_ctx_for=Mock(return_value=65536), port_for=Mock(return_value=22434))
         with patch.object(manager_module,'RESOURCE_ID','gpu'), \
              patch.object(manager_module,'SERVICE_ID','service'), \
              patch.object(manager_module,'LEASE_TTL',3600), \
@@ -606,7 +606,7 @@ class InitialReservation(unittest.TestCase):
         manager.ollama = SimpleNamespace(memory_estimate_mb=Mock(return_value=100),
             list_models=Mock(return_value=[{'name':'qwen'}]), load_model=Mock(),
             list_running=Mock(return_value=[{'name':'qwen','size':110*1024*1024,'context_length':65536}]),
-            num_ctx_for=Mock(return_value=65536))
+            num_ctx_for=Mock(return_value=65536), port_for=Mock(return_value=22434))
         return manager
 
     def test_configured_budget_drives_fit_and_reservation_not_only_weight_estimate(self):
@@ -618,6 +618,7 @@ class InitialReservation(unittest.TestCase):
              patch.object(manager_module.capacity,'collect',return_value={'memory_available_mb':1000}), \
              patch.object(manager_module.capacity,'fits',return_value=True) as fits:
             mm = manager.load_ollama_model('qwen')
+        self.assertEqual(mm.port,22434)
         self.assertEqual(mm.memory_mb,110)
         self.assertEqual(mm.lease_id,'exact')
         fits.assert_called_once_with(200,1000)
