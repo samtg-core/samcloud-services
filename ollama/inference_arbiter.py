@@ -66,8 +66,15 @@ class StintPolicy:
     """
     idle_grace_seconds: float | None = None
     fairness_seconds: float | None = None
+    parallel_models: tuple[str, ...] = ()
 
     def __post_init__(self):
+        names = self.parallel_models
+        if not isinstance(names, (tuple, list)) or (names and
+                (len(names) != 2 or any(not isinstance(n, str) or not n.strip() for n in names)
+                 or names[0] == names[1])):
+            raise ValueError('parallel scheduling requires two distinct model names')
+        object.__setattr__(self, 'parallel_models', tuple(names))
         for value in (self.idle_grace_seconds, self.fairness_seconds):
             if value is None:
                 continue
@@ -110,8 +117,6 @@ class Arbiter:
                 updated REAL NOT NULL,
                 UNIQUE(owner,client_key)
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS one_resource_owner
-                ON grants(resource) WHERE state IN ('granted','uncertain');
             CREATE TABLE IF NOT EXISTS inference_grant_bindings (
                 grant_id TEXT PRIMARY KEY REFERENCES grants(id),
                 issuer TEXT NOT NULL, subject_id TEXT NOT NULL, binding TEXT NOT NULL
@@ -189,6 +194,17 @@ class Arbiter:
             ):
                 if name not in columns:
                     self.db.execute(f'ALTER TABLE grants ADD COLUMN {name} {declaration}')
+            if 'parallel_slot' not in columns:
+                self.db.execute("ALTER TABLE grants ADD COLUMN parallel_slot INTEGER NOT NULL DEFAULT 0 "
+                                "CHECK(parallel_slot IN (0,1))")
+            if stint_policy and stint_policy.parallel_models:
+                self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_owner_per_slot ON grants(resource,parallel_slot) "
+                                "WHERE state IN ('granted','uncertain')")
+                self.db.execute('DROP INDEX IF EXISTS one_resource_owner')
+            else:
+                # Refuse an incompatible downgrade while two live owners need reconciliation.
+                self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_resource_owner ON grants(resource) "
+                                "WHERE state IN ('granted','uncertain')")
             self.db.execute('UPDATE grants SET queue_order=seq WHERE queue_order IS NULL')
             self.db.execute("""UPDATE grants SET stint_started=COALESCE(stint_started,updated),
                 idle_since=COALESCE(idle_since,updated)
@@ -564,7 +580,29 @@ class Arbiter:
                     self.db.execute('UPDATE grants SET yield_requested=1 WHERE id=?', (parent['id'],))
             return self.execution(execution_id, owner)
 
-    def dispatch_next(self, resource, *, permitted_model=None):
+    def _parallel_candidate(self, incumbent, permitted_pair):
+        policy = self.stint_policy
+        if (not policy or incumbent['model'] not in policy.parallel_models or
+                incumbent['parallel_slot'] or incumbent['yield_requested'] or permitted_pair is None):
+            return None
+        # Look only at the actual FIFO head. An incompatible waiter drains the
+        # pair before subsequent work can enter the second slot.
+        resource = incumbent['resource']
+        head = self._ready_grant(resource)
+        if (head is None or head['model'] == incumbent['model'] or
+                head['model'] not in policy.parallel_models or head['release_requested']):
+            return None
+        rows = self.db.execute("""SELECT e.request FROM executions e WHERE
+            (e.id=? OR (e.grant_id=? AND e.state='queued')) AND NOT EXISTS
+            (SELECT 1 FROM dependency_continuations h WHERE h.execution_id=e.id AND h.phase!='closed')""",
+            (incumbent['active_execution'], head['id'])).fetchall()
+        if len(rows) != 2 or any(json.loads(row['request']).get('operation') != 'chat' for row in rows):
+            return None
+        if permitted_pair(resource, incumbent['model'], head['model']) is not True:
+            return None
+        return head
+
+    def dispatch_next(self, resource, *, permitted_model=None, permitted_pair=None):
         """Supervisor only: atomically own one persisted call before dispatch.
 
         Capacity/permission must be checked first. Work-session affinity survives
@@ -577,19 +615,36 @@ class Arbiter:
                 return None
             now = time.time()
             self._restore_ended_dependencies(resource, now)
-            grant = self.db.execute("SELECT * FROM grants WHERE resource=? "
-                                    "AND state IN ('granted','uncertain')", (resource,)).fetchone()
-            if grant is not None and (grant['state'] == 'uncertain' or
-                                      grant['active_execution'] or grant['release_requested']):
-                return None
-            dependency_selected = False
+            owners = self.db.execute("SELECT * FROM grants WHERE resource=? "
+                                     "AND state IN ('granted','uncertain') ORDER BY parallel_slot",
+                                     (resource,)).fetchall()
+            if len(owners) > 1:
+                secondary = owners[1]
+                if (secondary['state'] == 'granted' and not secondary['active_execution']
+                        and not secondary['release_requested']):
+                    # A fenced recovery may already have settled the second call.
+                    self._handoff(secondary, 'parallel_call_ended', now)
+                    owners = owners[:1]
+                else:
+                    return None
+            grant = owners[0] if owners else None
+            slot = 0
             if grant is not None:
+                if grant['state'] == 'uncertain' or grant['release_requested']:
+                    return None
+                if grant['active_execution']:
+                    grant = self._parallel_candidate(grant, permitted_pair)
+                    if grant is None:
+                        return None
+                    slot = 1
+            dependency_selected = False
+            if grant is not None and not slot:
                 dependent = self._dispatch_dependency(grant, permitted_model, now)
                 if dependent is False:
                     return None
                 if dependent is not None:
                     grant, dependency_selected = dependent, True
-            if grant is not None and not dependency_selected:
+            if grant is not None and not slot and not dependency_selected:
                 reason = 'explicit_yield' if grant['yield_requested'] else None
                 model_permission = (True if permitted_model is None else
                                     permitted_model(resource,grant['model']))
@@ -626,9 +681,9 @@ class Arbiter:
                 return None
             started = (grant['stint_started'] if grant['state'] == 'granted'
                        or self._has_return_credit(grant['id']) else now)
-            self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,
+            self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,parallel_slot=?,
                 stint_started=?,idle_since=NULL WHERE id=?""",
-                            (call['id'], now, started if started is not None else now, grant['id']))
+                            (call['id'], now, slot, started if started is not None else now, grant['id']))
             self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
             # Exactly one resumed call gets the return credit. Subsequent calls
             # retain the existing stint/fairness policy, including explicit yields.
@@ -698,7 +753,7 @@ class Arbiter:
             row = self._owned(grant_id, owner)
             self._close_parent_continuations(grant_id)
             if row['state'] == 'queued':
-                state = 'cancelled'
+                state = 'released' if row['handoff_reason'] == 'parallel_call_ended' else 'cancelled'
             elif row['active_execution']:
                 state = row['state']
             elif row['state'] in ('released', 'cancelled'):
@@ -786,6 +841,9 @@ class Arbiter:
                 idle_since=? WHERE id=?""",
                             ('released' if released else 'granted', now,
                              None if released else now, grant['id']))
+            if grant['parallel_slot'] and not released:
+                # Parallel admission borrows the second slot for this call only.
+                self._handoff(self._owned(grant['id'], grant['owner']), 'parallel_call_ended', now)
             self._return_dependency(execution_id, now)
 
     def defer_capacity(self, execution_id, reason):

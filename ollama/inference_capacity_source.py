@@ -57,6 +57,20 @@ class ManagerCapacitySource:
         if hasattr(runtime,'queue'):
             runtime.queue.supervisor.permitted_model = self.permitted_model
 
+            runtime.queue.supervisor.permitted_pair = self.permitted_pair
+
+    def permitted_pair(self, resource, first, second):
+        if any(self.permitted_model(resource, name) is not True for name in (first, second)):
+            return False
+        observations = [self.observed_residency.get((resource, name)) for name in (first, second)]
+        if any(not row or getattr(row[1], 'backend', None) != 'ollama' or not row[2]
+               for row in observations):
+            return False
+        if observations[0][2] == observations[1][2]:
+            return False
+        client = self.runtime.manager.ollama
+        return client._backend(first) != client._backend(second)
+
     def guard(self,resource):
         """Recheck exact ownership/expiry at dispatch, without network I/O."""
         return any(self.permitted_model(resource,model) is True for model,target in

@@ -171,3 +171,18 @@ throughput and host-health benchmarks are separate.
 Current queue/native deployments may run pinned source ahead of this repository
 main. Record their exact revisions in the deployment configuration; installing
 this harness does not upgrade a serving gateway or prove rail availability.
+
+### Concurrent chat on two resident models
+
+A shared queue can opt in with `"parallel_models": ["model-a", "model-b"]` inside its
+`stint_policy`. Both models must have explicit reservations on the same physical
+resource and use different configured Ollama backends. The second call can start
+while the first runs when both exact leases and resident models pass the existing
+capacity checks. A cold model still gets its usual queued load. Each call has
+its own grant, execution ID and process-lifetime claim.
+
+Only the first queued grant with a saved call can take the second slot. An
+incompatible head waits for the pair to drain. An unknown lease, a service
+handoff, or uncertain compute prevents new parallel admission. The second
+work-session grant yields its scheduling preference when that call ends.
+Recovery quarantines each interrupted execution by its original ID.
