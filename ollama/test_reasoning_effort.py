@@ -129,6 +129,30 @@ class ReasoningWire(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(payload['think'], effort)
                     self.assertEqual(payload['options'], {'num_predict': 96, 'num_ctx': 65536})
 
+    async def test_explicit_temperature_reaches_chat_backend(self):
+        for stream in (False, True):
+            for temp in (0.0, 0.7):
+                payload = await self.send(f'temp-{stream}-{temp}', stream,
+                                          temperature=temp, max_tokens=96)
+                self.assertEqual(payload['options'], {'temperature':temp, 'num_predict':96, 'num_ctx':65536})
+
+    async def test_text_completion_sampling_options_reach_generate(self):
+        backend, posts = recording_backend()
+        try:
+            with patch.object(self.manager, 'ollama', backend):
+                for stream in (False, True):
+                    for fields, expected in (({}, {}), ({'temperature': 0.0}, {'temperature': 0.0}),
+                            ({'max_tokens': 7, 'temperature': 0.7}, {'num_predict': 7, 'temperature': 0.7})):
+                        model = next(iter(self.manager.models.values()))
+                        req = server.CompletionRequest(model=model.name, prompt='hi', stream=stream, **fields)
+                        result = await server._completions_direct(req, resolved=model, queue_owned=True)
+                        if stream:
+                            _ = [row async for row in result.body_iterator]
+                        self.assertEqual(posts[-1][1], '/api/generate')
+                        self.assertEqual(json.loads(posts[-1][2])['options'], {'num_ctx':65536, **expected})
+        finally:
+            backend._http.close()
+
     async def test_harmony_model_gets_the_level_form(self):
         # GPT-OSS reads Think as a level (harmony Reasoning field: low/medium/high),
         # so the string is passed, never coerced to True.
