@@ -76,7 +76,7 @@ class QueueSettings:
             reservations = document.get('reservation_mb', {})
             policy = document.get('stint_policy', {})
             if (not isinstance(policy,dict) or
-                    set(policy)-{'idle_grace_seconds','fairness_seconds'}):
+                    set(policy)-{'idle_grace_seconds','fairness_seconds','parallel_models'}):
                 raise ValueError('explicit service-owned stint policy required')
             if (not isinstance(document['journal'], str) or
                     not isinstance(document['models'], dict) or
@@ -106,6 +106,10 @@ class QueueSettings:
         if type(self.shared_queue_enabled) is not bool:
             raise ValueError('shared_queue_enabled must be a boolean')
         reservations = dict(self.reservation_mb)
+        pair = self.stint_policy.parallel_models
+        if pair and (not self.shared_queue_enabled or not set(pair) <= set(reservations)
+                     or not set(pair) <= set(models) or models[pair[0]] != models[pair[1]]):
+            raise ValueError('parallel models require reservations on the same shared resource')
         if (self.shared_queue_wait_s is not None and
                 (type(self.shared_queue_wait_s) is not int or self.shared_queue_wait_s <= 0)):
             raise ValueError('shared queue requires explicit positive metadata wait')

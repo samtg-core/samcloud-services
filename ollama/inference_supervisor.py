@@ -72,6 +72,7 @@ class Supervisor:
         self.execute = execute
         self.permitted = permitted
         self.permitted_model = None
+        self.permitted_pair = None
         self.on_finished = on_finished
         self.workers = {}
         self.preparations = set()
@@ -119,7 +120,8 @@ class Supervisor:
                 self._demand_failures.remove(resource)
         if not self.permitted(resource):
             return None
-        item = self.journal.dispatch_next(resource,permitted_model=self.permitted_model)
+        item = self.journal.dispatch_next(resource, permitted_model=self.permitted_model,
+                                          permitted_pair=self.permitted_pair)
         if item is None:
             deadline = self.journal.next_handoff_at(resource)
             if deadline is not None and deadline > time.time():
@@ -135,6 +137,9 @@ class Supervisor:
             if self.workers.get(execution_id) is done:
                 self.workers.pop(execution_id, None)
         task.add_done_callback(finished)
+        if (self.permitted_pair and self.journal.stint_policy and self.journal.stint_policy.parallel_models
+                and item['grant']['parallel_slot'] == 0):
+            self.pump(resource)
         return execution_id
 
     def _wake(self, resource):
