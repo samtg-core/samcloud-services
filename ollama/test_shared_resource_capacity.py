@@ -284,6 +284,15 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
     def wait_reason(self, execution):
         return self.runtime.queue.supervisor.journal.execution(execution['id'],'requester')['wait_reason']
 
+    async def test_registry_size_refusal_is_distinct_from_waiting_in_line(self):
+        self.queued_call()
+        refusal = {'status_code': 409, 'detail': {'code': 'exceeds_capacity'}}
+        with patch.object(self.initial.client, 'request_lease', return_value=refusal):
+            await self.source.refresh(self.physical)
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'reservation_exceeds_capacity')
+        self.assertIsNone(self.initial.snapshot('qwen')['lease_id'])
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
+
     async def test_host_misfit_takes_no_lease_and_names_the_wait(self):
         call=self.queued_call()
         self.physical['memory_available_mb']=50  # registry has room, host does not

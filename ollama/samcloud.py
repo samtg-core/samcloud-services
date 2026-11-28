@@ -73,14 +73,11 @@ class SamcloudClient:
 
         `memory_mb=None` omits the field entirely rather than sending a zero,
         and that distinction is load-bearing on a resource that leases no
-        bytes. The registry queues a request when `memory_mb > available`,
-        where `available` is `total - leased` and `total` is read from
-        `vram_mb`/`gpu_memory_mb`/`unified_memory_mb`/`ram_mb` in the
-        resource's specs. An instance-style resource like `exo-pool` carries
-        none of those, so `total` is 0 and *any* positive `memory_mb` is
-        instantly oversubscribed: the request would be queued forever instead
-        of granted, no matter how idle the resource is. Send no byte count and
-        the queue branch is never entered.
+        bytes.
+        A request beyond the declared total receives 409 exceeds_capacity. A
+        request within that total can queue while other leases occupy it.
+        An instance-style resource such as exo-pool declares no byte capacity,
+        so its caller omits memory_mb and requests ownership of the resource.
 
         `exclusive=True` asks for the resource itself rather than a slice of
         its memory. Passing `service_id` is worth doing even though it is

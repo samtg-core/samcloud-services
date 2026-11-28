@@ -316,6 +316,7 @@ class ManagerCapacitySource:
                                 handoff.begin()
                                 return
                             from .inference_arbiter import CapacityDeferred
+                            from .inference_reservation import ReservationExceedsCapacity
                             from .manager import LEASE_TTL
                             if saved is None or saved['state'] not in ('queued','reserved'):
                                 # No reservation for bytes this host cannot hold.
@@ -334,6 +335,9 @@ class ManagerCapacitySource:
                                 owned = await source_call(lambda:initial.stage(model,
                                     resource=resource, service_id=initial.service,
                                     memory_mb=required, ttl_seconds=LEASE_TTL))
+                            except ReservationExceedsCapacity:
+                                publish('unavailable', 'reservation_exceeds_capacity')
+                                continue
                             except CapacityDeferred:
                                 # The lease waits in the resource queue. Say
                                 # whose leases hold the memory, from the same

@@ -28,6 +28,13 @@ def needs_settlement(receipt):
             receipt.get('expiry_reason') == 'ttl_expired' and not receipt.get('settled_at'))
 
 
+class ReservationExceedsCapacity(CapacityDeferred):
+    """The registry rejected the size before creating a lease row."""
+
+    def __init__(self):
+        super().__init__('capacity_unavailable')
+
+
 class InitialReservations:
     """Synchronous manager-thread adapter; each call owns its SQLite connection.
 
@@ -284,6 +291,9 @@ class InitialReservations:
             code = receipt.get('status_code')
             if code == 409:
                 db.execute("UPDATE initial_reservations SET state='refused' WHERE model=?", (model,))
+                detail = receipt.get('detail')
+                if isinstance(detail, dict) and detail.get('code') == 'exceeds_capacity':
+                    raise ReservationExceedsCapacity()
                 raise CapacityDeferred('capacity_unavailable')
             lease = receipt.get('lease_id') or receipt.get('id')
             if isinstance(lease, str) and lease.strip():
