@@ -568,6 +568,15 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
 
 
+def _ollama_sampling_kwargs(req: ChatRequest | CompletionRequest) -> dict:
+    options = {}
+    if req.temperature is not None:
+        options['temperature'] = req.temperature
+    if req.max_tokens is not None:
+        options['num_predict'] = req.max_tokens
+    return {'options': options} if options else {}
+
+
 # -- Endpoints --
 
 @app.get("/health")
@@ -2007,7 +2016,7 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
         # content is populated correctly alongside thinking.
         # Convert OpenAI-format messages to Ollama native format.
         ollama_messages = _openai_messages_to_ollama(req.messages)
-        ollama_kwargs = {}
+        ollama_kwargs = _ollama_sampling_kwargs(req)
         if req.tools:
             ollama_kwargs["tools"] = req.tools
         # think:false — this is the documented #69 decision but was never wired
@@ -2024,13 +2033,6 @@ async def _chat_completions_direct(req: ChatRequest, http_request=None, resolved
         if problem:
             raise HTTPException(status_code=400, detail=problem)
         ollama_kwargs["think"] = ollama_think(req.reasoning_effort)
-        # Bound generation length: Ollama takes this under options.num_predict,
-        # not the OpenAI-style top-level max_tokens. Without this an unbounded
-        # generation can occupy the single inference slot for minutes and starve
-        # every other route (ticket #97).
-        if req.max_tokens is not None:
-            ollama_kwargs["options"] = {"num_predict": req.max_tokens}
-
         # Count the prompt, so the first-token deadline can scale to it (#904).
         # NOT a limit — nothing is refused here, unlike the pool's #837 gate.
         # The only consumer is the deadline, and an unknown count falls back to
@@ -2729,10 +2731,11 @@ async def _completions_direct(req: CompletionRequest, resolved=None, queue_owned
         })
 
     if mm.backend == Backend.OLLAMA:
+        sampling = _ollama_sampling_kwargs(req)
         if req.stream:
             def stream():
                 try:
-                    for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned):
+                    for chunk in mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned, **sampling):
                         yield json.dumps(chunk) + "\n"
                 except OllamaBackendError as e:
                     if queue_owned:
@@ -2754,7 +2757,7 @@ async def _completions_direct(req: CompletionRequest, resolved=None, queue_owned
             # alone. Same bug, same fix, one route later.
             chunks = await _run_claimed(
                 mm.name,
-                lambda: list(mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned)))
+                lambda: list(mgr.ollama.generate(mm.name, req.prompt, service_owned=queue_owned, **sampling)))
             if not chunks or not chunks[-1].get('done'):
                 raise RuntimeError("Ollama completion ended without a terminal done frame")
             return chunks[-1] if chunks else {}
