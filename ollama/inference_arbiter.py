@@ -580,7 +580,7 @@ class Arbiter:
                     self.db.execute('UPDATE grants SET yield_requested=1 WHERE id=?', (parent['id'],))
             return self.execution(execution_id, owner)
 
-    def _parallel_candidate(self, incumbent, permitted_pair):
+    def _parallel_candidate(self, incumbent, permitted_pair, *, continuation=None):
         policy = self.stint_policy
         if (not policy or incumbent['model'] not in policy.parallel_models or
                 incumbent['yield_requested'] or permitted_pair is None):
@@ -589,6 +589,14 @@ class Arbiter:
         # pair before subsequent work can enter the second slot.
         resource = incumbent['resource']
         head = self._ready_grant(resource)
+        if continuation is not None:
+            if (head is not None or continuation['active_execution'] or continuation['release_requested']
+                    or continuation['yield_requested'] or continuation['state'] != 'granted'):
+                return None
+            if self.db.execute("SELECT 1 FROM dependency_continuations WHERE parent_grant_id=? "
+                               "AND phase!='closed'", (continuation['id'],)).fetchone():
+                return None
+            head = continuation
         if (head is None or head['model'] == incumbent['model'] or
                 head['model'] not in policy.parallel_models or head['release_requested']):
             return None
@@ -626,7 +634,14 @@ class Arbiter:
                     self._handoff(secondary, 'parallel_call_ended', now)
                     owners = owners[:1]
                 else:
-                    return None
+                    if (secondary['state'] != 'granted' or secondary['release_requested']
+                            or not secondary['active_execution']):
+                        return None
+                    primary = self._parallel_candidate(secondary, permitted_pair, continuation=owners[0])
+                    if primary is None or (permitted_model is not None and
+                            permitted_model(resource, primary['model']) is not True):
+                        return None
+                    return self._start_queued_call(primary, 0, now)
             grant = owners[0] if owners else None
             slot = 0
             if grant is not None:
@@ -680,22 +695,25 @@ class Arbiter:
                 grant = self._ready_grant(resource,permitted_model=permitted_model)
             if grant is None:
                 return None
-            call = self.db.execute("SELECT * FROM executions WHERE grant_id=? AND state='queued'",
-                                   (grant['id'],)).fetchone()
-            if call is None:
-                return None
-            started = (grant['stint_started'] if grant['state'] == 'granted'
-                       or self._has_return_credit(grant['id']) else now)
-            self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,parallel_slot=?,
-                stint_started=?,idle_since=NULL WHERE id=?""",
-                            (call['id'], now, slot, started if started is not None else now, grant['id']))
-            self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
-            # Exactly one resumed call gets the return credit. Subsequent calls
-            # retain the existing stint/fairness policy, including explicit yields.
-            self.db.execute("UPDATE dependency_continuations SET phase='closed' "
-                            "WHERE parent_grant_id=? AND phase='returned'", (grant['id'],))
-            return {'grant': dict(self._owned(grant['id'], grant['owner'])),
-                    'execution': self.execution(call['id'], grant['owner'])}
+            return self._start_queued_call(grant, slot, now)
+
+    def _start_queued_call(self, grant, slot, now):
+        call = self.db.execute("SELECT * FROM executions WHERE grant_id=? AND state='queued'",
+                               (grant['id'],)).fetchone()
+        if call is None:
+            return None
+        started = (grant['stint_started'] if grant['state'] == 'granted'
+                   or self._has_return_credit(grant['id']) else now)
+        self.db.execute("""UPDATE grants SET state='granted',active_execution=?,updated=?,parallel_slot=?,
+            stint_started=?,idle_since=NULL WHERE id=?""",
+                        (call['id'], now, slot, started if started is not None else now, grant['id']))
+        self.db.execute("UPDATE executions SET state='running',wait_reason=NULL,updated=? WHERE id=?", (now, call['id']))
+        # Exactly one resumed call gets the return credit. Subsequent calls
+        # retain the existing stint/fairness policy, including explicit yields.
+        self.db.execute("UPDATE dependency_continuations SET phase='closed' "
+                        "WHERE parent_grant_id=? AND phase='returned'", (grant['id'],))
+        return {'grant': dict(self._owned(grant['id'], grant['owner'])),
+                'execution': self.execution(call['id'], grant['owner'])}
 
     def admit_next(self, resource):
         """FIFO admission only after the supervisor establishes capacity/permission.

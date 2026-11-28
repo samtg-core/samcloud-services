@@ -58,6 +58,34 @@ class ParallelAdmission(unittest.TestCase):
             self.journal.finish(eid, {'ok': True})
             self.assertEqual(self.journal.get(gid, 'seat')['state'], 'released')
 
+    def test_primary_followup_rechecks_permission_and_preserves_fifo(self):
+        for waiting in (False, True):
+            with self.subTest(waiting=waiting):
+                primary, x = self.enqueue('qwen', f'q-{waiting}')
+                peer, y = self.enqueue('inkling', f'i-{waiting}')
+                self.dispatch()
+                self.dispatch()
+                self.journal.finish(x, {'ok': True})
+                z = self.journal.enqueue(primary, 'seat', 'next', {'operation': 'chat'})['id']
+                self.assertIsNone(self.dispatch(None))
+                if waiting:
+                    third, third_call = self.enqueue('large')
+                    self.assertIsNone(self.dispatch())
+                else:
+                    self.assertEqual(self.dispatch()['execution']['id'], z)
+                    self.assertEqual(self.journal.execution(y, 'seat')['state'], 'running')
+                    self.journal.finish(z, {'ok': True})
+                self.journal.finish(y, {'ok': True})
+                if waiting:
+                    self.assertEqual(self.dispatch()['execution']['id'], z)
+                    self.journal.finish(z, {'ok': True})
+                self.journal.request_release(primary, 'seat')
+                self.journal.request_release(peer, 'seat')
+                if waiting:
+                    self.assertEqual(self.dispatch()['execution']['id'], third_call)
+                    self.journal.finish(third_call, {'ok': True})
+                    self.journal.request_release(third, 'seat')
+
     def test_fifo_head_cannot_be_skipped(self):
         self.enqueue('qwen')
         self.enqueue('large')
