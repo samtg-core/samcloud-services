@@ -65,7 +65,7 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         occupying=[r for r in self.rows if r['status']=='active' or
             (r['status']=='expired' and r.get('expiry_reason')=='ttl_expired' and not r.get('settled_at'))]
         return {'id':'gpu','allocation_mode':'shared','expiry_policy':'hold',
-            'available_memory_mb':max(0,100-sum(r['memory_mb'] for r in occupying)),
+            'available_memory_mb':max(0,100-sum(r['memory_mb'] or 0 for r in occupying)),
             'leases':[dict(r) for r in self.rows if r['status'] in ('active','queued')],
             'queue':[{'lease_id':r['id'],'service_id':r.get('service_id'),'agent_id':r.get('agent_id'),
                       'memory_mb':r.get('memory_mb'),'exclusive':bool(r.get('exclusive'))}
@@ -74,10 +74,14 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
 
     def request(self, **body):
         self.requests.append(body)
-        status='active' if self.view('gpu')['available_memory_mb']>=body['memory_mb'] else 'queued'
+        exclusive = body.get('exclusive', False)
+        if exclusive:
+            status = 'queued' if any(r['status'] == 'active' for r in self.rows) else 'active'
+        else:
+            status='active' if self.view('gpu')['available_memory_mb']>=body['memory_mb'] else 'queued'
         row={'id':f'own-{len(self.requests)}','status':status,'agent_id':'owner',
-             'service_id':body['service_id'],'resource_id':body['resource_id'],'memory_mb':body['memory_mb'],
-             'exclusive':0,'max_total_s':body['ttl_seconds'],'expires_at':'2099-01-01T00:00:00Z'}
+             'service_id':body['service_id'],'resource_id':body['resource_id'],'memory_mb':body.get('memory_mb'),
+             'exclusive':int(exclusive),'max_total_s':body['ttl_seconds'],'expires_at':'2099-01-01T00:00:00Z'}
         self.rows.append(row)
         return dict(row,lease_id=row['id'],status_code=200)
 
@@ -107,6 +111,44 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
              'agent_id':'unity-owner','exclusive':0,'memory_mb':100,'expires_at':'2099-01-01T00:00:00Z'}
         self.rows.append(row)
         return row
+
+    async def test_exclusive_admission_uses_physical_fit_and_recognizes_only_its_own_grant(self):
+        import json
+        config = self.root/'queue.json'
+        config.write_text(json.dumps(dict(journal=str(self.root/'queue.sqlite'), models={'qwen':'gpu'},
+            reservation_mb={'qwen': 61440}, exclusive_models=['qwen'], cold_load_mb={'qwen': 28672}, shared_queue_enabled=True)))
+        settings = self.runtime.settings = QueueSettings.from_file(config)
+        self.initial.exclusive_models = frozenset(settings.exclusive_models)
+        self.initial.budgets = dict(settings.reservation_mb)
+        self.initial.cold_load_mb = dict(settings.cold_load_mb)
+        self.manager.ollama.memory_estimate_mb = lambda _: 20000
+        self.runtime.residency_actor.store.exclusive_budgets = dict(settings.reservation_mb)
+        self.demand()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'physical_capacity')
+        self.assertEqual(self.requests, [])
+        self.physical['memory_available_mb'] = 40000
+        peer = self.unity()
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'registry_queued')
+        self.assertEqual(len(self.requests), 1)
+        self.assertTrue(self.requests[0]['exclusive'])
+        self.assertNotIn('memory_mb', self.requests[0])
+        peer['status'] = 'released'
+        self.rows[-1]['status'] = 'active'
+        await self.source.refresh(self.physical)
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'cold_fit')
+        lease = self.initial.reserve('qwen', resource='gpu', service_id='model-service',
+                                     memory_mb=61440, ttl_seconds=LEASE_TTL)
+        self.manager.models['qwen'] = SimpleNamespace(name='qwen', lease_id=lease, memory_mb=40000)
+        self.running = [{'name':'qwen'}]
+        await self.source.refresh(self.physical)
+        self.assertTrue(self.source.permitted_model('gpu','qwen'))
+        peer['status'] = 'active'
+        await self.source.refresh(self.physical)
+        self.assertIsNone(self.source.permitted_model('gpu','qwen'))
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'exclusive_ownership_unconfirmed')
+        self.assertEqual(len(self.requests), 1)
 
     async def test_idle_configuration_does_not_lease_and_pending_demand_does(self):
         await self.source.refresh(self.physical)
@@ -283,6 +325,15 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
 
     def wait_reason(self, execution):
         return self.runtime.queue.supervisor.journal.execution(execution['id'],'requester')['wait_reason']
+
+    async def test_registry_size_refusal_is_distinct_from_waiting_in_line(self):
+        self.queued_call()
+        refusal = {'status_code': 409, 'detail': {'code': 'exceeds_capacity'}}
+        with patch.object(self.initial.client, 'request_lease', return_value=refusal):
+            await self.source.refresh(self.physical)
+        self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'reservation_exceeds_capacity')
+        self.assertIsNone(self.initial.snapshot('qwen')['lease_id'])
+        self.assertFalse(self.runtime.capacity.permitted('gpu'))
 
     async def test_host_misfit_takes_no_lease_and_names_the_wait(self):
         call=self.queued_call()

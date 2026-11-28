@@ -38,6 +38,8 @@ class QueueSettings:
     source_sha256: str | None = None
     shared_queue_wait_s: int | None = None
     shared_queue_enabled: bool = False
+    exclusive_models: tuple[str, ...] = ()
+    cold_load_mb: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def shared_queue(self):
@@ -69,7 +71,7 @@ class QueueSettings:
                 raise ValueError('queue configuration must be a regular file')
             raw = resolved.read_bytes()
             document = json.loads(raw.decode('utf-8'), object_pairs_hook=unique)
-            fields = {'journal', 'models', 'reservation_mb', 'stint_policy', 'shared_queue_wait_s', 'shared_queue_enabled'}
+            fields = {'journal', 'models', 'reservation_mb', 'stint_policy', 'shared_queue_wait_s', 'shared_queue_enabled', 'exclusive_models', 'cold_load_mb'}
             if (not isinstance(document, dict) or not {'journal','models'} <= set(document)
                     or set(document) - fields):
                 raise ValueError('queue configuration requires journal and models, with optional sizing and scheduling policy')
@@ -81,14 +83,17 @@ class QueueSettings:
             if (not isinstance(document['journal'], str) or
                     not isinstance(document['models'], dict) or
                     not isinstance(reservations, dict) or
-                    (reservations and set(document['models']) != set(reservations))):
+                    (reservations and set(reservations) != set(document['models']) and
+                     set(reservations) != set(document.get('exclusive_models', ())))):
                 raise ValueError('exact model/resource map and optional complete reservation map required')
             return cls(Path(document['journal']), document['models'],
                        stint_policy=StintPolicy(**policy),
                        reservation_mb=reservations, source_path=resolved,
                        source_sha256=hashlib.sha256(raw).hexdigest(),
                        shared_queue_wait_s=document.get('shared_queue_wait_s'),
-                       shared_queue_enabled=document.get('shared_queue_enabled', False))
+                       shared_queue_enabled=document.get('shared_queue_enabled', False),
+                       exclusive_models=document.get('exclusive_models', ()),
+                       cold_load_mb=document.get('cold_load_mb', {}))
         except (OSError, UnicodeError, TypeError, ValueError):
             # Do not quote a malformed file's contents into operational logs.
             raise ValueError('Invalid queue startup configuration') from None
@@ -107,6 +112,19 @@ class QueueSettings:
             raise ValueError('shared_queue_enabled must be a boolean')
         reservations = dict(self.reservation_mb)
         pair = self.stint_policy.parallel_models
+        if not isinstance(self.exclusive_models, (tuple, list)):
+            raise ValueError('exclusive_models must be a list of model names')
+        exclusive = tuple(self.exclusive_models)
+        if (any(not isinstance(name, str) or name not in reservations for name in exclusive)
+                or len(set(exclusive)) != len(exclusive) or set(exclusive).intersection(pair or ())
+                or (exclusive and not self.shared_queue)):
+            raise ValueError('exclusive models require queued, individually budgeted residency')
+        if (not isinstance(self.cold_load_mb, Mapping) or
+                any(m not in exclusive or type(v) is not int or not 0 < v <= reservations[m]
+                    for m, v in self.cold_load_mb.items())):
+            raise ValueError('cold load estimate must fit its exclusive model budget')
+        object.__setattr__(self, 'cold_load_mb', MappingProxyType(dict(self.cold_load_mb)))
+        object.__setattr__(self, 'exclusive_models', exclusive)
         if pair and (not self.shared_queue_enabled or not set(pair) <= set(reservations)
                      or not set(pair) <= set(models) or models[pair[0]] != models[pair[1]]):
             raise ValueError('parallel models require reservations on the same shared resource')
@@ -130,7 +148,7 @@ class QueueSettings:
             raise ValueError('configuration hash requires its source path')
 
 
-def cold_capacity(resource, required_mb, *, physical, registry, work_permitted):
+def cold_capacity(resource, required_mb, *, physical, registry, work_permitted, exclusive=False, owned_lease=None):
     """Evaluate fresh trusted observations BEFORE any resident allocation.
 
     This does not authorize an already-resident model (which needs exact lease
@@ -164,13 +182,19 @@ def cold_capacity(resource, required_mb, *, physical, registry, work_permitted):
             row.get('status') not in ('active', 'queued') or
             row.get('exclusive') not in (0, 1) for row in leases):
         return verdict('unknown', 'registry_leases_unknown')
-    if any(row['status'] == 'active' and row['exclusive'] == 1 for row in leases):
+    active = [row for row in leases if row['status'] == 'active']
+    if exclusive and owned_lease is not None:
+        if len(active) != 1 or active[0].get('id') != owned_lease or active[0]['exclusive'] != 1:
+            return verdict('unknown', 'exclusive_ownership_unconfirmed')
+    elif exclusive and active:
+        return verdict('unavailable', 'registry_capacity')
+    elif any(row['exclusive'] == 1 for row in active):
         return verdict('unavailable', 'exclusive_holder')
     registered = registry.get('available_memory_mb')
     if type(registered) is not int or registered < 0:
         return verdict('unknown', 'registry_capacity_unknown')
     result['registry_available_mb'] = registered
-    if required_mb > registered:
+    if not exclusive and required_mb > registered:
         return verdict('unavailable', 'registry_capacity')
     if not capacity.fits(required_mb, available):
         return verdict('unavailable', 'physical_capacity')
@@ -325,8 +349,9 @@ class QueueRuntime:
                     getattr(manager,'initial_reservations',None) or
                     getattr(manager,'durable_inference',False)):
                 raise RuntimeError('Queue installation requires a fresh manager before startup adoption')
-            if settings.reservation_mb and set(settings.reservation_mb) != set(settings.models):
-                raise ValueError('explicit reservation overrides must cover every model')
+            if (settings.reservation_mb and set(settings.reservation_mb) != set(settings.models)
+                    and set(settings.reservation_mb) != set(settings.exclusive_models)):
+                raise ValueError('reservation overrides must cover the full catalogue or exactly the exclusive models')
             if set(settings.models.values()) != {service.config.SC_RESOURCE_ID}:
                 raise ValueError('model resources must match this manager local allocation target')
             # The launcher must verify its own registry bearer before binding;
@@ -337,7 +362,7 @@ class QueueRuntime:
                 manager.sc, registry_owner=registry_owner,
                 service_id=service.config.SC_SERVICE_ID, models=settings.models,
                 budgets=settings.reservation_mb, wait_s=settings.shared_queue_wait_s,
-                wait=settings.shared_queue)
+                wait=settings.shared_queue, exclusive_models=settings.exclusive_models, cold_load_mb=settings.cold_load_mb)
         capacity = CapacityEvents(set(settings.models.values()))
         queue = GatewayQueue(settings.journal, service, settings.models,
                              capacity.permitted, stint_policy=settings.stint_policy)
@@ -379,7 +404,7 @@ class QueueRuntime:
         left as it was, and ordinary reconciliation still fails closed on it.
         """
         from .inference_arbiter import Conflict
-        from .inference_reservation import needs_settlement
+        from .inference_reservation import matches_claim, needs_settlement
         manager,store = self.manager,self.residency_actor.store
         log = logging.getLogger(__name__)
         async def exact(resource,row):
@@ -391,8 +416,7 @@ class QueueRuntime:
                 raise Conflict('exact allocation unknown')
             receipt = matches[0]
             if (receipt.get('agent_id') != store.owner or receipt.get('service_id') != store.service
-                    or receipt.get('resource_id') != resource or receipt.get('exclusive') != 0
-                    or receipt.get('memory_mb') != row['memory_mb']):
+                    or receipt.get('resource_id') != resource or not matches_claim(row, receipt)):
                 raise Conflict('allocation ownership differs')
             return receipt
         released = []
@@ -435,10 +459,12 @@ class QueueRuntime:
         from .manager import LEASE_TTL
         initial = self.manager.initial_reservations
         actor = ResidencyRollover(ResidencyStore(self.settings.journal.parent/'residency.sqlite',
-            registry_owner=initial.owner,service_id=initial.service),self.manager.sc)
+            registry_owner=initial.owner,service_id=initial.service,
+            exclusive_budgets={m: self.settings.reservation_mb[m] for m in self.settings.exclusive_models}),
+            self.manager.sc)
         try:
             binding = ManagerResidency(self.manager,actor,self.settings.models,ttl_seconds=LEASE_TTL,
-                                      require_size=bool(self.settings.reservation_mb))
+                                      require_size=frozenset(self.settings.reservation_mb))
             source = ManagerCapacitySource(self,binding,work_permitted=work_permitted)
         except BaseException:
             actor.close()

@@ -11,7 +11,7 @@ import subprocess
 
 from .inference_arbiter import Conflict
 from .inference_events import source_call
-from .inference_reservation import needs_settlement
+from .inference_reservation import matches_claim, needs_settlement
 
 
 def cold_vision_absent():
@@ -103,6 +103,21 @@ class ResourceHandoff:
         return next((row for row in view['leases'] if row.get('status') == 'queued' and
                      row.get('service_id') != self.initial.service), None)
 
+    def _allocation(self, rows, model, lease_id):
+        matches = [row for row in rows if isinstance(row, dict) and row.get('id') == lease_id]
+        if len(matches) != 1:
+            raise Conflict('exact physical allocation unknown')
+        saved = self.initial.snapshot(model)
+        if saved and saved['lease_id'] == lease_id:
+            allocation = {key: saved[key] for key in ('model', 'lease_id', 'memory_mb', 'exclusive')}
+        else:
+            # Only shared grants have sizing/rollover successors. Exclusive
+            # ownership always has the original journaled ID and a null size.
+            allocation = dict(model=model, lease_id=lease_id, exclusive=0,
+                              memory_mb=matches[0].get('memory_mb'))
+        self._exact(rows, allocation)
+        return allocation
+
     def _exact(self, rows, allocation):
         matches = [row for row in rows if isinstance(row, dict) and
                    row.get('id') == allocation['lease_id']] if isinstance(rows, list) else []
@@ -111,8 +126,8 @@ class ResourceHandoff:
         row = matches[0]
         if (row.get('agent_id') != self.initial.owner or
                 row.get('service_id') != self.initial.service or
-                row.get('resource_id') != self.resource or row.get('exclusive') != 0 or
-                type(row.get('memory_mb')) is not int or row['memory_mb'] != allocation['memory_mb']):
+                row.get('resource_id') != self.resource or
+                not matches_claim({'exclusive': 0, **allocation}, row)):
             raise Conflict('physical allocation ownership differs')
         return row
 
@@ -162,14 +177,7 @@ class ResourceHandoff:
                 for model, mm in list(manager.models.items()):
                     if self.runtime.settings.models.get(model) != self.resource:
                         raise Conflict('unconfigured residency prevents handoff')
-                    candidates = [row for row in rows if isinstance(row, dict) and
-                                  row.get('id') == mm.lease_id] if isinstance(rows, list) else []
-                    if len(candidates) != 1 or type(candidates[0].get('memory_mb')) is not int:
-                        raise Conflict('resident allocation unknown')
-                    allocation = {'model':model,'lease_id':mm.lease_id,
-                                  'memory_mb':candidates[0]['memory_mb']}
-                    self._exact(rows, allocation)
-                    allocations.append(allocation)
+                    allocations.append(self._allocation(rows, model, mm.lease_id))
                 # An expired owner can outlive manager inventory or a restart.
                 # Recover ONLY exact pointers already in this service's journals,
                 # never a latest identity-wide lease or a similar byte count.
@@ -191,12 +199,7 @@ class ResourceHandoff:
                         if prior is not None and prior['state'] != 'retired':
                             known_ids.add(prior['lease_id'])
                     for lease_id in sorted(known_ids):
-                        found = [row for row in rows if isinstance(row, dict) and row.get('id') == lease_id]
-                        if len(found) != 1 or type(found[0].get('memory_mb')) is not int:
-                            raise Conflict('journaled physical allocation unknown')
-                        allocation = {'model':model,'lease_id':lease_id,'memory_mb':found[0]['memory_mb']}
-                        self._exact(rows, allocation)
-                        allocations.append(allocation)
+                        allocations.append(self._allocation(rows, model, lease_id))
                 # Save exact IDs BEFORE unloading can erase manager inventory.
                 self._save('unloading', contender=foreign['id'] if foreign else None, allocations=allocations)
             for allocation in allocations:

@@ -5,7 +5,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from .inference_residency import ResidencyStore
 from .inference_residency_worker import ResidencyRollover
@@ -63,6 +63,33 @@ class Binding(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(2):
             while not self.client.entered.is_set():
                 await asyncio.sleep(.005)
+
+    async def test_exclusive_renews_original_id_and_preserves_ceiling(self):
+        self.actor.store.exclusive_budgets = {'qwen': 61440}
+        self.client.receipt.update(exclusive=1, memory_mb=None)
+        response = {'lease_id': 'old', 'status': 'active', 'reason': 'at_ceiling',
+                    'expires_at': self.client.receipt['expires_at']}
+        self.client.renew_lease = Mock(return_value=response)
+        result, = await self.binding.renew_models()
+        self.assertEqual(result['renewal_reason'], 'at_ceiling')
+        self.assertEqual(result['memory_mb'], 61440)
+        self.assertEqual(result['expires_at'], response['expires_at'])
+        self.assertTrue(self.binding.ready('qwen'))
+        self.client.renew_lease.assert_called_once_with('old', 3600)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.mm.lease_id, 'old')
+        self.actor.store.retire('qwen', self.client.receipt | {'status': 'released'})
+        self.assertFalse(self.binding.ready('qwen'))
+
+    async def test_exclusive_readback_mismatch_withdraws_permission(self):
+        self.actor.store.exclusive_budgets = {'qwen': 61440}
+        self.client.receipt.update(exclusive=1, memory_mb=None)
+        self.client.renew_lease = Mock(return_value={'lease_id': 'old', 'status': 'active',
+                                                    'expires_at': '2099-01-02T00:00:00+00:00'})
+        with self.assertRaises(Conflict):
+            await self.binding.renew_models()
+        self.assertFalse(self.binding.ready('qwen'))
+        self.assertEqual(self.client.calls, [])
 
     async def test_exact_receipt_updates_real_manager_pointer_without_old_swap(self):
         self.assertFalse(self.binding.ready('qwen'))

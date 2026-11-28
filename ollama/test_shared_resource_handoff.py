@@ -90,6 +90,19 @@ class SharedResourceHandoff(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.capacity.permitted('gpu'))  # a new snapshot is required
         self.client.request_lease.assert_called_once()   # never lease on affinity/startup
 
+    async def test_exclusive_model_yields_original_grant_after_provider_absence(self):
+        self.row.update(exclusive=1, memory_mb=None)
+        self.manager.initial_reservations = InitialReservations(self.root/'exclusive.sqlite', self.client,
+            registry_owner='owner', service_id='model-service', models={'qwen':'gpu'},
+            budgets={'qwen':61440}, exclusive_models=['qwen'], wait=True)
+        self.manager.initial_reservations.reserve('qwen', resource='gpu', service_id='model-service',
+                                                 memory_mb=100, ttl_seconds=3600)
+        self.actor = ResourceHandoff(self.runtime)
+        self.assertEqual((await self.actor.begin())['phase'], 'idle')
+        self.assertEqual(self.events, ['draining', 'unload', 'release'])
+        self.assertEqual(self.manager.initial_reservations.snapshot('qwen')['state'], 'retired')
+        self.client.release_lease.assert_called_once_with('owned')
+
     async def test_cold_vision_recovery_preserves_queued_work_and_checks_absence(self):
         from .manager import VLM_MODELS
         vision = next(iter(VLM_MODELS.values()))['default']
