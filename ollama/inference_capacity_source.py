@@ -288,6 +288,8 @@ class ManagerCapacitySource:
                     # queue does not require a fixed whole-machine reservation.
                     from .manager import match_whisper_model
                     required = settings.reservation_mb.get(model)
+                    if model in settings.cold_load_mb:
+                        required = None  # Include current provider weight estimate in the cold fit.
                     whisper = match_whisper_model(model)
                     if whisper is not None:
                         # The loader uses this same catalogue size. An explicit
@@ -309,7 +311,7 @@ class ManagerCapacitySource:
                     owned = None
                     if handoff is not None:
                         initial = manager.initial_reservations
-                        required = initial.required_memory(model, required)
+                        required = initial.load_requirement(model, required)
                         pending = self.runtime.queue.supervisor.journal.pending_models(resource)
                         saved = initial.snapshot(model)
                         journal = self.runtime.queue.supervisor.journal

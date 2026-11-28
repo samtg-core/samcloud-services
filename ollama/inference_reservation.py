@@ -52,7 +52,7 @@ class InitialReservations:
     replacement for the gateway's resource admission or working-set fit gate.
     """
     def __init__(self, path, client, *, registry_owner, service_id, models, budgets=None,
-                 wait_s=None, wait=False, clock=time.time, exclusive_models=()):
+                 wait_s=None, wait=False, clock=time.time, exclusive_models=(), cold_load_mb=None):
         self.path, self.client = Path(path), client
         self.owner, self.service = required(registry_owner), required(service_id)
         self.models = {required(model):required(resource) for model, resource in models.items()}
@@ -60,6 +60,10 @@ class InitialReservations:
         self.exclusive_models = frozenset(exclusive_models)
         if self.exclusive_models - self.budgets.keys():
             raise ValueError('exclusive residency requires an explicit physical budget')
+        self.cold_load_mb = dict(cold_load_mb or {})
+        if any(m not in self.exclusive_models or type(v) is not int or not 0 < v <= self.budgets[m]
+               for m, v in self.cold_load_mb.items()):
+            raise ValueError('invalid exclusive cold load estimate')
         if wait_s is not None and (type(wait_s) is not int or wait_s < 0):
             raise ValueError('explicit non-negative registry queue wait required')
         if type(wait) is not bool:
@@ -132,7 +136,13 @@ class InitialReservations:
         """
         if model not in self.models or type(estimated_mb) is not int or estimated_mb <= 0:
             raise ValueError('configured model and positive weight estimate required')
+        if model in self.exclusive_models and estimated_mb > self.budgets[model]:
+            raise ReservationExceedsCapacity()
         return max(estimated_mb, self.budgets.get(model, 0))
+
+    def load_requirement(self, model, estimated_mb):
+        budget = self.required_memory(model, estimated_mb)
+        return max(estimated_mb, self.cold_load_mb.get(model, budget))
 
     def resize(self, model, predecessor, memory_mb, ttl_seconds):
         """Journal the existing acquire-before-release sizing request.

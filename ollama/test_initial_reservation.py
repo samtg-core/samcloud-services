@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .inference_arbiter import CapacityDeferred, Conflict
-from .inference_reservation import InitialReservations
+from .inference_reservation import InitialReservations, ReservationExceedsCapacity
 from .manager import ModelManager
 from . import manager as manager_module
 
@@ -50,6 +50,16 @@ class InitialReservation(unittest.TestCase):
         self.assertEqual(saved['lease_id'], 'exact')
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertTrue(saved['intent'])
+
+    def test_cold_fit_preserves_exclusive_budget_and_larger_weight_estimate(self):
+        store = self.open(budgets={'qwen': 61440}, exclusive_models=['qwen'],
+                          cold_load_mb={'qwen': 28672})
+        self.assertEqual(store.load_requirement('qwen', 21000), 28672)
+        self.assertEqual(store.load_requirement('qwen', 30000), 30000)
+        self.assertEqual(store.required_memory('qwen', 28672), 61440)
+        with self.assertRaises(ReservationExceedsCapacity):
+            store.load_requirement('qwen', 61441)
+        self.client.request_lease.assert_not_called()
 
     def test_exclusive_wait_survives_restart_and_releases_the_promoted_row(self):
         opts = dict(budgets={'qwen': 61440}, exclusive_models=['qwen'], wait=True)

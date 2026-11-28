@@ -116,16 +116,18 @@ class SharedResourceCapacity(unittest.IsolatedAsyncioTestCase):
         import json
         config = self.root/'queue.json'
         config.write_text(json.dumps(dict(journal=str(self.root/'queue.sqlite'), models={'qwen':'gpu'},
-            reservation_mb={'qwen': 61440}, exclusive_models=['qwen'], shared_queue_enabled=True)))
+            reservation_mb={'qwen': 61440}, exclusive_models=['qwen'], cold_load_mb={'qwen': 28672}, shared_queue_enabled=True)))
         settings = self.runtime.settings = QueueSettings.from_file(config)
         self.initial.exclusive_models = frozenset(settings.exclusive_models)
         self.initial.budgets = dict(settings.reservation_mb)
+        self.initial.cold_load_mb = dict(settings.cold_load_mb)
+        self.manager.ollama.memory_estimate_mb = lambda _: 20000
         self.runtime.residency_actor.store.exclusive_budgets = dict(settings.reservation_mb)
         self.demand()
         await self.source.refresh(self.physical)
         self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'physical_capacity')
         self.assertEqual(self.requests, [])
-        self.physical['memory_available_mb'] = 80000
+        self.physical['memory_available_mb'] = 40000
         peer = self.unity()
         await self.source.refresh(self.physical)
         self.assertEqual(self.source.last_model['gpu','qwen']['reason'], 'registry_queued')

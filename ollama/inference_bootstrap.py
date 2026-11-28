@@ -39,6 +39,7 @@ class QueueSettings:
     shared_queue_wait_s: int | None = None
     shared_queue_enabled: bool = False
     exclusive_models: tuple[str, ...] = ()
+    cold_load_mb: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def shared_queue(self):
@@ -70,7 +71,7 @@ class QueueSettings:
                 raise ValueError('queue configuration must be a regular file')
             raw = resolved.read_bytes()
             document = json.loads(raw.decode('utf-8'), object_pairs_hook=unique)
-            fields = {'journal', 'models', 'reservation_mb', 'stint_policy', 'shared_queue_wait_s', 'shared_queue_enabled', 'exclusive_models'}
+            fields = {'journal', 'models', 'reservation_mb', 'stint_policy', 'shared_queue_wait_s', 'shared_queue_enabled', 'exclusive_models', 'cold_load_mb'}
             if (not isinstance(document, dict) or not {'journal','models'} <= set(document)
                     or set(document) - fields):
                 raise ValueError('queue configuration requires journal and models, with optional sizing and scheduling policy')
@@ -90,7 +91,8 @@ class QueueSettings:
                        source_sha256=hashlib.sha256(raw).hexdigest(),
                        shared_queue_wait_s=document.get('shared_queue_wait_s'),
                        shared_queue_enabled=document.get('shared_queue_enabled', False),
-                       exclusive_models=document.get('exclusive_models', ()))
+                       exclusive_models=document.get('exclusive_models', ()),
+                       cold_load_mb=document.get('cold_load_mb', {}))
         except (OSError, UnicodeError, TypeError, ValueError):
             # Do not quote a malformed file's contents into operational logs.
             raise ValueError('Invalid queue startup configuration') from None
@@ -116,6 +118,11 @@ class QueueSettings:
                 or len(set(exclusive)) != len(exclusive) or set(exclusive).intersection(pair or ())
                 or (exclusive and not self.shared_queue)):
             raise ValueError('exclusive models require queued, individually budgeted residency')
+        if (not isinstance(self.cold_load_mb, Mapping) or
+                any(m not in exclusive or type(v) is not int or not 0 < v <= reservations[m]
+                    for m, v in self.cold_load_mb.items())):
+            raise ValueError('cold load estimate must fit its exclusive model budget')
+        object.__setattr__(self, 'cold_load_mb', MappingProxyType(dict(self.cold_load_mb)))
         object.__setattr__(self, 'exclusive_models', exclusive)
         if pair and (not self.shared_queue_enabled or not set(pair) <= set(reservations)
                      or not set(pair) <= set(models) or models[pair[0]] != models[pair[1]]):
@@ -353,7 +360,7 @@ class QueueRuntime:
                 manager.sc, registry_owner=registry_owner,
                 service_id=service.config.SC_SERVICE_ID, models=settings.models,
                 budgets=settings.reservation_mb, wait_s=settings.shared_queue_wait_s,
-                wait=settings.shared_queue, exclusive_models=settings.exclusive_models)
+                wait=settings.shared_queue, exclusive_models=settings.exclusive_models, cold_load_mb=settings.cold_load_mb)
         capacity = CapacityEvents(set(settings.models.values()))
         queue = GatewayQueue(settings.journal, service, settings.models,
                              capacity.permitted, stint_policy=settings.stint_policy)

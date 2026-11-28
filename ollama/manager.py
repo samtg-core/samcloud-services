@@ -1272,7 +1272,7 @@ class ModelManager:
         need_mb = self.ollama.memory_estimate_mb(model_name)
         initial = getattr(self, 'initial_reservations', None)
         if self.durable_inference and initial is not None:
-            need_mb = initial.required_memory(model_name, need_mb)
+            need_mb = initial.load_requirement(model_name, need_mb)
         avail_mb = capacity.collect().get("memory_available_mb", 0)
 
         if not capacity.fits(need_mb, avail_mb):
@@ -1307,7 +1307,7 @@ class ModelManager:
         # have run against a name-guess for a model we had not pulled yet.
         memory_mb = self.ollama.memory_estimate_mb(model_name)
         if self.durable_inference and initial is not None:
-            memory_mb = initial.required_memory(model_name, memory_mb)
+            memory_mb = initial.load_requirement(model_name, memory_mb)
             if memory_mb > need_mb:
                 # A pull may replace an unknown-name estimate. Recheck before
                 # reserving/loading; the configured budget is never a ceiling
